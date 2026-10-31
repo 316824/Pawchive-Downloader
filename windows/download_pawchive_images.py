@@ -352,8 +352,16 @@ class ThemeSwitch(QAbstractButton):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor('#18315c' if self.dark else '#f2c94c')); p.drawRoundedRect(self.rect(),18,18)
         x=self.offset; p.setBrush(QColor('#263f70' if self.dark else '#ffdc70')); p.drawEllipse(int(x),4,28,28)
-        p.setPen(QColor('#e8f1ff' if self.dark else '#fff7d1')); p.setFont(QFont('Segoe UI Symbol',18))
-        p.drawText(int(x),4,28,28,Qt.AlignmentFlag.AlignCenter,'☾' if self.dark else '☀')
+        if self.dark:
+            moon=QPainterPath(); moon.addEllipse(QPointF(x+14,18),7.5,7.5)
+            cut=QPainterPath(); cut.addEllipse(QPointF(x+18,14),7.1,7.1)
+            p.setBrush(QColor('#dce9ff')); p.drawPath(moon.subtracted(cut))
+        else:
+            p.setBrush(QColor('#b67b12')); p.drawEllipse(QPointF(x+14,18),4.5,4.5)
+            p.setPen(QPen(QColor('#b67b12'),1.5))
+            for i in range(8):
+                a=i*math.tau/8
+                p.drawLine(QPointF(x+14+math.cos(a)*7,18+math.sin(a)*7),QPointF(x+14+math.cos(a)*9,18+math.sin(a)*9))
         p.end()
 
 class GlowCheckBox(QCheckBox):
@@ -381,12 +389,21 @@ class GlowCheckBox(QCheckBox):
         super().paintEvent(event)
         opt=QStyleOptionButton(); opt.initFrom(self); indicator=self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator,opt,self)
         center=indicator.center()
+        if self.isChecked():
+            painter=QPainter(self)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(QPen(QColor('#ffffff' if self.property('lightTheme') else '#17223d'),1.9,Qt.PenStyle.SolidLine,Qt.PenCapStyle.RoundCap,Qt.PenJoinStyle.RoundJoin))
+                mark=QPainterPath(); mark.moveTo(indicator.left()+4,center.y())
+                mark.lineTo(indicator.left()+8,center.y()+4); mark.lineTo(indicator.right()-4,indicator.top()+5)
+                painter.drawPath(mark)
+            finally: painter.end()
         if self._glow>0:
             painter=QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             try:
                 radius=max(indicator.width(),indicator.height())*.95
                 grad=QRadialGradient(QPointF(center),radius); grad.setColorAt(0,QColor(75,210,245,int(62*self._glow))); grad.setColorAt(.55,QColor(75,210,245,int(25*self._glow))); grad.setColorAt(1,QColor(75,210,245,0))
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver if self.property('lightTheme') else QPainter.CompositionMode.CompositionMode_Screen)
                 painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(grad); painter.drawEllipse(QPointF(center),radius,radius)
             finally:
                 painter.end()
@@ -397,7 +414,7 @@ class GlowCheckBox(QCheckBox):
                 fade=(1-self._ripple)**2*(1+2*self._ripple); alpha=int(135*fade)
                 edge=QRadialGradient(QPointF(center),max(1,ripple_radius))
                 edge.setColorAt(0,QColor(255,255,255,0)); edge.setColorAt(.65,QColor(120,230,255,int(alpha*.08))); edge.setColorAt(.84,QColor(145,238,255,alpha)); edge.setColorAt(1,QColor(100,210,245,0))
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver if self.property('lightTheme') else QPainter.CompositionMode.CompositionMode_Screen)
                 painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(edge); painter.drawEllipse(QPointF(center),ripple_radius,ripple_radius)
             finally:
                 painter.end()
@@ -405,6 +422,16 @@ class GlowCheckBox(QCheckBox):
 class SoftComboBox(QComboBox):
     def __init__(self,*args):
         super().__init__(*args); self.popup_animation=None
+    def paintEvent(self,event):
+        super().paintEvent(event)
+        p=QPainter(self)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(getattr(self,'arrow_color','#99a6bb')))
+            arrow=QPainterPath(); x=self.width()-17; y=self.height()/2
+            arrow.moveTo(x-4,y-2); arrow.lineTo(x+4,y-2); arrow.lineTo(x,y+3); arrow.closeSubpath()
+            p.drawPath(arrow)
+        finally: p.end()
     def showPopup(self):
         if self.view().window().isVisible(): return
         super().showPopup(); popup=self.view().window()
@@ -418,7 +445,7 @@ class RainbowProgress(QWidget):
     def setIndeterminate(self): self.indeterminate=True; self.phase=(self.phase+17)%100; self.update()
     def paintEvent(self,e):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing); r=self.rect().adjusted(1,5,-1,-5)
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor('#202735')); p.drawRoundedRect(r,7,7)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(getattr(self,'track','#202735'))); p.drawRoundedRect(r,7,7)
         if self.indeterminate:
             colors=getattr(self,'colors',[QColor('#ff5c74'),QColor('#ffb547'),QColor('#ffe45c'),QColor('#58d68d'),QColor('#45c8e8'),QColor('#6686ff'),QColor('#bd70ef')])
             span=max(36,r.width()*.22); travel=max(1,r.width()-span-8); start=r.left()+4+travel*self.phase/100
@@ -427,11 +454,11 @@ class RainbowProgress(QWidget):
             p.setBrush(grad); p.drawRoundedRect(start,r.top()+2,span,r.height()-4,6,6)
         elif self.value:
             span=(r.width()-8)*self.value/100; colors=getattr(self,'colors',[QColor('#ff5c74'),QColor('#ffb547'),QColor('#ffe45c'),QColor('#58d68d'),QColor('#45c8e8'),QColor('#6686ff'),QColor('#bd70ef')])
-            grad=QLinearGradient(r.left()+4,0,r.left()+4+max(1,span),0)
+            grad=QLinearGradient(r.left()+4,0,r.right()-4,0)
             for i,c in enumerate(colors): grad.setColorAt(i/(len(colors)-1),c)
             p.setBrush(grad); p.drawRoundedRect(r.left()+4,r.top()+2,max(0,span),r.height()-4,6,6)
             # A spaced helical ribbon motif, with the number of loops growing with progress.
-            p.setPen(QPen(QColor(255,255,255,105),1.1)); loops=max(1,int(self.value/18))
+            p.setPen(QPen(QColor(255,255,255,32),.8)); loops=max(1,int(self.value/18))
             for i in range(loops):
                 x=r.left()+10+i*max(12,(span-12)/max(1,loops))
                 if x<r.left()+span: p.drawArc(int(x-4),r.top()+3,8,r.height()-6,0,2880)
@@ -569,7 +596,10 @@ class ScanAnimation(QDialog):
         for i,color in enumerate(palette):
             angle=math.radians(self.phase+i*360/len(palette)); x=110+53*math.cos(angle); y=60+47*math.sin(angle); radius=5 if i%2 else 7
             painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor(color)); painter.drawEllipse(QPointF(x,y),radius,radius)
-        painter.setPen(QColor('#eaf3ff')); painter.setFont(QFont('Segoe UI Symbol',23)); painter.drawText(80,44,60,42,Qt.AlignmentFlag.AlignCenter,'✦'); painter.end(); self.art.setPixmap(pix)
+        painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor('#a7bcff' if getattr(self.parent(),'_dark',True) else '#536fd1'))
+        star=QPainterPath(); star.moveTo(110,43); star.quadTo(113,57,127,60); star.quadTo(113,63,110,77)
+        star.quadTo(107,63,93,60); star.quadTo(107,57,110,43); painter.drawPath(star)
+        painter.end(); self.art.setPixmap(pix)
     def closeEvent(self,event):
         if self.scanner and self.scanner.isRunning() and not self._allow_close:
             self.finish_scan()
@@ -634,32 +664,38 @@ class ProfileScanWorker(QThread):
             session.close()
 
 class App(QWidget):
-    def __init__(self):
-        super().__init__(); self.setObjectName('appRoot'); self.lang='简体中文'; self.particles=[]; self.setMouseTracking(True); self.setMinimumSize(900,820); self.resize(1180,941); self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
-        icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'; self.setWindowIcon(QIcon(str(icon_path))) if icon_path.exists() else None; self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_')); self.busy=False; self._close_when_worker_stops=False; self.settings=QSettings('PawchiveTools','PawchiveDownloader')
-        root=QVBoxLayout(self); root.setContentsMargins(56,30,56,30); root.setSpacing(18)
-        top=QHBoxLayout(); self.heading=QLabel(); self.heading.setStyleSheet('font-size:23px;font-weight:700'); top.addWidget(self.heading,1); self.theme=ThemeSwitch(self.apply_theme); top.addWidget(self.theme); self.clear_cache=QPushButton('🧹'); self.clear_cache.setToolTip('清理临时缓存'); self.clear_cache.setFixedSize(42,42); self.clear_cache.setCursor(Qt.CursorShape.PointingHandCursor); self.clear_cache.setStyleSheet('QPushButton{background:transparent;border:1px solid #60758e;border-radius:21px;font-size:20px} QPushButton:hover{background:#263c53;border-color:#74d7eb} QPushButton:disabled{color:#68717d;border-color:#414b58}'); self.clear_cache.clicked.connect(self.clear_cache_files); top.addWidget(self.clear_cache); self.language=SoftComboBox(); self.language.addItems(TEXT); self.language.currentTextChanged.connect(self.set_lang); top.addWidget(self.language); root.addLayout(top)
-        self.main_card=QFrame(); self.main_card.setObjectName('mainCard'); self.main_card.setMaximumWidth(950)
-        self.card_shadow=QGraphicsDropShadowEffect(self.main_card); self.card_shadow.setBlurRadius(28); self.card_shadow.setOffset(0,7); self.main_card.setGraphicsEffect(self.card_shadow)
-        box=QVBoxLayout(self.main_card); box.setContentsMargins(30,24,30,26); box.setSpacing(16)
-        self.card_accent=QFrame(); self.card_accent.setObjectName('cardAccent'); self.card_accent.setFixedHeight(3); box.addWidget(self.card_accent)
-        self.profile_label=QLabel('请输入完整的 pawchive.pw 画师主页链接'); self.profile_label.setObjectName('sectionLabel'); self.profile_label.setWordWrap(True); box.addWidget(self.profile_label); self.profile=QLineEdit(); self.profile.setMinimumHeight(66); self.profile.setStyleSheet('QLineEdit{background:rgba(25,31,43,150);border:1px solid #65748a;border-radius:12px;padding:14px 18px} QLineEdit:focus{border:2px solid #58c8e8}'); box.addWidget(self.profile); self.profile_hint=QLabel('请输入画师主页链接。'); self.profile_hint.setObjectName('muted'); box.addWidget(self.profile_hint); self.profile.textChanged.connect(self.validate_profile)
-        self.options_panel=QFrame(); self.options_panel.setObjectName('optionsPanel'); self.options_panel.setAutoFillBackground(False); options=QHBoxLayout(self.options_panel); options.setContentsMargins(12,8,12,8); options.setSpacing(16); self.order_label=QLabel('日期顺序'); self.order_label.setObjectName('optionLabel'); self.order_label.setStyleSheet('background:transparent;border:0'); options.addWidget(self.order_label); self.order_combo=SoftComboBox(); self.order_combo.addItems(['从新到旧','从旧到新']); options.addWidget(self.order_combo); self.title_check=GlowCheckBox('按图集标题分别存入文件夹'); self.title_check.setChecked(True); self.title_check.setStyleSheet('background:transparent;border:0'); options.addWidget(self.title_check); self.select_posts_check=GlowCheckBox('先扫描标题并选择下载图集'); self.select_posts_check.setChecked(True); self.select_posts_check.setStyleSheet('background:transparent;border:0'); options.addWidget(self.select_posts_check); options.addStretch(1); box.addWidget(self.options_panel)
-        self.rename_container=QWidget(); self.rename_row=QHBoxLayout(self.rename_container); self.rename_row.setContentsMargins(0,0,0,0); self.rename_check=GlowCheckBox('下载后按日期顺序编号重命名'); self.rename_check.setChecked(True); self.rename_row.addWidget(self.rename_check); self.start_number_label=QLabel(); self.rename_row.addWidget(self.start_number_label); self.start_number=QSpinBox(); self.start_number.setRange(0,999999999); self.start_number.setValue(1); self.rename_row.addWidget(self.start_number); self.rename_row.addStretch(1); box.addWidget(self.rename_container); self.rename_container.setVisible(False)
-        self.title_check.toggled.connect(lambda checked:self.rename_container.setVisible(not checked))
-        self.title_check.toggled.connect(self.update_note)
-        folder_row=QHBoxLayout(); self.folder_label=QLabel('选择图片保存文件夹'); self.folder_label.setObjectName('sectionLabel'); self.folder_label.setWordWrap(True); folder_row.addWidget(self.folder_label,1); self.default_path_check=GlowCheckBox('保存为默认路径'); self.default_path_check.setChecked(False); folder_row.addWidget(self.default_path_check); self.default_path_check.toggled.connect(self.save_default_path_setting); self.browse=GlowButton(); self.browse.clicked.connect(self.pick); folder_row.addWidget(self.browse); box.addLayout(folder_row); self.path=QLineEdit(); self.path.setMinimumHeight(58); self.path.setReadOnly(True); self.path.setStyleSheet('QLineEdit{background:rgba(25,31,43,110);border:1px solid #65748a;border-radius:12px;padding:14px 18px}'); self.path.setText(self.settings.value('default_save_path','',type=str));
-        box.addWidget(self.path); self.start=GlowButton(); self.start.setCursor(Qt.CursorShape.PointingHandCursor); self.start.setMinimumHeight(62); self.start.setStyleSheet('QPushButton{background:#2b9dbd;border:0;border-radius:14px;font-weight:700;color:#08151b} QPushButton:hover{background:#52c3df} QPushButton:disabled{background:#344451;color:#8999a5}'); self.start.clicked.connect(self.download); self.start.setEnabled(False); box.addWidget(self.start); root.addWidget(self.main_card,0,Qt.AlignmentFlag.AlignHCenter)
-        self.note=QLabel('默认：每个图集分别保存到以标题命名的文件夹中。'); self.note.setObjectName('muted'); self.note.setMaximumWidth(950); self.note.setAlignment(Qt.AlignmentFlag.AlignLeft); root.addWidget(self.note,0,Qt.AlignmentFlag.AlignHCenter)
-        self.completed_path=None; self.status_container=QWidget(); self.status_container.setMaximumWidth(950); status_row=QHBoxLayout(self.status_container); status_row.setContentsMargins(0,0,0,0); status_row.setSpacing(10); self.status=QLabel(); self.status.setObjectName('muted'); self.status.setAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter); self.status.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Preferred); status_row.addWidget(self.status,1); self.open_folder_button=QPushButton(); self.open_folder_button.setCursor(Qt.CursorShape.PointingHandCursor); self.open_folder_button.setFixedHeight(36); self.open_folder_button.setVisible(False); self.open_folder_button.clicked.connect(self.open_download_folder); status_row.addWidget(self.open_folder_button,0,Qt.AlignmentFlag.AlignRight); root.addWidget(self.status_container,0,Qt.AlignmentFlag.AlignHCenter); self.progress=RainbowProgress(); self.progress.setMinimumWidth(700); self.progress.setMaximumWidth(950); self.progress.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed); root.addWidget(self.progress,0,Qt.AlignmentFlag.AlignHCenter)
-        log_row=QHBoxLayout(); log_row.setAlignment(Qt.AlignmentFlag.AlignHCenter); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(75); self.log.setMaximumHeight(125); self.log.setMaximumWidth(950); self.log.setStyleSheet('QTextEdit{background:transparent;border:1px solid transparent;border-radius:12px;padding:13px} QScrollBar:vertical{background:#171f2d;width:14px;margin:8px 3px;border-radius:7px} QScrollBar::handle:vertical{background:#52647d;min-height:42px;border-radius:7px;border:2px solid #171f2d} QScrollBar::handle:vertical:hover{background:#65c9e4} QScrollBar::handle:vertical:pressed{background:#9be8f5} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0} QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent}'); self.log.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Preferred); log_row.addWidget(self.log,1); self.copy_log=QPushButton('⧉'); self.copy_log.setToolTip('复制日志'); self.copy_log.setFixedSize(46,46); self.copy_log.setCursor(Qt.CursorShape.PointingHandCursor); self.copy_log.setStyleSheet('QPushButton{background:#263a54;color:#eaf8ff;border:1px solid #5e7896;border-radius:21px;font-size:20px} QPushButton:hover{background:#347f9a;border-color:#8de7f5} QPushButton:pressed{background:#1b596e}'); self.copy_log.clicked.connect(self.copy_log_text); log_row.addWidget(self.copy_log); root.addLayout(log_row,1); self.credit=RainbowCredit('千泽音奈  ·  QQ：3412892533'); root.addWidget(self.credit); self.set_lang(self.lang)
+    def __init__(self,settings=None):
+        super().__init__()
+        from desktop_design import build_interface
+        self.setObjectName('appRoot')
+        self.lang='简体中文'; self.particles=[]; self.setMouseTracking(True)
+        self.setMinimumSize(900,740); self.resize(1180,941)
+        if QApplication.platformName()!='offscreen':
+            available=QApplication.primaryScreen().availableGeometry()
+            self.setMinimumHeight(min(740,max(520,available.height()-56)))
+            self.resize(max(900,min(1180,available.width()-48)),max(self.minimumHeight(),min(941,available.height()-56)))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
+        icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
+        self.setWindowIcon(QIcon(str(icon_path)))
+        self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_'))
+        self.busy=False; self._close_when_worker_stops=False
+        self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
+        self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
+        self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0
+        self._transfer_sample=None; self._speed=0.; self.stop_requested=False
+        self._scan_pages=0; self._scan_posts=0
+        build_interface(self,ThemeSwitch=ThemeSwitch,SoftComboBox=SoftComboBox,
+            GlowButton=GlowButton,GlowCheckBox=GlowCheckBox,RainbowProgress=RainbowProgress,
+            RainbowCredit=RainbowCredit,languages=TEXT,icon_path=icon_path)
+        self.set_lang(self.lang)
         self.apply_theme(True)
         self.fx=QTimer(self); self.fx.timeout.connect(self.tick)
-        self.overlay=ParticleOverlay(self); self.overlay.show(); self.overlay.raise_(); self.credit.fireworkRequested.connect(self.overlay.launch_firework)
+        self.overlay=ParticleOverlay(self); self.overlay.show(); self.overlay.raise_()
+        self.credit.fireworkRequested.connect(self.overlay.launch_firework)
         self._last_particle=QPointF(-1000,-1000)
         QApplication.instance().installEventFilter(self)
     def set_lang(self,l):
-        self.lang=l; t=TEXT[l]; self.setWindowTitle(t['title']); self.heading.setText(t['title']); self.browse.setText(t['browse']); self.start.setText(t['start'])
+        self.lang=l; t=TEXT[l]; self.setWindowTitle(t['title']); self.heading.setText('Pawchive'); self.browse.setText(t['browse']); self.start.setText(t['start'])
         self.open_folder_button.setText(t['open_folder'])
         en=l=='English'; ja=l=='日本語'
         self.profile_label.setText('请输入完整的 pawchive.pw 画师主页链接' if l=='简体中文' else '請輸入完整的 pawchive.pw 畫師首頁連結' if l=='繁體中文' else 'Enter the full Pawchive creator profile URL' if en else 'PawchiveのクリエイターページURLを入力')
@@ -674,15 +710,26 @@ class App(QWidget):
         self.start_number_label.setText('起始编号' if l=='简体中文' else '起始編號' if l=='繁體中文' else 'Start number' if en else '開始番号')
         self.note.setText(AUX_TEXT[l]['note_titles' if self.title_check.isChecked() else 'note_flat'])
         self.clear_cache.setToolTip(AUX_TEXT[l]['cache_tooltip']); self.copy_log.setToolTip(AUX_TEXT[l]['copy_tooltip'])
-        if not self.busy: self.status.setText(t['ready']); self.completed_path=None; self.open_folder_button.hide()
+        if not self.busy and self.workflow_state in {'setup','ready'}: self.status.setText(t['ready'])
         self.validate_profile()
+        from desktop_design import translate_interface
+        translate_interface(self,t,AUX_TEXT[l])
+        self.update_plan(); self.set_workflow(self.workflow_state)
+        if self.workflow_state=='complete':
+            self.file_name.set_full_text(self.ui_text()['settled'])
+            self.status.setText(f"{TEXT[l]['done']} · {self.files_saved}")
+        elif self.workflow_state=='stopped': self.status.setText(AUX_TEXT[l]['cancelled'])
+        elif self.workflow_state=='scan':
+            self.file_name.set_full_text(self.ui_text()['scanned'].format(pages=self._scan_pages,posts=self._scan_posts))
+            self.reflect_scan_state()
+        elif not self.busy and self.files_saved==0: self.file_name.set_full_text(self.ui_text()['waiting'])
         if hasattr(self,'splash') and self.splash.isVisible(): self.splash.set_language(l)
     def update_note(self,checked=None):
         self.note.setText(AUX_TEXT[self.lang]['note_titles' if self.title_check.isChecked() else 'note_flat'])
     def set_busy_state(self,busy):
         self.busy=busy
         if busy: self.completed_path=None; self.open_folder_button.hide()
-        controls=(self.profile,self.order_combo,self.title_check,self.select_posts_check,self.rename_check,self.start_number,self.default_path_check,self.browse)
+        controls=(self.profile,self.order_combo,self.title_check,self.select_posts_check,self.rename_check,self.start_number,self.default_path_check,self.browse,self.paste_button)
         for widget in controls: widget.setEnabled(not busy)
         self.clear_cache.setEnabled(not busy)
         self.validate_profile()
@@ -693,42 +740,99 @@ class App(QWidget):
         self.start.setEnabled(valid and has_folder and not self.busy)
         t=AUX_TEXT[self.lang]
         if valid:
-            self.profile_hint.setText(t['profile_valid'] if has_folder else t['folder_needed']); self.profile_hint.setStyleSheet('color:#55cb91' if has_folder else 'color:#ffbd58')
+            self.profile_hint.setText(t['profile_valid'] if has_folder else t['folder_needed']); self.profile_hint.setStyleSheet(('color:#83d5b1' if self._dark else 'color:#288160') if has_folder else ('color:#d7b77e' if self._dark else 'color:#9b7132'))
         elif value:
-            self.profile_hint.setText(t['profile_invalid']); self.profile_hint.setStyleSheet('color:#ff7b83')
+            self.profile_hint.setText(t['profile_invalid']); self.profile_hint.setStyleSheet('color:#f3a6b1' if self._dark else 'color:#b84860')
         else:
-            self.profile_hint.setText(t['profile_hint']); self.profile_hint.setStyleSheet('color:#aab8ca')
+            self.profile_hint.setText(t['profile_hint']); self.profile_hint.setStyleSheet('color:#99a6bb' if self._dark else 'color:#68758a')
+        if not self.busy and self.workflow_state in {'setup','ready'}:
+            self.set_workflow('ready' if valid and has_folder else 'setup')
     def apply_theme(self,dark):
-        if dark:
-            bg='#10141d'; fg='#e9f1fb'; field='#191f2b'; muted='#aab8ca'; track='#202735'; colors=['#ff5c74','#ffb547','#ffe45c','#58d68d','#45c8e8','#6686ff','#bd70ef']
-        else:
-            bg='#fffaf0'; fg='#29364a'; field='#ffffff'; muted='#68758a'; track='#e7ebf1'; colors=['#e84a5f','#ed8c26','#d6b51e','#269b62','#1689a8','#4d65cf','#9250bc']
-        self.setStyleSheet(f'QWidget{{background:transparent;color:{fg};font-family:Georgia,Palatino Linotype,Microsoft YaHei;font-size:15px}} QWidget#appRoot{{background:{bg}}} QDialog{{background:{bg};color:{fg}}} QLineEdit,QTextEdit{{background:transparent;border:1px solid transparent;border-radius:12px;padding:13px;color:{fg}}} QCheckBox{{background:transparent;spacing:12px;color:{fg}}} QCheckBox:hover{{color:#8feaff}} QCheckBox::indicator{{width:22px;height:22px;border:2px solid #8292a8;border-radius:5px;background:{field}}} QCheckBox::indicator:hover{{border:2px solid #58d8f5;background:rgba(88,200,232,55)}} QCheckBox::indicator:checked{{background:#58c8e8;border:2px solid #58c8e8}} QComboBox{{background:{field};border:1px solid #8795a8;border-radius:10px;padding:9px 30px 9px 12px;color:{fg};min-width:150px;min-height:24px}} QComboBox QAbstractItemView{{background:{field};color:{fg};border:1px solid #8795a8;selection-background-color:#58c8e8;selection-color:#10202a;outline:0}} QComboBox::drop-down{{background:transparent;border:0;width:28px}} QComboBox::down-arrow{{image:none;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid {muted};margin-right:10px}} QLabel#muted{{background:transparent;color:{muted}}} QLabel#sectionLabel{{background:transparent;font-size:16px;font-weight:600;color:{fg}}} QLabel#optionLabel{{background:transparent;font-size:14px;font-weight:600;color:{muted}}}')
-        surface='rgba(255,255,255,6)' if dark else 'rgba(255,255,255,220)'
-        surface_border='rgba(140,170,210,42)' if dark else '#e1e7ef'
-        self.main_card.setStyleSheet(f'QFrame#mainCard{{background:{surface};border:1px solid {surface_border};border-radius:20px}} QFrame#optionsPanel{{background:transparent;border:0;border-radius:0}} QFrame#optionsPanel QLabel,QFrame#optionsPanel QCheckBox{{background:transparent;border:0}} QFrame#cardAccent{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #43cbe8,stop:0.52 #718cff,stop:1 #b576ea);border:0;border-radius:1px}}')
-        self.card_shadow.setColor(QColor(0,0,0,76) if dark else QColor(49,75,112,32))
-        input_bg='rgba(25,31,43,155)' if dark else '#ffffff'
-        input_border='#65748a' if dark else '#c8d2df'
-        self.profile.setStyleSheet(f'QLineEdit{{background:{input_bg};border:1px solid {input_border};border-radius:12px;padding:14px 18px;color:{fg}}} QLineEdit:focus{{border:2px solid #58c8e8}}')
-        path_bg='rgba(25,31,43,110)' if dark else 'rgba(255,255,255,190)'
-        self.path.setStyleSheet(f'QLineEdit{{background:{path_bg};border:1px solid {input_border};border-radius:12px;padding:14px 18px;color:{fg}}}')
-        log_bg='rgba(255,255,255,5)' if dark else 'rgba(255,255,255,190)'
-        log_border='#2c3748' if dark else '#e1e7ef'
-        scroll_track='#171f2d' if dark else '#edf1f6'
-        scroll_handle='#52647d' if dark else '#b3bfce'
-        scroll_hover='#65c9e4' if dark else '#7d98b8'
-        self.log.setStyleSheet(f'QTextEdit{{background:{log_bg};border:1px solid {log_border};border-radius:14px;padding:13px;color:{fg}}} QScrollBar:vertical{{background:{scroll_track};width:14px;margin:8px 3px;border-radius:7px}} QScrollBar::handle:vertical{{background:{scroll_handle};min-height:42px;border-radius:7px;border:2px solid {scroll_track}}} QScrollBar::handle:vertical:hover{{background:{scroll_hover}}} QScrollBar::handle:vertical:pressed{{background:#9be8f5}} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0}} QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{{background:transparent}}')
-        copy_bg='#263a54' if dark else '#e8eef6'
-        copy_fg='#eaf8ff' if dark else '#35475f'
-        copy_border='#5e7896' if dark else '#c5d0df'
-        self.copy_log.setStyleSheet(f'QPushButton{{background:{copy_bg};color:{copy_fg};border:1px solid {copy_border};border-radius:21px;font-size:20px}} QPushButton:hover{{background:#347f9a;color:#eaf8ff;border-color:#8de7f5}} QPushButton:pressed{{background:#1b596e;color:#eaf8ff}}')
-        folder_bg='#203b4b' if dark else '#e7f3f8'
-        folder_fg='#a7e9f5' if dark else '#28647a'
-        folder_border='#3b7389' if dark else '#b7d8e3'
-        self.open_folder_button.setStyleSheet(f'QPushButton{{background:{folder_bg};color:{folder_fg};border:1px solid {folder_border};border-radius:12px;padding:5px 13px;font-weight:600}} QPushButton:hover{{background:#347f9a;color:#ffffff;border-color:#8de7f5}} QPushButton:pressed{{background:#1b596e;color:#ffffff}}')
-        self.progress.colors=[QColor(c) for c in colors]; self.progress.track=QColor(track); self.progress.update()
+        from desktop_design import apply_style
+        self._dark=dark
+        apply_style(self,dark)
+        for check in self.findChildren(GlowCheckBox): check.setProperty('lightTheme',not dark)
+        self.validate_profile()
+        if hasattr(self,'splash'): self.splash.counter.setStyleSheet(f'color:{self.palette_tokens["muted"]}')
         if hasattr(self,'overlay'): self.overlay.update()
+    def ui_text(self):
+        from desktop_design import COPY
+        return COPY[self.lang]
+    def set_workflow(self,state):
+        self.workflow_state=state
+        t=self.ui_text(); self.state_badge.setText(t.get(state,t['setup']))
+        stage={'setup':0,'ready':0,'scan':1,'choose':1,'download':2,'stopping':2,'complete':3}.get(state,self.stage_rail.stage)
+        style='error' if state=='error' else 'done' if state=='complete' else 'idle' if state in {'setup','stopped'} else 'active'
+        self.stage_rail.set_stage(stage,style)
+        p=getattr(self,'palette_tokens',{})
+        color=('#f3a6b1' if self._dark else '#b84860') if state=='error' else ('#83d5b1' if self._dark else '#288160') if state=='complete' else p.get('accent','#9cb3ff')
+        self.state_badge.setStyleSheet(f'color:{color}')
+        self.stop_button.setVisible(state in {'download','stopping'} and self.busy)
+        self.stop_button.setEnabled(state!='stopping')
+    def update_plan(self,*args):
+        if not hasattr(self,'plan'): return
+        t=self.ui_text()
+        self.plan.setText('  ·  '.join([t['newest' if self.order_combo.currentIndex()==0 else 'oldest'],
+            t['folders' if self.title_check.isChecked() else 'flat'],
+            t['selection' if self.select_posts_check.isChecked() else 'all_posts']]))
+    def paste_profile(self):
+        if self.busy: return
+        value=QApplication.clipboard().text().strip()
+        if value:
+            self.profile.setText(value); self.profile.setFocus()
+        else: self.status.setText(self.ui_text()['paste_empty'])
+    def toggle_logs(self):
+        self.logs_hidden=not self.logs_hidden
+        self.logs_card.setVisible(not self.logs_hidden)
+        self.focus_button.setToolTip(self.ui_text()['expand' if self.logs_hidden else 'focus'])
+        self.focus_button.setAccessibleName(self.focus_button.toolTip())
+        self.focus_button.setProperty('selected',self.logs_hidden)
+        self.focus_button.style().unpolish(self.focus_button); self.focus_button.style().polish(self.focus_button)
+    def stop_download(self):
+        if not self.busy or self.workflow_state not in {'download','stopping'}: return
+        self.stop_requested=True
+        if hasattr(self,'worker') and self.worker.isRunning(): self.worker.requestInterruption()
+        self.set_workflow('stopping'); self.status.setText(self.ui_text()['safe_stop'])
+    def on_scan_counts(self,pages,posts):
+        self._scan_pages=pages; self._scan_posts=posts
+        self.album_value.setText(str(posts)); self.file_name.set_full_text(self.ui_text()['scanned'].format(pages=pages,posts=posts))
+    def reflect_scan_state(self):
+        if self.workflow_state!='scan': return
+        splash=getattr(self,'splash',None)
+        if splash and splash.finish_requested:
+            self.status.setText(AUX_TEXT[self.lang]['scan_finishing'])
+        elif splash and splash.paused:
+            self.status.setText(self.ui_text()['paused']); self.state_badge.setText(self.ui_text()['paused'])
+        else:
+            self.status.setText(AUX_TEXT[self.lang]['scan_status']); self.state_badge.setText(self.ui_text()['scan'])
+    def reset_dashboard(self,total=0):
+        self.files_saved=0; self._album_current=0; self._album_total=total
+        self._transfer_sample=None; self._speed=0.; self.stop_requested=False
+        self._scan_pages=0; self._scan_posts=0
+        self.files_value.setText('0'); self.album_value.setText(f'— / {total}' if total else '— / —')
+        self.speed_value.setText('—'); self.percent_label.setText('0'); self.percent_unit.show()
+        self.file_name.set_full_text(self.ui_text()['waiting']); self.progress.setValue(0)
+    def update_transfer(self,name,received,total):
+        match=re.search(r'\((\d+)/(\d+)\)',name)
+        if match:
+            self._album_current,self._album_total=map(int,match.groups())
+            self.album_value.setText(f'{self._album_current} / {self._album_total}')
+        if name.startswith('✓'):
+            self.files_saved+=1; self.files_value.setText(str(self.files_saved)); self.percent_label.setText('100')
+            self.percent_unit.show(); self._transfer_sample=None; self._speed=0.; self.speed_value.setText('—')
+            return
+        current_file=name.rsplit(' / ',1)[-1]
+        self.file_name.set_full_text(current_file)
+        now=time.monotonic(); previous=self._transfer_sample
+        if previous and previous[0]==name and received>=previous[1] and now>previous[2]:
+            rate=(received-previous[1])/(now-previous[2])
+            self._speed=rate if self._speed<=0 else .28*rate+.72*self._speed
+            self.speed_value.setText(f'{self._speed/1048576:.1f} MB/s' if self._speed>=1048576 else f'{self._speed/1024:.0f} KB/s')
+        elif not previous or previous[0]!=name or received<previous[1]:
+            self._speed=0.; self.speed_value.setText('—')
+        self._transfer_sample=(name,received,now)
+        self.percent_label.setText(str(max(0,min(100,int(received*100/total)))) if total else '—')
+        self.percent_unit.setVisible(bool(total))
     def pick(self):
         d=QFileDialog.getExistingDirectory(self,TEXT[self.lang]['choose'],self.path.text() or str(Path.home()))
         if d:
@@ -740,15 +844,15 @@ class App(QWidget):
         if checked and self.path.text(): self.settings.setValue('default_save_path',self.path.text())
         elif not checked: self.settings.remove('default_save_path')
     def copy_log_text(self):
+        if not self.log.toPlainText():
+            self.status.setText(self.ui_text()['copy_empty']); return
         QApplication.clipboard().setText(self.log.toPlainText())
-        self.completed_path=None; self.open_folder_button.hide()
         self.status.setText(AUX_TEXT[self.lang]['log_copied'])
     def clear_cache_files(self):
         if self.busy: return
         try:
             for item in self.cache_dir.iterdir():
                 shutil.rmtree(item) if item.is_dir() else item.unlink(missing_ok=True)
-            self.completed_path=None; self.open_folder_button.hide()
             self.status.setText(AUX_TEXT[self.lang]['cache_cleared'])
         except OSError as exc: self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
     def open_download_folder(self):
@@ -758,40 +862,8 @@ class App(QWidget):
         else:
             self.completed_path=None; self.open_folder_button.hide()
     def choose_titles(self,titles):
-        colors=['#ff5b6e','#ff9f43','#f2d34f','#3dcc83','#32c9d8','#568bff','#bd69ed']; text=AUX_TEXT[self.lang]
-        dialog=QDialog(self); dialog.setWindowTitle(text['choose_title']); dialog.resize(980,760)
-        layout=QVBoxLayout(dialog); label=QLabel(text['choose_summary'].format(count=len(titles))); layout.addWidget(label)
-        tools=QHBoxLayout(); all_btn=QPushButton(text['select_all']); none_btn=QPushButton(text['select_none']); tools.addWidget(all_btn); tools.addWidget(none_btn); tools.addStretch(1); layout.addLayout(tools)
-        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setStyleSheet('QScrollArea{border:0;background:transparent} QScrollBar:vertical{background:#171f2d;width:14px;margin:8px 3px 8px 3px;border-radius:7px} QScrollBar::handle:vertical{background:#52647d;min-height:42px;border-radius:7px;border:2px solid #171f2d} QScrollBar::handle:vertical:hover{background:#65c9e4} QScrollBar::handle:vertical:pressed{background:#9be8f5} QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;background:transparent} QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent}'); body=QWidget(); grid=QGridLayout(body); grid.setSpacing(14); selected=set(range(len(titles))); checks=[]
-        for i,entry in enumerate(titles):
-            card=QFrame(); card.setCursor(Qt.CursorShape.PointingHandCursor); card.setObjectName('coverCard'); card.setStyleSheet('QFrame#coverCard{background:transparent;border:3px solid transparent;border-radius:12px}'); v=QVBoxLayout(card); v.setContentsMargins(6,6,6,6)
-            cover=QLabel(); cover.setFixedSize(190,145); cover.setAlignment(Qt.AlignmentFlag.AlignCenter); cover.setStyleSheet('border:0;background:transparent'); cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
-            if entry['image']:
-                pix=QPixmap(entry['image'])
-                if not pix.isNull(): cover.setPixmap(pix.scaled(190,145,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
-            if not cover.pixmap(): cover.setText(text['cover_missing'])
-            check=GlowCheckBox(); check.setChecked(True); check.setStyleSheet('QCheckBox{background:rgba(15,20,30,90);border-radius:10px;padding:2px} QCheckBox::indicator{width:23px;height:23px;border:2px solid white;border-radius:6px;background:rgba(20,25,35,100)} QCheckBox::indicator:checked{background:#58c8e8;border-color:white}'); checks.append(check)
-            type_label=QLabel(); type_label.setAlignment(Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter); type_label.setStyleSheet('background:rgba(10,12,18,175);border-radius:5px;padding:2px 5px;font-weight:700'); type_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
-            formats=entry.get('formats',[])
-            if formats:
-                chips=' '.join(f'<span style="color:{colors[k%len(colors)]};">{escape(ext.upper())}</span>' for k,ext in enumerate(formats))
-                type_label.setText(chips)
-            else: type_label.setText(f'<span style="color:#b4becb">{text["no_direct"]}</span>')
-            overlay=QGridLayout(); overlay.setContentsMargins(0,0,0,0); overlay.addWidget(cover,0,0,2,2); overlay.addWidget(check,0,0,Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignTop); overlay.addWidget(type_label,1,1,Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignBottom); v.addLayout(overlay)
-            name=QLabel(entry['title']); name.setTextFormat(Qt.TextFormat.PlainText); name.setWordWrap(True); name.setMaximumWidth(190); name.setStyleSheet('border:0;background:transparent'); name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
-            v.addWidget(name); grid.addWidget(card,i//4,i%4)
-            initial=random.choice(colors); card.setStyleSheet(f'QFrame#coverCard{{background:rgba(255,255,255,8);border:3px solid {initial};border-radius:12px}}')
-            check.stateChanged.connect(lambda state,idx=i,widget=card: self._set_card_selection(idx,state,selected,widget,colors))
-            def toggle(event, idx=i, widget=card):
-                checks[idx].setChecked(not checks[idx].isChecked())
-            card.mousePressEvent=toggle
-        all_btn.clicked.connect(lambda: [check.setChecked(True) for check in checks])
-        none_btn.clicked.connect(lambda: [check.setChecked(False) for check in checks])
-        scroll.setWidget(body); layout.addWidget(scroll,1)
-        top_button=QPushButton('↑'); top_button.setToolTip(text['back_top']); top_button.setFixedSize(42,42); top_button.setCursor(Qt.CursorShape.PointingHandCursor); top_button.setStyleSheet('QPushButton{background:#263a54;color:#eaf8ff;border:1px solid #5e7896;border-radius:21px;font-size:22px;font-weight:700} QPushButton:hover{background:#347f9a;border-color:#8de7f5} QPushButton:pressed{background:#1b596e}'); top_button.clicked.connect(lambda:scroll.verticalScrollBar().setValue(0)); layout.addWidget(top_button,0,Qt.AlignmentFlag.AlignRight)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel); buttons.button(QDialogButtonBox.StandardButton.Ok).setText(text['ok']); buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(text['cancel']); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
-        if dialog.exec()!=QDialog.DialogCode.Accepted: return None
-        return {titles[i]['url'] for i in selected}
+        from post_picker import choose_posts
+        return choose_posts(self,titles,GlowCheckBox,AUX_TEXT[self.lang])
     @staticmethod
     def _set_card_selection(index,state,selected,widget,colors):
         if state:
@@ -807,10 +879,11 @@ class App(QWidget):
             self.status.setText(AUX_TEXT[self.lang]['profile_invalid']); return
         selected=None
         if self.select_posts_check.isChecked():
-            self.set_busy_state(True); self.status.setText(AUX_TEXT[self.lang]['scan_status'])
+            self.reset_dashboard(); self.set_busy_state(True); self.set_workflow('scan'); self.status.setText(AUX_TEXT[self.lang]['scan_status'])
             self.splash=ScanAnimation(self); self.splash.set_language(self.lang); self.splash.show()
             self.scanner=ProfileScanWorker(profile,self.cache_dir); self.splash.scanner=self.scanner
-            self.scanner.counts.connect(self.splash.update_counts); self.scanner.result.connect(self.scan_finished); self.scanner.failed.connect(self.scan_failed); self.scanner.start(); return
+            for button in (self.splash.pause_button,self.splash.resume_button,self.splash.finish_button): button.clicked.connect(self.reflect_scan_state)
+            self.scanner.counts.connect(self.on_scan_counts); self.scanner.counts.connect(self.splash.update_counts); self.scanner.result.connect(self.scan_finished); self.scanner.failed.connect(self.scan_failed); self.scanner.start(); return
         self.launch_worker(profile,selected)
     def scan_finished(self,titles):
         if hasattr(self,'scanner') and self.scanner.isRunning(): self.scanner.wait()
@@ -822,23 +895,25 @@ class App(QWidget):
             return
         if not titles:
             self.scan_failed(AUX_TEXT[self.lang]['empty_scan']); return
+        self.set_workflow('choose')
         selected=self.choose_titles(titles)
         if self._close_when_worker_stops:
             self.busy=False
             QTimer.singleShot(0,self.close)
             return
         if selected is None or not selected:
-            self.set_busy_state(False); self.status.setText(TEXT[self.lang]['ready']); return
+            self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready']); return
         self.launch_worker(self.profile.text().strip(),selected)
     def scan_failed(self,message):
         if hasattr(self,'scanner') and self.scanner.isRunning(): self.scanner.wait()
         if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.close()
-        self.set_busy_state(False); self.status.setText(AUX_TEXT[self.lang]['scan_failed']); self.log.append(str(message))
+        self.set_busy_state(False); self.set_workflow('error'); self.status.setText(AUX_TEXT[self.lang]['scan_failed']); self.log.append(str(message))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def launch_worker(self,profile,selected):
-        self.set_busy_state(True); self.progress.setValue(0); self.log.clear(); self.status.setText(TEXT[self.lang]['working']); order='newest' if self.order_combo.currentIndex()==0 else 'oldest'; self.worker=Worker(self.path.text(),profile,order,self.title_check.isChecked(),selected,not self.title_check.isChecked() and self.rename_check.isChecked(),self.start_number.value(),self.lang); self.worker.progress.connect(self.update_progress); self.worker.finished_ok.connect(self.done); self.worker.failed.connect(self.error); self.worker.start()
+        self.reset_dashboard(len(selected) if selected else 0); self.set_busy_state(True); self.set_workflow('download'); self.progress.setValue(0); self.log.clear(); self.status.setText(TEXT[self.lang]['working']); order='newest' if self.order_combo.currentIndex()==0 else 'oldest'; self.worker=Worker(self.path.text(),profile,order,self.title_check.isChecked(),selected,not self.title_check.isChecked() and self.rename_check.isChecked(),self.start_number.value(),self.lang); self.worker.progress.connect(self.update_progress); self.worker.finished_ok.connect(self.done); self.worker.failed.connect(self.error); self.worker.start()
     def update_progress(self,name,i,total):
         failure_prefixes=tuple(text['download_fail_prefix'] for text in AUX_TEXT.values())
+        if not name.startswith(failure_prefixes): self.update_transfer(name,i,total)
         if name.startswith('✓'):
             self.progress.setValue(100); self.log.append(name); return
         if name.startswith(failure_prefixes):
@@ -849,14 +924,20 @@ class App(QWidget):
             self.progress.setIndeterminate()
         match=re.search(r'\((\d+/\d+)\)',name); count=f' {match.group(0)}' if match else ''
         message='file_progress' if total else 'unknown_progress'
-        self.status.setText(AUX_TEXT[self.lang][message].format(count=count,name=name,current=i/1024/1024,total=total/1024/1024))
+        self.status.setToolTip(name)
+        self.status.setText(self.ui_text()['received' if total else 'unknown_size'].format(current=i/1048576,total=total/1048576))
     def done(self,n):
         if hasattr(self,'worker') and self.worker.isRunning(): self.worker.wait()
         self.set_busy_state(False); self.status.setText(f"{TEXT[self.lang]['done']} · {n}"); folder=Path(self.path.text()) if self.path.text().strip() else None; self.completed_path=str(folder) if n>0 and folder and folder.is_dir() else None; self.open_folder_button.setVisible(bool(self.completed_path))
+        self.set_workflow('complete'); self.stop_requested=False; self.files_saved=n; self.files_value.setText(str(n)); self.speed_value.setText('—')
+        self.progress.setValue(100 if n else 0); self.percent_label.setText('100' if n else '0'); self.percent_unit.show()
+        self.file_name.set_full_text(self.ui_text()['settled'])
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def error(self,e):
         if hasattr(self,'worker') and self.worker.isRunning(): self.worker.wait()
         self.set_busy_state(False); self.completed_path=None; self.open_folder_button.hide(); self.status.setText(TEXT[self.lang]['error']); self.log.append(TEXT[self.lang]['empty'] if e=='EMPTY' else AUX_TEXT[self.lang]['no_selected'] if e=='NO_SELECTED_POSTS' else e)
+        self.set_workflow('stopped' if self.stop_requested else 'error'); self.speed_value.setText('—')
+        if self.stop_requested: self.status.setText(AUX_TEXT[self.lang]['cancelled'])
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def closeEvent(self,event):
         if self.busy:
@@ -899,6 +980,7 @@ class App(QWidget):
             self.fx.stop()
     def resizeEvent(self,e):
         super().resizeEvent(e)
+        if hasattr(self,'edition'): self.edition.setVisible(self.width()>=1100)
         if hasattr(self,'overlay'): self.overlay.sync(); self.overlay.raise_()
     def showEvent(self,e):
         super().showEvent(e)

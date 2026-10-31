@@ -20,9 +20,8 @@ def run(window_class, output):
 
     requests.sessions.Session.request = reject_network
     with tempfile.TemporaryDirectory(prefix='pawchive_startup_check_') as directory:
-        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, directory)
-        window = window_class()
+        settings=QSettings(str(Path(directory)/'settings.ini'),QSettings.Format.IniFormat)
+        window = window_class(settings=settings)
         cache = window.cache_dir
 
         def check():
@@ -49,10 +48,29 @@ def run(window_class, output):
                 window.theme.click()
                 app.processEvents()
                 window.grab()
+                titles=[dict(title='Offline study one',url='https://pawchive.pw/fanbox/user/offline-check/post/one',image=None,formats=['.zip']),
+                        dict(title='Offline study two',url='https://pawchive.pw/fanbox/user/offline-check/post/two',image=None,formats=[])]
+                def inspect_picker():
+                    dialog=app.activeModalWidget()
+                    try:
+                        if dialog is None: raise RuntimeError('The cover picker did not open.')
+                        dialog.search.setText('two')
+                        if len(dialog.selected)!=2: raise RuntimeError('Search changed the selected posts.')
+                        dialog.none_button.click()
+                        if dialog.confirm_button.isEnabled(): raise RuntimeError('An empty selection was accepted.')
+                        dialog.all_button.click(); dialog.confirm_button.click()
+                    except Exception as error:
+                        failures.append(str(error))
+                        if dialog is not None: dialog.reject()
+                QTimer.singleShot(80,inspect_picker)
+                chosen=window.choose_titles(titles)
+                if chosen!={entry['url'] for entry in titles}:
+                    raise RuntimeError('The frozen cover picker did not return the selected URLs.')
                 report.update(ok=True, checks=[
                     'QtCore/QtGui/QtWidgets import', 'native GUI startup',
                     'bundled icon', 'input validation', 'language switching',
-                    'theme switching', 'rainbow progress painting'])
+                    'theme switching', 'rainbow progress painting',
+                    'cover picker and local title search'])
             except Exception as error:
                 failures.append(str(error))
             finally:
