@@ -20,6 +20,46 @@ STATUSES = (*ACTIVE_STATUSES, 'completed', 'missed', 'failed', 'cancelled')
 MAX_SCHEDULES = 10
 _PROFILE = re.compile(r'https://pawchive\.pw/(?:fanbox|patreon|subscribestar|discord|boosty)/user/[^/?#\s]+/?')
 
+# Check-in rewards are deliberately data-driven.  The identifiers are kept
+# stable so that the UI can localise names without putting translated strings
+# into the user's database.  ``longest_streak`` is used for streak rewards;
+# once a user earns a badge it therefore remains earned even after a missed
+# day.  Download counters are local-only and are only used for optional
+# collection/achievement unlocks.
+REWARD_LEVELS = (
+    ('apprentice', 0),
+    ('sketcher', 7),
+    ('storyteller', 30),
+    ('master', 100),
+    ('legend', 365),
+)
+REWARD_BADGES = (
+    ('first_spark', 'total', 1),
+    ('seven_day_streak', 'longest_streak', 7),
+    ('thirty_day_streak', 'longest_streak', 30),
+    ('hundred_day_streak', 'longest_streak', 100),
+    ('hundred_returns', 'total', 100),
+)
+REWARD_SKINS = (
+    ('default', 0),
+    ('ocean', 30),
+    ('cyberpunk', 30),
+)
+REWARD_GALLERY = (
+    ('first_page', 'total', 1),
+    ('week_notes', 'longest_streak', 7),
+    ('ocean_archive', 'longest_streak', 30),
+    ('collector_100', 'downloaded_files', 100),
+    ('grand_archive', 'downloaded_files', 500),
+)
+REWARD_ACHIEVEMENTS = (
+    ('welcome_back', 'total', 1),
+    ('seven_in_a_row', 'longest_streak', 7),
+    ('month_in_motion', 'longest_streak', 30),
+    ('first_archive', 'download_sessions', 1),
+    ('hundred_saved', 'downloaded_files', 100),
+)
+
 
 class StateError(RuntimeError):
     pass
@@ -346,6 +386,87 @@ class AppState:
                     month_count=sum(item.year == day.year and item.month == day.month for item in ordered),
                     today_checked=day in days,
                     next_milestone=next((point for point in milestones if point > total), (total // 365 + 1) * 365))
+
+    @staticmethod
+    def _counter(value):
+        """Read a non-negative integer from a user-editable settings value."""
+        try:
+            value = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return max(0, value)
+
+    def download_stats(self):
+        """Return local download counters used by the optional reward cabinet."""
+        value = self.get_setting('download_stats', {})
+        if not isinstance(value, dict):
+            value = {}
+        return {
+            'download_sessions': self._counter(value.get('download_sessions')),
+            'downloaded_files': self._counter(value.get('downloaded_files')),
+        }
+
+    def record_download(self, files=0):
+        """Record one completed download session without storing file metadata."""
+        files = self._counter(files)
+        current = self.download_stats()
+        current['download_sessions'] += 1
+        current['downloaded_files'] += files
+        self.set_setting('download_stats', current)
+        return current
+
+    def reward_profile(self, day=None):
+        """Compute the local check-in level, cabinet, badges and themes.
+
+        Rewards are derived from the existing check-in table and small local
+        counters, so upgrading an old database does not need a migration.
+        """
+        stats = self.checkin_stats(day)
+        downloads = self.download_stats()
+        metrics = dict(stats, **downloads)
+        total = stats['total']
+        longest = stats['longest_streak']
+        level_id, level_threshold = max(
+            ((identifier, threshold) for identifier, threshold in REWARD_LEVELS if total >= threshold),
+            key=lambda item: item[1],
+        )
+        next_level = next((threshold for _, threshold in REWARD_LEVELS if threshold > total), None)
+
+        def unlocked(definitions):
+            return [identifier for identifier, metric, threshold in definitions
+                    if metrics.get(metric, 0) >= threshold]
+
+        unlocked_badges = unlocked(REWARD_BADGES)
+        unlocked_gallery = unlocked(REWARD_GALLERY)
+        unlocked_achievements = unlocked(REWARD_ACHIEVEMENTS)
+        unlocked_skins = [identifier for identifier, threshold in REWARD_SKINS
+                          if longest >= threshold]
+        selected = self.get_setting('reward_skin', 'default')
+        if selected not in unlocked_skins:
+            selected = 'default'
+        return {
+            'level': level_id,
+            'level_threshold': level_threshold,
+            'next_level': next_level,
+            'total': total,
+            'streak': stats['streak'],
+            'longest_streak': longest,
+            'badges': unlocked_badges,
+            'gallery': unlocked_gallery,
+            'achievements': unlocked_achievements,
+            'skins': unlocked_skins,
+            'selected_skin': selected,
+            **downloads,
+        }
+
+    def set_reward_skin(self, skin):
+        """Persist a theme skin only after the user's 30-day reward unlock."""
+        skin = str(skin)
+        profile = self.reward_profile()
+        if skin not in profile['skins']:
+            raise ValueError('This theme is still locked.')
+        self.set_setting('reward_skin', skin)
+        return skin
 
     def storage_bytes(self):
         return self.db_path.stat().st_size if self.db_path.exists() else 0

@@ -73,7 +73,53 @@ TEXT={
  'launch_error':('无法启动：{error}','無法啟動：{error}','Unable to start: {error}','起動できません：{error}'),
 }
 
+# Reward labels are kept separate from the lifecycle copy above so the
+# calendar remains easy to scan.  IDs mirror the data-driven definitions in
+# ``app_state.py`` and can safely be persisted across language changes.
+REWARD_TEXT={
+ 'rewards':('画师成长','畫師成長','Artist progress','クリエイターの成長'),
+ 'level':('画师等级','畫師等級','Artist level','クリエイターレベル'),
+ 'badges':('徽章','徽章','Badges','バッジ'),
+ 'gallery':('画师图鉴','畫師圖鑑','Artist cabinet','コレクション'),
+ 'achievements':('成就彩蛋','成就彩蛋','Achievements','実績'),
+ 'themes':('主题皮肤','主題皮膚','Theme skins','テーマスキン'),
+ 'theme_locked':('连续签到 30 天后解锁主题皮肤。','連續簽到 30 天後解鎖主題皮膚。','Theme skins unlock after a 30-day streak.','30日連続でテーマスキンが解放されます。'),
+ 'theme_saved':('主题已保存','主題已儲存','Theme saved','テーマを保存しました'),
+ 'locked':('未解锁','未解鎖','Locked','未解放'),
+ 'unlocked':('已解锁','已解鎖','Unlocked','解放済み'),
+ 'progress':('还差 {count} 天','還差 {count} 天','{count} more days','あと {count} 日'),
+ 'downloads':('累计保存 {files} 个文件 · {sessions} 次下载','累計儲存 {files} 個檔案 · {sessions} 次下載','{files} files saved · {sessions} downloads','{files} ファイル保存 · {sessions} 回ダウンロード'),
+ 'level_apprentice':('初见画师','初見畫師','First sketch','はじめての一枚'),
+ 'level_sketcher':('灵感学徒','靈感學徒','Inspired sketcher','ひらめきの見習い'),
+ 'level_storyteller':('连载画师','連載畫師','Storyteller','物語を紡ぐ人'),
+ 'level_master':('资深画师','資深畫師','Seasoned artist','熟練クリエイター'),
+ 'level_legend':('传说画师','傳說畫師','Legendary artist','伝説のクリエイター'),
+ 'badge_first_spark':('第一束灵感','第一束靈感','First spark','最初のひらめき'),
+ 'badge_seven_day_streak':('七日连星','七日連星','Seven-day streak','7日連続'),
+ 'badge_thirty_day_streak':('月度不缺席','月度不缺席','Month in motion','30日連続'),
+ 'badge_hundred_day_streak':('百日长卷','百日長卷','Hundred-day scroll','100日連続'),
+ 'badge_hundred_returns':('百次回访','百次回訪','Hundred returns','100回の来訪'),
+ 'gallery_first_page':('第一页 · 初见','第一页 · 初見','First page · Hello','最初のページ'),
+ 'gallery_week_notes':('七日手记','七日手記','Seven-day notes','7日手記'),
+ 'gallery_ocean_archive':('海蓝档案','海藍檔案','Ocean archive','海色アーカイブ'),
+ 'gallery_collector_100':('百图收藏家','百圖收藏家','100-file collector','100ファイル収集'),
+ 'gallery_grand_archive':('大档案室','大檔案室','Grand archive','大きなアーカイブ'),
+ 'achievement_welcome_back':('欢迎回来','歡迎回來','Welcome back','おかえりなさい'),
+ 'achievement_seven_in_a_row':('连星初成','連星初成','Seven in a row','7日連続達成'),
+ 'achievement_month_in_motion':('月度连载','月度連載','Month in motion','30日連続達成'),
+ 'achievement_first_archive':('第一份档案','第一份檔案','First archive','最初のアーカイブ'),
+ 'achievement_hundred_saved':('百图入库','百圖入庫','Hundred saved','100ファイル保存'),
+ 'skin_default':('暮色原野','暮色原野','Dusk default','夕暮れの原野'),
+ 'skin_ocean':('海蓝潮汐','海藍潮汐','Ocean tide','海色の潮汐'),
+ 'skin_cyberpunk':('霓虹赛博','霓虹賽博','Neon cyberpunk','ネオン・サイバー'),
+}
+
 
 def tr(language,key,**values):
     index=LANGUAGES.index(language) if language in LANGUAGES else 0
     return TEXT[key][index].format(**values)
+
+
+def reward_tr(language,key,**values):
+    index=LANGUAGES.index(language) if language in LANGUAGES else 0
+    return REWARD_TEXT[key][index].format(**values)

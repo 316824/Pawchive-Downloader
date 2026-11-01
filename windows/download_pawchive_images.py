@@ -699,6 +699,7 @@ class App(QWidget):
         self.setObjectName('appRoot')
         self.lang=services.store.get_setting('language','简体中文') if services else '简体中文'
         if self.lang not in TEXT:self.lang='简体中文'
+        self.reward_skin=services.store.get_setting('reward_skin','default') if services else 'default'
         self.particles=[]; self.setMouseTracking(True)
         self.setMinimumSize(900,740); self.resize(1180,941)
         if QApplication.platformName()!='offscreen':
@@ -759,6 +760,7 @@ class App(QWidget):
             self.file_name.set_full_text(self.ui_text()['scanned'].format(pages=self._scan_pages,posts=self._scan_posts))
             self.reflect_scan_state()
         elif not self.busy and self.files_saved==0: self.file_name.set_full_text(self.ui_text()['waiting'])
+        self.refresh_reward_badge()
         if hasattr(self,'splash') and self.splash.isVisible(): self.splash.set_language(l)
     def update_note(self,checked=None):
         self.note.setText(AUX_TEXT[self.lang]['note_titles' if self.title_check.isChecked() else 'note_flat'])
@@ -786,11 +788,43 @@ class App(QWidget):
     def apply_theme(self,dark):
         from desktop_design import apply_style
         self._dark=dark
-        apply_style(self,dark)
+        skin=self.reward_skin
+        if self.services:
+            skin=self.services.store.reward_profile()['selected_skin']
+            self.reward_skin=skin
+        apply_style(self,dark,skin)
         for check in self.findChildren(GlowCheckBox): check.setProperty('lightTheme',not dark)
         self.validate_profile()
         if hasattr(self,'splash'): self.splash.counter.setStyleSheet(f'color:{self.palette_tokens["muted"]}')
         if hasattr(self,'overlay'): self.overlay.update()
+        self.refresh_reward_badge()
+
+    def apply_reward_skin(self, skin):
+        """Apply and persist an unlocked reward skin from the calendar."""
+        if not self.services:
+            return False
+        try:
+            self.services.store.set_reward_skin(skin)
+        except (ValueError, TypeError):
+            return False
+        self.reward_skin=str(skin)
+        self.apply_theme(self._dark)
+        return True
+
+    def refresh_reward_badge(self):
+        badge=getattr(self,'reward_badge',None)
+        if badge is None:
+            return
+        if not self.services:
+            badge.setText(''); badge.setToolTip(''); return
+        from feature_text import reward_tr
+        profile=self.services.store.reward_profile()
+        name=reward_tr(self.lang,'level_'+profile['level'])
+        recent=profile['badges'][-1] if profile['badges'] else None
+        badge_name=reward_tr(self.lang,'badge_'+recent) if recent else ''
+        badge.setText(f'✦ {name}' + (f' · {badge_name}' if badge_name else ''))
+        badge.setToolTip(reward_tr(self.lang,'downloads',files=profile['downloaded_files'],sessions=profile['download_sessions'])
+                         + (f' · {badge_name}' if badge_name else ''))
     def ui_text(self):
         from desktop_design import COPY
         return COPY[self.lang]
@@ -995,7 +1029,16 @@ class App(QWidget):
         self.set_workflow('complete'); self.stop_requested=False; self.files_saved=n; self.files_value.setText(str(n)); self.speed_value.setText('—')
         self.progress.setValue(100 if n else 0); self.percent_label.setText('100' if n else '0'); self.percent_unit.show()
         self.file_name.set_full_text(self.ui_text()['settled'])
-        if self.services:self.services.task_finished(True)
+        if self.services:
+            try:
+                self.services.store.record_download(n)
+            except Exception:
+                # A transient local-state failure must not turn a completed
+                # download into a visible task error; rewards can catch up on
+                # the next successful session.
+                pass
+            self.refresh_reward_badge()
+            self.services.task_finished(True)
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def error(self,e):
         worker=getattr(self,'worker',None)

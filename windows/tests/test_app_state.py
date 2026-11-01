@@ -101,6 +101,31 @@ class AppStateTests(unittest.TestCase):
         self.store.check_in()
         self.assertEqual(self.store.checkin_stats()['longest_streak'],2)
 
+    def test_reward_profile_unlocks_badges_skins_cabinet_and_persists_selection(self):
+        with self.assertRaises(ValueError):
+            self.store.set_reward_skin('ocean')
+        for index in range(30):
+            self.store.check_in()
+            if index < 29:
+                self.now[0] += 86400
+        self.store.record_download(120)
+        profile=self.store.reward_profile()
+        self.assertEqual(profile['level'],'storyteller')
+        self.assertIn('seven_day_streak',profile['badges'])
+        self.assertIn('thirty_day_streak',profile['badges'])
+        self.assertIn('ocean',profile['skins'])
+        self.assertIn('cyberpunk',profile['skins'])
+        self.assertIn('ocean_archive',profile['gallery'])
+        self.assertIn('first_archive',profile['achievements'])
+        self.store.set_reward_skin('cyberpunk')
+        self.assertEqual(self.store.reward_profile()['selected_skin'],'cyberpunk')
+        self.store.close(); self.store=AppState(self.root,clock=lambda:self.now[0])
+        self.assertEqual(self.store.reward_profile()['selected_skin'],'cyberpunk')
+
+    def test_download_stats_ignore_invalid_values(self):
+        self.store.set_setting('download_stats',{'download_sessions':'bad','downloaded_files':-8})
+        self.assertEqual(self.store.download_stats(),{'download_sessions':0,'downloaded_files':0})
+
     def test_invalid_links_folders_and_relative_appointments_are_rejected(self):
         for change in ({'profile':'https://example.com/fanbox/user/x'}, {'folder':'relative'},
                        {'order':'invalid'},{'start_number':-1},{'start_number':True}):

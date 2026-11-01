@@ -145,6 +145,12 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     header.addWidget(w.heading,1)
     w.edition = text_label('DESKTOP  /  1.1', 'edition')
     header.addWidget(w.edition)
+    w.reward_badge = text_label('', 'rewardBadge')
+    w.reward_badge.setMinimumWidth(120)
+    w.reward_badge.setMaximumWidth(180)
+    w.reward_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    w.reward_badge.setToolTip('')
+    header.addWidget(w.reward_badge)
     w.tools_button=QPushButton()
     w.tools_button.setObjectName('toolButton'); w.tools_button.setFixedSize(40,40)
     w.tools_menu=QMenu(w)
@@ -431,15 +437,41 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
         button.setCursor(Qt.CursorShape.PointingHandCursor)
 
 
-def apply_style(w, dark):
+def apply_style(w, dark, skin='default'):
     p = dict(bg='#10141c', card='#171e29', panel='#141b25', text='#e9edf6',
              muted='#99a6bb', small='#748399', line='#2a3445', accent='#9cb3ff',
              field='#111822', hover='#222f43', button='#a7bcff', button_text='#14203c') if dark else dict(
              bg='#f4f5f2', card='#ffffff', panel='#fafbf8', text='#252e42',
              muted='#68758a', small='#8993a3', line='#dee4e9', accent='#516aca',
              field='#f7f9fb', hover='#edf1fc', button='#536fd1', button_text='#ffffff')
-    p['glow']=DARK_GLOW if dark else LIGHT_GLOW
-    p['hover']='#2b243b' if dark else '#f1ecfa'
+    # Reward skins only tune the accent palette; the light/dark switch still
+    # controls contrast and remains available on every unlocked skin.
+    skin_values = {
+        'ocean': ({
+            'bg':'#081923','card':'#0d2635','panel':'#0b202e','text':'#e9fbff',
+            'muted':'#9fc8d6','small':'#6e9eae','line':'#1c4c60','accent':'#63d4ef',
+            'field':'#0a1d2a','hover':'#143b4d','button':'#74ddf3','button_text':'#06202b',
+            'glow':'#55ccea'}, {
+            'bg':'#effcff','card':'#ffffff','panel':'#f5fdff','text':'#163544',
+            'muted':'#527b89','small':'#7398a4','line':'#c8e6ee','accent':'#198eaf',
+            'field':'#f2fbfd','hover':'#e0f5fa','button':'#168eae','button_text':'#ffffff',
+            'glow':'#3caec7'}),
+        'cyberpunk': ({
+            'bg':'#120d1e','card':'#1b1129','panel':'#171025','text':'#f8efff',
+            'muted':'#bda7d2','small':'#8c72a6','line':'#3e2c54','accent':'#ff68c7',
+            'field':'#160e24','hover':'#322044','button':'#ff78d0','button_text':'#2b0d2a',
+            'glow':'#ff5cb8'}, {
+            'bg':'#fff5fd','card':'#ffffff','panel':'#fff8fd','text':'#321d3e',
+            'muted':'#805b8c','small':'#9a78a4','line':'#ecd7ed','accent':'#d445a4',
+            'field':'#fff7fd','hover':'#fce6f6','button':'#d445a4','button_text':'#ffffff',
+            'glow':'#df69b7'}),
+    }
+    values = skin_values.get(str(skin))
+    if values:
+        p.update(values[0 if dark else 1])
+    else:
+        p['hover']='#2b243b' if dark else '#f1ecfa'
+    p.setdefault('glow', DARK_GLOW if dark else LIGHT_GLOW)
     w.setStyleSheet(f'''
         QWidget {{background:transparent;color:{p['text']};font-family:"Segoe UI","Microsoft YaHei UI";font-size:14px;}}
         QWidget#appRoot,QDialog {{background:{p['bg']};}}
@@ -449,6 +481,7 @@ def apply_style(w, dark):
         QLabel#small {{color:{p['muted']};font-size:12px;}}
         QLabel#eyebrow {{color:{p['small']};font-size:10px;font-weight:600;letter-spacing:1px;}}
         QLabel#edition,QLabel#footerHint {{color:{p['small']};font-size:10px;letter-spacing:1px;}}
+        QLabel#rewardBadge {{color:{p['accent']};background:{p['hover']};border:1px solid {p['line']};border-radius:10px;padding:6px 10px;font-size:11px;font-weight:600;}}
         QLabel#sectionLabel {{font-size:14px;font-weight:600;}}
         QLabel#optionLabel {{color:{p['muted']};font-size:13px;}}
         QLabel#progressNumber {{font-size:56px;font-weight:600;letter-spacing:-2px;}}

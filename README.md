@@ -38,7 +38,7 @@ Windows 推荐下载 `PawchiveDownloader-Windows-x64.zip`，解压后双击 `Paw
 | 后台运行 | 点击窗口右上角 `×`，选择“留在后台”；从系统托盘重新打开或正常退出 |
 | 下载日程 | 工具齿轮 → 下载日程，最多保留 10 个活动预约；时间到后下载对应画师全部图集，多个任务依次执行 |
 | 进度恢复 | 下载中选择“保存并退出”，下次启动可继续、稍后处理或放弃进度；已保存的文件会保留 |
-| 签到日历 | 工具齿轮 → 签到日历，记录今天、回看足迹，查看连续与累计天数和里程碑寄语 |
+| 签到日历与奖励 | 工具齿轮 → 签到日历；记录今天、回看足迹，并查看画师等级、徽章、图鉴、成就彩蛋与已解锁主题 |
 | 设备邀请码 | 复制首次启动显示的设备码，向维护者获取邀请码；在本机离线验证，无设备信息自动上传 |
 | 日常辅助 | `Ctrl+Shift+V` 粘贴链接、`Ctrl+L` 显示／收起日志、日志复制、缓存清理、下载后打开文件夹 |
 
@@ -58,6 +58,15 @@ Windows 推荐下载 `PawchiveDownloader-Windows-x64.zip`，解压后双击 `Paw
 需要无人值守下载时，打开工具齿轮中的“下载日程”，填写画师主页、保存位置、未来时间和保存规则。定时任务下载该画师的全部图集，不会停在封面预选窗口。等待续传的预约也计入 10 个活动名额；取消预约或完成任务后释放名额。
 
 完整的后台操作、续传说明、本机数据位置、邀请锁定规则和日程限制见 [Windows 指南](windows/README.md)。
+
+### 签到奖励机制
+
+签到只保存在本机，不上传也不影响下载权限。累计签到会提升“画师等级”，连续签到的最高纪录会永久保留并用于解锁收藏：
+
+- 连续 7 天获得“七日连星”徽章和第一组图鉴页；连续 30 天获得“月度不缺席”徽章，并解锁“海蓝潮汐”和“霓虹赛博”主题皮肤；连续 100 天获得“百日长卷”徽章。
+- 累计回访 1、100 天会获得对应徽章与图鉴；累计保存 100、500 个文件会解锁收藏柜中的“百图收藏家”和“大档案室”。
+- “成就彩蛋”记录首次回访、连续 7/30 天、第一次下载和百文件收藏等里程碑。错过一天不会扣除已获得的奖励，只会让当前连续天数重新计算。
+- 在签到日历底部的“主题皮肤”选择器中切换已解锁配色；等级徽章会显示在工作台顶部。所有奖励状态与下载计数均保存在 `%LOCALAPPDATA%\\PawchiveDownloader` 的本机数据库中。
 
 ## 本机数据与邀请机制
 
@@ -121,6 +130,6 @@ Windows 构建包含系统 ICU 依赖核查和生成 EXE 的离线启动自检�
 
 Pawchive Downloader is an unofficial open-source tool for Windows and Android. It scans creator pages, previews posts, and saves selected original images and direct-link attachments. Download [Windows v1.1.0](https://github.com/316824/Pawchive-Downloader/releases/tag/windows-v1.1.0), or read the [Android guide](docs/ANDROID.md).
 
-The Windows release includes Python and its dependencies. It adds tray operation, up to 10 active one-time schedules, resumable downloads, a local check-in calendar and device-bound invitations. Scheduled downloads require the current Windows user to remain signed in on a powered-on PC; they work on the lock screen, do not wake the device, and do not catch up missed times after shutdown or sleep. First-run invitation verification is offline. After 10 failed attempts, a maintainer-issued device unlock code is required. Original project code remains MIT-licensed and may be modified; client-side activation cannot guarantee protection against bypassing.
+The Windows release includes Python and its dependencies. It adds tray operation, up to 10 active one-time schedules, resumable downloads, a local check-in calendar with artist levels, badges, a cabinet, achievement easter eggs and unlockable colour skins, plus device-bound invitations. Scheduled downloads require the current Windows user to remain signed in on a powered-on PC; they work on the lock screen, do not wake the device, and do not catch up missed times after shutdown or sleep. First-run invitation verification is offline. After 10 failed attempts, a maintainer-issued device unlock code is required. Original project code remains MIT-licensed and may be modified; client-side activation cannot guarantee protection against bypassing.
 
 Android compatibility is still being verified; no minimum compatible Android version has been established. Check the compatibility notes before installing. Download only content you are authorized to save.

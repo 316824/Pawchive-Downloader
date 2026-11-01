@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QPalette, QTextCharFormat
 from PySide6.QtWidgets import (QApplication, QCalendarWidget, QCheckBox, QComboBox,
     QDateTimeEdit, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QTextEdit,
-    QToolButton, QVBoxLayout)
+    QTabWidget, QToolButton, QVBoxLayout)
 
 from feature_text import LANGUAGES, tr
 
@@ -227,12 +227,13 @@ class ScheduleDialog(QDialog):
 class CheckInDialog(QDialog):
     def __init__(self,parent,store):
         super().__init__(parent)
-        self.store=store; self.lang=parent.lang
-        self.setWindowTitle(tr(self.lang,'calendar')); self.resize(540,590)
-        layout=QVBoxLayout(self); layout.setContentsMargins(26,24,26,24); layout.setSpacing(16)
+        self.parent_window=parent; self.store=store; self.lang=parent.lang
+        self.setWindowTitle(tr(self.lang,'calendar')); self.resize(700,760)
+        layout=QVBoxLayout(self); layout.setContentsMargins(26,24,26,24); layout.setSpacing(12)
         title=label(tr(self.lang,'calendar')); title.setStyleSheet('font-size:22px;font-weight:600')
         layout.addWidget(title); layout.addWidget(label(tr(self.lang,'calendar_intro'),True))
         self.stats=label(''); self.stats.setStyleSheet('font-size:17px;font-weight:600'); layout.addWidget(self.stats)
+        self.level=label(''); self.level.setStyleSheet('font-size:14px;font-weight:600'); layout.addWidget(self.level)
         self.calendar=QCalendarWidget(); self.calendar.setGridVisible(False); self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
         self.calendar.setLocale(locale_for(self.lang))
         tokens=parent.palette_tokens
@@ -252,6 +253,15 @@ class CheckInDialog(QDialog):
         self.calendar.currentPageChanged.connect(self.paint_month); layout.addWidget(self.calendar,1)
         self.message=label(''); layout.addWidget(self.message)
         self.button=QPushButton(tr(self.lang,'checkin')); self.button.clicked.connect(self.check_in); layout.addWidget(self.button)
+        theme_row=QHBoxLayout()
+        self.theme_label=label(''); theme_row.addWidget(self.theme_label)
+        self.skin_combo=QComboBox(); self.skin_combo.currentIndexChanged.connect(self.change_skin); theme_row.addWidget(self.skin_combo,1)
+        layout.addLayout(theme_row)
+        self.skin_notice=label('',True); layout.addWidget(self.skin_notice)
+        self.tabs=QTabWidget()
+        self.badge_list=QListWidget(); self.gallery_list=QListWidget(); self.achievement_list=QListWidget()
+        self.tabs.addTab(self.badge_list,''); self.tabs.addTab(self.gallery_list,''); self.tabs.addTab(self.achievement_list,'')
+        layout.addWidget(self.tabs,1)
         layout.addWidget(label(tr(self.lang,'calendar_locked'),True))
         close=QPushButton(tr(self.lang,'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
         self.refresh()
@@ -266,7 +276,61 @@ class CheckInDialog(QDialog):
         self.button.setEnabled(not checked); self.button.setText(tr(self.lang,'checked' if checked else 'checkin'))
         milestone=total in (7,14,30,60,100,180,365) or (total>365 and total%100==0)
         self.message.setText(tr(self.lang,'milestone',total=total) if milestone else tr(self.lang,'affirmation'+str(total%3+1)))
+        self.refresh_rewards()
         self.paint_month(self.calendar.yearShown(),self.calendar.monthShown())
+
+    def _fill_reward_list(self, widget, definitions, profile, prefix):
+        from feature_text import reward_tr
+        widget.clear()
+        unlocked=set(profile[prefix])
+        key_prefix={'badges':'badge_','gallery':'gallery_','achievements':'achievement_'}[prefix]
+        for identifier, metric, threshold in definitions:
+            is_unlocked=identifier in unlocked
+            name=reward_tr(self.lang,key_prefix+identifier)
+            status=reward_tr(self.lang,'unlocked' if is_unlocked else 'locked')
+            current=int(profile.get(metric,0))
+            detail='' if is_unlocked else f' · {current}/{threshold}'
+            item=QListWidgetItem(('✓ ' if is_unlocked else '🔒 ')+name+' · '+status+detail)
+            item.setToolTip(name)
+            widget.addItem(item)
+
+    def refresh_rewards(self):
+        from app_state import REWARD_BADGES, REWARD_GALLERY, REWARD_ACHIEVEMENTS, REWARD_SKINS
+        from feature_text import reward_tr
+        profile=self.store.reward_profile()
+        level_name=reward_tr(self.lang,'level_'+profile['level'])
+        next_text='' if profile['next_level'] is None else reward_tr(self.lang,'progress',count=max(0,profile['next_level']-profile['total']))
+        self.level.setText(f"{reward_tr(self.lang,'level')} · {level_name}  |  {reward_tr(self.lang,'downloads',files=profile['downloaded_files'],sessions=profile['download_sessions'])}  {next_text}")
+        self.theme_label.setText(reward_tr(self.lang,'themes'))
+        self.tabs.setTabText(0,reward_tr(self.lang,'badges'))
+        self.tabs.setTabText(1,reward_tr(self.lang,'gallery'))
+        self.tabs.setTabText(2,reward_tr(self.lang,'achievements'))
+        self._fill_reward_list(self.badge_list,REWARD_BADGES,profile,'badges')
+        self._fill_reward_list(self.gallery_list,REWARD_GALLERY,profile,'gallery')
+        self._fill_reward_list(self.achievement_list,REWARD_ACHIEVEMENTS,profile,'achievements')
+        selected=profile['selected_skin']; unlocked=set(profile['skins'])
+        self.skin_combo.blockSignals(True); self.skin_combo.clear()
+        for identifier,_threshold in REWARD_SKINS:
+            if identifier in unlocked:
+                self.skin_combo.addItem(reward_tr(self.lang,'skin_'+identifier),identifier)
+        index=self.skin_combo.findData(selected)
+        if index>=0:self.skin_combo.setCurrentIndex(index)
+        self.skin_combo.blockSignals(False)
+        if len(unlocked)==1:
+            self.skin_notice.setText(reward_tr(self.lang,'theme_locked'))
+        else:
+            self.skin_notice.setText(reward_tr(self.lang,'theme_saved')+' · '+reward_tr(self.lang,'skin_'+selected))
+
+    def change_skin(self,index):
+        if index<0:return
+        skin=self.skin_combo.itemData(index)
+        if not skin:return
+        apply_skin=getattr(self.parent_window,'apply_reward_skin',None)
+        if callable(apply_skin) and not apply_skin(skin):
+            self.refresh_rewards(); return
+        try:self.store.set_reward_skin(skin)
+        except (ValueError,TypeError):return
+        self.refresh_rewards()
 
     def paint_month(self,year,month):
         self.calendar.setDateTextFormat(QDate(),QTextCharFormat())
@@ -277,3 +341,5 @@ class CheckInDialog(QDialog):
 
     def check_in(self):
         self.store.check_in(); self.refresh()
+        refresh=getattr(self.parent_window,'refresh_reward_badge',None)
+        if callable(refresh):refresh()
