@@ -255,7 +255,7 @@ class PostPicker(QDialog):
         self.body = QWidget()
         self.body.setMinimumWidth(0)
         self.grid = QGridLayout(self.body)
-        self.grid.setContentsMargins(0, 0, 4, 8)
+        self.grid.setContentsMargins(8, 8, 8, 8)
         self.grid.setSpacing(14)
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.body)
@@ -298,7 +298,7 @@ class PostPicker(QDialog):
         self.top_button.setStyleSheet(f'QPushButton#pickerTop{{background:{self.palette["card"]};'
                                      f'border:1px solid {self.palette["line"]};border-radius:20px;padding:0;}}'
                                      f'QPushButton#pickerTop:hover{{background:{self.palette["hover"]};'
-                                     f'border-color:{self.palette["accent"]};}}')
+                                     f'border-color:{self.palette.get("glow",self.palette["accent"])};}}')
         self.top_button.hide()
         scrollbar = self.scroll.verticalScrollBar()
         self.scroll_animation = QPropertyAnimation(scrollbar, b'value', self)

@@ -12,9 +12,9 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, QSettings, Qt
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QScrollArea
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QScrollArea, QStyle, QStyleOptionButton, QWidget
 
 import download_pawchive_images as desktop
 from post_picker import PostPicker
@@ -138,6 +138,76 @@ class DesktopUiTests(unittest.TestCase):
         QTest.mouseClick(window.focus_button, Qt.MouseButton.LeftButton)
         self.app.processEvents()
         self.assertEqual(window.logs_card.isVisible(), visible)
+
+    def test_enter_hotkeys_never_start_download_and_ctrl_l_still_toggles_once(self):
+        # Patch before construction so the clicked connection captures the stub,
+        # rather than opening a scan when a removed shortcut regresses.
+        self.window.hide()
+        with patch.object(desktop.App, 'download') as download:
+            window = self.open_window()
+            window.activateWindow()
+            window.profile.setText('https://pawchive.pw/fanbox/user/offline-artist')
+            window.path.setText(str(self.directory))
+            window.validate_profile()
+            self.app.processEvents()
+            self.assertTrue(window.start.isEnabled())
+            QTest.mouseClick(window.start, Qt.MouseButton.LeftButton)
+            self.assertEqual(download.call_count, 1, 'The normal start button must still work')
+            download.reset_mock()
+            for control in (window.profile, window.log, window.start):
+                with self.subTest(focus=control.objectName() or type(control).__name__):
+                    control.setFocus()
+                    self.app.processEvents()
+                    for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                        QTest.keyClick(control, key, Qt.KeyboardModifier.ControlModifier)
+                        self.app.processEvents()
+                    download.assert_not_called()
+                    self.assertFalse(window.logs_hidden)
+                    QTest.keyClick(control, Qt.Key.Key_L, Qt.KeyboardModifier.ControlModifier)
+                    self.app.processEvents()
+                    self.assertTrue(window.logs_hidden)
+                    self.assertFalse(window.logs_card.isVisible())
+                    window.profile.setFocus()
+                    QTest.keyClick(window.profile, Qt.Key.Key_L, Qt.KeyboardModifier.ControlModifier)
+                    self.app.processEvents()
+                    self.assertFalse(window.logs_hidden)
+                    self.assertTrue(window.logs_card.isVisible())
+            # Invalid inputs must not acquire an alternative Enter path either.
+            window.profile.clear()
+            window.validate_profile()
+            self.assertFalse(window.start.isEnabled())
+            for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                QTest.keyClick(window.profile, key, Qt.KeyboardModifier.ControlModifier)
+            self.app.processEvents()
+            download.assert_not_called()
+        for widget in window.findChildren(QWidget):
+            self.assertNotIn('Ctrl+Enter', widget.toolTip())
+        self.assertNotIn('Ctrl+Enter', window.footer_hint.text())
+
+    def test_header_has_no_tagline_and_logo_corners_blend_with_the_window(self):
+        window = self.window
+        removed = ('整理喜欢的作品，留住每一次灵感。', '整理喜歡的作品，留住每一次靈感。',
+                   'A considered home for the work you love.', 'お気に入りの作品を、心地よく整理。')
+        for language in desktop.TEXT:
+            window.language.setCurrentText(language)
+            self.app.processEvents()
+            self.assertFalse(any(label.isVisible() and label.text() in removed
+                                 for label in window.findChildren(QLabel)))
+        for dark in (True, False):
+            window.apply_theme(dark)
+            self.app.processEvents()
+            picture = window.logo.grab().toImage()
+            background = QColor(window.palette_tokens['bg'])
+            for x, y in ((2, 2), (picture.width()-3, 2),
+                         (2, picture.height()-3), (picture.width()-3, picture.height()-3)):
+                corner = picture.pixelColor(x, y)
+                difference = max(abs(corner.red()-background.red()),
+                                 abs(corner.green()-background.green()),
+                                 abs(corner.blue()-background.blue()))
+                self.assertTrue(corner.alpha() < 10 or difference < 5,
+                                'The logo should have transparent rounded corners')
+            self.assertNotEqual(picture.pixelColor(picture.width()//2, picture.height()//2),
+                                background, 'The logo must remain visible inside its rounded shape')
 
     def test_theme_switch_responds_to_each_click_and_keeps_overlay_mouse_through(self):
         window = self.window
@@ -361,6 +431,24 @@ class DesktopUiTests(unittest.TestCase):
         self.assertEqual(selected, {entries[1]['url'], entries[2]['url']})
         with patch.object(PostPicker, 'exec', new=lambda dialog: QDialog.DialogCode.Rejected):
             self.assertIsNone(self.window.choose_titles(entries))
+
+    def test_checkbox_glow_paints_beyond_both_indicator_edges_without_left_cutoff(self):
+        w=self.window
+        for check in (w.title_check,w.select_posts_check,w.default_path_check):
+            check.glow_anim.stop(); check.ripple_anim.stop(); check.setGlow(0); check.setRipple(0)
+            option=QStyleOptionButton(); check.initStyleOption(option)
+            indicator=check.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator,option,check)
+            center=check.mapTo(w,indicator.center())
+            before=w.grab().toImage()
+            check.setGlow(1); self.app.processEvents(); after=w.grab().toImage()
+            changes=[]
+            for offset in (-17,17):
+                old=before.pixelColor(center.x()+offset,center.y())
+                new=after.pixelColor(center.x()+offset,center.y())
+                changes.append(sum(abs(a-b) for a,b in zip(old.getRgb()[:3],new.getRgb()[:3])))
+            self.assertGreater(min(changes),2,str(changes))
+            self.assertLess(abs(changes[0]-changes[1]),12,str(changes))
+            check.setGlow(0)
 
 
 if __name__ == '__main__':

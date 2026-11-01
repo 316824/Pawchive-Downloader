@@ -8,7 +8,7 @@ import shutil
 import sys, random, math
 import requests
 from bs4 import BeautifulSoup
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF, QRect, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF, QRect, QRectF, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QRadialGradient, QFont, QPixmap, QIcon, QLinearGradient, QGradient, QFontMetricsF, QPainterPath, QDesktopServices
 from PySide6.QtWidgets import QStyle, QStyleOptionButton
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -103,7 +103,7 @@ AUX_TEXT = {
  '日本語': {'profile_hint':'クリエイターページのURLを入力してください。','profile_valid':'✓ クリエイターページURLは有効です','folder_needed':'✓ URLは有効です。保存先を選択してください','profile_invalid':'URLが無効です。pawchive.pw の完全なクリエイターページURLを入力してください。','note_titles':'既定：投稿ごとにタイトル名のフォルダーへ保存します。','note_flat':'投稿別フォルダーは無効です。公開日順に番号を付けられます。','scan_status':'クリエイターの投稿をスキャン中…','scan_failed':'スキャンに失敗しました','empty_scan':'完全な投稿が見つかりませんでした。','close_wait':'停止して未完了の投稿を削除しています…','cache_cleared':'一時キャッシュを削除しました。ダウンロード済みファイルは変更されていません。','cache_failed':'キャッシュを削除できませんでした：{}','log_copied':'ログをクリップボードにコピーしました。','copy_tooltip':'ログをコピー','cache_tooltip':'一時キャッシュを削除','choose_title':'ダウンロードする投稿を選択','choose_summary':'{count} 件の投稿が見つかりました。カバーをクリックして選択します。','select_all':'すべて選択','select_none':'選択解除','cover_missing':'カバーを表示できません','no_direct':'直接リンクのファイルなし','back_top':'先頭へ戻る','ok':'決定','cancel':'キャンセル','scan_window':'投稿を検索中','scan_searching':'クリエイターの投稿を検索中…','scan_paused':'スキャンを一時停止しました','scan_finishing':'現在の投稿を完了しています…','scan_count':'{pages} ページを確認 · {posts} 件の投稿','unknown':'不明','cancelled':'ユーザーがダウンロードを停止しました','bad_content':'応答内容がファイル形式と一致しません（Content-Type: {content_type}）','download_failed':'4回再試行しましたが失敗しました：{title} / {filename} — {error}','album_failed':'投稿「{title}」のファイルが連続して失敗したため中止しました。未完了の投稿を削除しました。','download_fail_prefix':'ダウンロード失敗','no_selected':'選択した投稿が見つかりません。','pause':'一時停止','resume':'再開','finish':'スキャン終了','file_progress':'ダウンロード中{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'ダウンロード中{count}：{name} · {current:.1f} MB 受信済み'}
 }
 
-class Worker(QThread):
+class _LegacyWorker(QThread):
     progress = Signal(str, int, int)
     finished_ok = Signal(int)
     failed = Signal(str)
@@ -256,6 +256,38 @@ class Worker(QThread):
             if session is not None:
                 session.close()
 
+
+class Worker(_LegacyWorker):
+    # Python integers keep multi-gigabyte ZIP/video progress out of Qt's int32 range.
+    progress = Signal(str,object,object)
+    def __init__(self,folder,profile,order,by_title,selected_post_urls=None,rename_order=False,
+                 start_number=1,lang='简体中文',journal=None,resume_job_id=None):
+        self.journal=journal
+        self.preserve_on_interrupt=False
+        self.resume_saved_count=0
+        if journal is not None and resume_job_id:
+            job=journal.load(resume_job_id); config=job['config']
+            folder=config['folder']; profile=config['profile']; order=config.get('order','newest')
+            by_title=config.get('by_title',True); rename_order=config.get('rename_order',False)
+            start_number=config.get('start_number',1); selected_post_urls=config.get('selected_post_urls')
+            lang=config.get('lang',lang)
+            self.resume_saved_count=job.get('saved_count',0)
+        super().__init__(folder,profile,order,by_title,selected_post_urls,rename_order,start_number,lang)
+        self.folder=self.folder.resolve()
+        self.job_id=None
+        if journal is not None:
+            self.job_id=resume_job_id or journal.create(dict(folder=str(self.folder),profile=self.profile,
+                order=order,by_title=bool(by_title),selected_post_urls=sorted(self.selected_post_urls),
+                rename_order=bool(rename_order),start_number=start_number,lang=lang))
+    def run(self):
+        if self.journal is None:
+            return super().run()
+        from resumable_worker import DownloadEngine
+        helpers=dict(absolute_post_url=absolute_post_url,safe_path_component=safe_path_component,
+                     unique_path=unique_path,valid_download=valid_download,PAGE_SIZE=PAGE_SIZE,USER_AGENT=USER_AGENT)
+        DownloadEngine(self,helpers).run()
+
+
 class Particle:
     def __init__(self,x,y,click=False):
         a=random.random()*math.tau; speed=random.uniform(1.1,3.5) if click else random.uniform(.3,1.4)
@@ -264,7 +296,7 @@ class Particle:
 
 class GlowButton(QPushButton):
     def __init__(self,*a):
-        super().__init__(*a); self.hover=0.; self.hover_animation=QPropertyAnimation(self,b'hoverLevel',self); self.hover_animation.setDuration(240); self.hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic); self.setMouseTracking(True)
+        super().__init__(*a); self.setProperty('animatedGlow',True); self.hover=0.; self.hover_animation=QPropertyAnimation(self,b'hoverLevel',self); self.hover_animation.setDuration(240); self.hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic); self.setMouseTracking(True)
     def getHover(self): return self.hover
     def setHover(self,value): self.hover=float(value); self.update()
     hoverLevel=Property(float,getHover,setHover)
@@ -274,13 +306,25 @@ class GlowButton(QPushButton):
     def leaveEvent(self,e): self.animate_hover(0.0); super().leaveEvent(e)
     def paintEvent(self,e):
         super().paintEvent(e)
-        if self.hover<=0:return
-        p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        alpha=int(45+210*self.hover); width=1.8+2.6*self.hover
-        glow=QColor(255,72,82,alpha) if not self.isEnabled() else QColor(73,214,255,alpha)
-        p.setPen(QPen(glow,width)); p.setBrush(Qt.BrushStyle.NoBrush)
-        rect=self.rect().adjusted(3,3,-3,-3); p.drawRoundedRect(rect,13,13)
-        p.setPen(QPen(QColor(121,232,255,int(alpha*.35)),1.0)); p.drawRoundedRect(rect.adjusted(2,2,-2,-2),11,11); p.end()
+        # The stylesheet supplies the background; exactly one path supplies the border.
+        level=max(0.,min(1.,self.hover))
+        if self.hasFocus() and self.isEnabled(): level=max(level,.65)
+        primary=self.objectName()=='primaryButton'
+        base=QColor(self.property('borderColor') or '#2a3445')
+        target=QColor('#ff4852' if not self.isEnabled() else self.property('glowColor') or '#b89af4')
+        color=QColor.fromRgbF(base.redF()+(target.redF()-base.redF())*level,
+            base.greenF()+(target.greenF()-base.greenF())*level,
+            base.blueF()+(target.blueF()-base.blueF())*level)
+        if primary: color.setAlphaF(level)
+        if primary and level<=0: return
+        painter=QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(color,1.+.6*level)); painter.setBrush(Qt.BrushStyle.NoBrush)
+            radius=13. if primary else 11.
+            rect=QRectF(self.rect()).adjusted(.9,.9,-.9,-.9)
+            painter.drawRoundedRect(rect,radius-.9,radius-.9)
+        finally: painter.end()
 
 class ParticleOverlay(QWidget):
     """Transparent, mouse-through layer kept above all UI controls."""
@@ -370,24 +414,28 @@ class GlowCheckBox(QCheckBox):
         self.glow_anim=QPropertyAnimation(self,b'glowLevel',self); self.glow_anim.setDuration(420); self.glow_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._ripple=0.0; self.ripple_anim=QPropertyAnimation(self,b'rippleLevel',self); self.ripple_anim.setDuration(620); self.ripple_anim.setStartValue(0.0); self.ripple_anim.setEndValue(1.0); self.ripple_anim.setEasingCurve(QEasingCurve.Type.OutCubic); self.ripple_anim.finished.connect(self.finish_ripple); self.stateChanged.connect(self.checked_ripple)
     def getGlow(self): return self._glow
-    def setGlow(self,value): self._glow=float(value); self.update()
+    def setGlow(self,value):
+        self._glow=float(value); self.update(); self.refresh_effect()
     glowLevel=Property(float,getGlow,setGlow)
     def getRipple(self): return self._ripple
-    def setRipple(self,value): self._ripple=float(value); self.update()
+    def setRipple(self,value):
+        self._ripple=float(value); self.update(); self.refresh_effect()
     rippleLevel=Property(float,getRipple,setRipple)
     def checked_ripple(self,state):
         if state:
             self.ripple_anim.stop(); self._ripple=0.0; self.ripple_anim.start()
     def finish_ripple(self):
-        self._ripple=0.0
-        self.update()
+        self.setRipple(0.0)
+    def refresh_effect(self):
+        from control_effects import refresh_checkbox_effect
+        refresh_checkbox_effect(self)
     def enterEvent(self,event):
         self.glow_anim.stop(); self.glow_anim.setStartValue(self._glow); self.glow_anim.setEndValue(1.0); self.glow_anim.start(); super().enterEvent(event)
     def leaveEvent(self,event):
         self.glow_anim.stop(); self.glow_anim.setStartValue(self._glow); self.glow_anim.setEndValue(0.0); self.glow_anim.start(); super().leaveEvent(event)
     def paintEvent(self,event):
         super().paintEvent(event)
-        opt=QStyleOptionButton(); opt.initFrom(self); indicator=self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator,opt,self)
+        opt=QStyleOptionButton(); self.initStyleOption(opt); indicator=self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator,opt,self)
         center=indicator.center()
         if self.isChecked():
             painter=QPainter(self)
@@ -398,26 +446,6 @@ class GlowCheckBox(QCheckBox):
                 mark.lineTo(indicator.left()+8,center.y()+4); mark.lineTo(indicator.right()-4,indicator.top()+5)
                 painter.drawPath(mark)
             finally: painter.end()
-        if self._glow>0:
-            painter=QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            try:
-                radius=max(indicator.width(),indicator.height())*.95
-                grad=QRadialGradient(QPointF(center),radius); grad.setColorAt(0,QColor(75,210,245,int(62*self._glow))); grad.setColorAt(.55,QColor(75,210,245,int(25*self._glow))); grad.setColorAt(1,QColor(75,210,245,0))
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver if self.property('lightTheme') else QPainter.CompositionMode.CompositionMode_Screen)
-                painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(grad); painter.drawEllipse(QPointF(center),radius,radius)
-            finally:
-                painter.end()
-        if self._ripple>0:
-            painter=QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            try:
-                max_radius=max(indicator.width(),indicator.height())*1.45; ripple_radius=max_radius*self._ripple
-                fade=(1-self._ripple)**2*(1+2*self._ripple); alpha=int(135*fade)
-                edge=QRadialGradient(QPointF(center),max(1,ripple_radius))
-                edge.setColorAt(0,QColor(255,255,255,0)); edge.setColorAt(.65,QColor(120,230,255,int(alpha*.08))); edge.setColorAt(.84,QColor(145,238,255,alpha)); edge.setColorAt(1,QColor(100,210,245,0))
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver if self.property('lightTheme') else QPainter.CompositionMode.CompositionMode_Screen)
-                painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(edge); painter.drawEllipse(QPointF(center),ripple_radius,ripple_radius)
-            finally:
-                painter.end()
 
 class SoftComboBox(QComboBox):
     def __init__(self,*args):
@@ -664,11 +692,14 @@ class ProfileScanWorker(QThread):
             session.close()
 
 class App(QWidget):
-    def __init__(self,settings=None):
+    def __init__(self,settings=None,services=None):
         super().__init__()
+        self.services=services
         from desktop_design import build_interface
         self.setObjectName('appRoot')
-        self.lang='简体中文'; self.particles=[]; self.setMouseTracking(True)
+        self.lang=services.store.get_setting('language','简体中文') if services else '简体中文'
+        if self.lang not in TEXT:self.lang='简体中文'
+        self.particles=[]; self.setMouseTracking(True)
         self.setMinimumSize(900,740); self.resize(1180,941)
         if QApplication.platformName()!='offscreen':
             available=QApplication.primaryScreen().availableGeometry()
@@ -695,7 +726,12 @@ class App(QWidget):
         self._last_particle=QPointF(-1000,-1000)
         QApplication.instance().installEventFilter(self)
     def set_lang(self,l):
-        self.lang=l; t=TEXT[l]; self.setWindowTitle(t['title']); self.heading.setText('Pawchive'); self.browse.setText(t['browse']); self.start.setText(t['start'])
+        self.lang=l
+        if self.services:
+            self.services.store.set_setting('language',l); self.services.update_language()
+        if self.language.currentText()!=l:
+            blocked=self.language.blockSignals(True); self.language.setCurrentText(l); self.language.blockSignals(blocked)
+        t=TEXT[l]; self.setWindowTitle(t['title']); self.heading.setText('Pawchive'); self.browse.setText(t['browse']); self.start.setText(t['start'])
         self.open_folder_button.setText(t['open_folder'])
         en=l=='English'; ja=l=='日本語'
         self.profile_label.setText('请输入完整的 pawchive.pw 画师主页链接' if l=='简体中文' else '請輸入完整的 pawchive.pw 畫師首頁連結' if l=='繁體中文' else 'Enter the full Pawchive creator profile URL' if en else 'PawchiveのクリエイターページURLを入力')
@@ -786,12 +822,14 @@ class App(QWidget):
         self.logs_card.setVisible(not self.logs_hidden)
         self.focus_button.setToolTip(self.ui_text()['expand' if self.logs_hidden else 'focus'])
         self.focus_button.setAccessibleName(self.focus_button.toolTip())
+        self.footer_hint.setText(self.ui_text()['expand' if self.logs_hidden else 'focus'])
         self.focus_button.setProperty('selected',self.logs_hidden)
         self.focus_button.style().unpolish(self.focus_button); self.focus_button.style().polish(self.focus_button)
     def stop_download(self):
         if not self.busy or self.workflow_state not in {'download','stopping'}: return
         self.stop_requested=True
-        if hasattr(self,'worker') and self.worker.isRunning(): self.worker.requestInterruption()
+        worker=getattr(self,'worker',None)
+        if worker and worker.isRunning(): worker.requestInterruption()
         self.set_workflow('stopping'); self.status.setText(self.ui_text()['safe_stop'])
     def on_scan_counts(self,pages,posts):
         self._scan_pages=pages; self._scan_posts=posts
@@ -910,7 +948,31 @@ class App(QWidget):
         self.set_busy_state(False); self.set_workflow('error'); self.status.setText(AUX_TEXT[self.lang]['scan_failed']); self.log.append(str(message))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def launch_worker(self,profile,selected):
-        self.reset_dashboard(len(selected) if selected else 0); self.set_busy_state(True); self.set_workflow('download'); self.progress.setValue(0); self.log.clear(); self.status.setText(TEXT[self.lang]['working']); order='newest' if self.order_combo.currentIndex()==0 else 'oldest'; self.worker=Worker(self.path.text(),profile,order,self.title_check.isChecked(),selected,not self.title_check.isChecked() and self.rename_check.isChecked(),self.start_number.value(),self.lang); self.worker.progress.connect(self.update_progress); self.worker.finished_ok.connect(self.done); self.worker.failed.connect(self.error); self.worker.start()
+        self.reset_dashboard(len(selected) if selected else 0)
+        self.set_busy_state(True); self.set_workflow('download'); self.progress.setValue(0); self.log.clear()
+        self.status.setText(TEXT[self.lang]['working'])
+        order='newest' if self.order_combo.currentIndex()==0 else 'oldest'
+        extra={}
+        if self.services:
+            extra=dict(journal=self.services.journal,resume_job_id=self.services.resume_job_id)
+        self.worker=None
+        try:
+            self.worker=Worker(self.path.text(),profile,order,self.title_check.isChecked(),selected,
+                not self.title_check.isChecked() and self.rename_check.isChecked(),self.start_number.value(),self.lang,**extra)
+            self.files_saved=getattr(self.worker,'resume_saved_count',0)
+            self.files_value.setText(str(self.files_saved))
+            self.worker.progress.connect(self.update_progress); self.worker.finished_ok.connect(self.done)
+            self.worker.failed.connect(self.error)
+            if self.services:self.services.worker_created(self.worker)
+            self.worker.start()
+        except Exception as error:
+            if self.services and self.worker and self.worker.job_id and not self.worker.isRunning():
+                try:
+                    job=self.services.journal.load(self.worker.job_id)
+                    job.update(status='failed',error=str(error)[:1000])
+                    self.services.journal.save(job,dirty_records=[])
+                except Exception:pass  # Report the original startup failure even if its journal is unavailable.
+            self.error(str(error))
     def update_progress(self,name,i,total):
         failure_prefixes=tuple(text['download_fail_prefix'] for text in AUX_TEXT.values())
         if not name.startswith(failure_prefixes): self.update_transfer(name,i,total)
@@ -927,22 +989,37 @@ class App(QWidget):
         self.status.setToolTip(name)
         self.status.setText(self.ui_text()['received' if total else 'unknown_size'].format(current=i/1048576,total=total/1048576))
     def done(self,n):
-        if hasattr(self,'worker') and self.worker.isRunning(): self.worker.wait()
+        worker=getattr(self,'worker',None)
+        if worker and worker.isRunning(): worker.wait()
         self.set_busy_state(False); self.status.setText(f"{TEXT[self.lang]['done']} · {n}"); folder=Path(self.path.text()) if self.path.text().strip() else None; self.completed_path=str(folder) if n>0 and folder and folder.is_dir() else None; self.open_folder_button.setVisible(bool(self.completed_path))
         self.set_workflow('complete'); self.stop_requested=False; self.files_saved=n; self.files_value.setText(str(n)); self.speed_value.setText('—')
         self.progress.setValue(100 if n else 0); self.percent_label.setText('100' if n else '0'); self.percent_unit.show()
         self.file_name.set_full_text(self.ui_text()['settled'])
+        if self.services:self.services.task_finished(True)
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def error(self,e):
-        if hasattr(self,'worker') and self.worker.isRunning(): self.worker.wait()
+        worker=getattr(self,'worker',None)
+        if worker and worker.isRunning(): worker.wait()
         self.set_busy_state(False); self.completed_path=None; self.open_folder_button.hide(); self.status.setText(TEXT[self.lang]['error']); self.log.append(TEXT[self.lang]['empty'] if e=='EMPTY' else AUX_TEXT[self.lang]['no_selected'] if e=='NO_SELECTED_POSTS' else e)
         self.set_workflow('stopped' if self.stop_requested else 'error'); self.speed_value.setText('—')
         if self.stop_requested: self.status.setText(AUX_TEXT[self.lang]['cancelled'])
+        if self.services:
+            paused=bool(getattr(getattr(self,'worker',None),'preserve_on_interrupt',False))
+            self.services.task_finished(False,e,paused=paused)
+            if paused:
+                from feature_text import tr
+                self.status.setText(tr(self.lang,'saved_progress'))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def closeEvent(self,event):
+        if self.services and not self._close_when_worker_stops and not self.services.request_close():
+            event.ignore(); return
         if self.busy:
             event.ignore(); self._close_when_worker_stops=True; self.status.setText(AUX_TEXT[self.lang]['close_wait'])
-            if hasattr(self,'worker') and self.worker.isRunning(): self.worker.requestInterruption()
+            if self.services:
+                from feature_text import tr
+                self.status.setText(tr(self.lang,'saving'))
+            worker=getattr(self,'worker',None)
+            if worker and worker.isRunning(): worker.requestInterruption()
             if hasattr(self,'scanner') and self.scanner.isRunning():
                 self.scanner.requestInterruption()
                 if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.hide()
@@ -950,6 +1027,7 @@ class App(QWidget):
         QApplication.instance().removeEventFilter(self)
         self.credit.animation_timer.stop(); self.fx.stop()
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
+        if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
         if event.type()==event.Type.MouseMove:
             gp=event.globalPosition().toPoint(); local=self.mapFromGlobal(gp)
@@ -994,7 +1072,8 @@ if __name__=='__main__':
         parser.add_argument('--self-test-output',type=Path,required=True)
         args=parser.parse_args()
         sys.exit(run(App,args.self_test_output))
-    app=QApplication(sys.argv); w=App(); w.show(); w.raise_(); w.activateWindow(); sys.exit(app.exec())
+    from desktop_entry import run
+    sys.exit(run(App))
 
 
 

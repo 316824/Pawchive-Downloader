@@ -10,6 +10,10 @@ from PySide6.QtCore import QSettings
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication
 import download_pawchive_images as source
+from app_state import AppState
+from download_journal import DownloadJournal
+from desktop_runtime import DesktopRuntime
+from feature_dialogs import ActivationDialog,CheckInDialog,CloseChoice,ScheduleDialog
 
 
 def main():
@@ -21,7 +25,12 @@ def main():
     output.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='pawchive_design_example_') as folder:
         settings=QSettings(str(Path(folder)/'settings.ini'),QSettings.Format.IniFormat)
-        w=source.App(settings=settings)
+        class NoSystemTasks:
+            def install(self,*args):raise RuntimeError('Rendering must not register Windows tasks.')
+            def remove(self,*args):raise RuntimeError('Rendering must not remove Windows tasks.')
+        state=AppState(Path(folder)/'state'); journal=DownloadJournal(Path(folder)/'state')
+        runtime=DesktopRuntime(app,state,journal,NoSystemTasks(),tray_enabled=False)
+        w=source.App(settings=settings,services=runtime); runtime.attach(w)
         w.show(); app.processEvents()
         w.grab().save(str(output/'dark.png'))
         w.theme.click(); app.processEvents()
@@ -42,7 +51,12 @@ def main():
         w.resize(900,740); app.processEvents()
         w.grab().save(str(output/'compact.png'))
         print('Compact geometry:',w.width(),w.height())
-        w.set_busy_state(False); w.close()
+        w.set_busy_state(False)
+        for name,dialog in [('activation',ActivationDialog(state)),('schedules',ScheduleDialog(w,runtime)),
+                            ('calendar',CheckInDialog(w,state)),('close-choice',CloseChoice(w,True))]:
+            dialog.show(); app.processEvents(); dialog.grab().save(str(output/(name+'.png')))
+            dialog.close(); dialog.deleteLater()
+        runtime.prepare_exit(); w.close(); runtime.close()
     print('Rendered local UI examples:',output)
 
 

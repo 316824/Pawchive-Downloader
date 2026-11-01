@@ -17,7 +17,8 @@ def main():
     if sys.prefix == sys.base_prefix:
         raise SystemExit('Create a dedicated .venv and install requirements-build.txt first.')
     for name, expected in [('PySide6-Essentials', '6.12.0'), ('shiboken6', '6.12.0'),
-                           ('PyInstaller', '6.22.3'), ('pyinstaller-hooks-contrib', '2026.8')]:
+                           ('PyInstaller', '6.22.3'), ('pyinstaller-hooks-contrib', '2026.8'),
+                           ('cryptography','50.0.2'),('cffi','2.1.1')]:
         if metadata.version(name) != expected:
             raise SystemExit(f'Unexpected {name} version; install requirements-build.txt.')
     directory = Path(__file__).resolve().parent

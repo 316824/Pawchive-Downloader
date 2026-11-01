@@ -26,3 +26,10 @@ venv/
 *.part
 outputs/
 windows/preview/
+*.dpapi.json
+*signing-key*.pem
+*private-key*.pem
+*invitation*backup*.pem
+*.sqlite3
+*.sqlite3-*
+instance.lock

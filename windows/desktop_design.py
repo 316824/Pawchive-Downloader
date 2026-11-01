@@ -1,14 +1,15 @@
 """Desktop presentation: shared controls stay connected to the existing workers."""
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QSize, QRectF
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QShortcut
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget)
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget)
 
 from desktop_visuals import CardHeading, StageRail, icon
+from control_effects import DARK_GLOW, LIGHT_GLOW
 
 
 COPY = {
-    '简体中文': dict(workspace='下载工作台', tagline='整理喜欢的作品，留住每一次灵感。',
+    '简体中文': dict(workspace='下载工作台',
         source='画师主页', destination='保存位置', options='下载方式', activity='任务概览',
         source_hint='请输入完整的画师主页链接', folder_hint='选择用于保存图片与附件的文件夹',
         paste='粘贴链接', log='运行日志', log_hint='任务记录会在这里出现', ready='准备就绪',
@@ -21,8 +22,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='已接收 {current:.1f} MB',
         paused='扫描已暂停', scanned='已扫描 {pages} 页 · 收集 {posts} 个图集',
         paste_empty='剪贴板中没有可用的链接。', stop='停止下载', safe_stop='正在停止并清理未完成的图集…',
-        settled='本次下载已结束', copy_empty='暂无可复制的日志', start_tip='开始下载 · Ctrl+Enter'),
-    '繁體中文': dict(workspace='下載工作台', tagline='整理喜歡的作品，留住每一次靈感。',
+        settled='本次下载已结束', copy_empty='暂无可复制的日志'),
+    '繁體中文': dict(workspace='下載工作台',
         source='畫師首頁', destination='儲存位置', options='下載方式', activity='任務概覽',
         source_hint='請輸入完整的畫師首頁連結', folder_hint='選擇儲存圖片與附件的資料夾',
         paste='貼上連結', log='執行日誌', log_hint='任務紀錄將顯示於此', ready='準備就緒',
@@ -35,8 +36,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='已接收 {current:.1f} MB',
         paused='掃描已暫停', scanned='已掃描 {pages} 頁 · 收集 {posts} 個圖集',
         paste_empty='剪貼簿中沒有可用的連結。', stop='停止下載', safe_stop='正在停止並清理未完成的圖集…',
-        settled='本次下載已結束', copy_empty='暫無可複製的日誌', start_tip='開始下載 · Ctrl+Enter'),
-    'English': dict(workspace='Download workspace', tagline='A considered home for the work you love.',
+        settled='本次下載已結束', copy_empty='暫無可複製的日誌'),
+    'English': dict(workspace='Download workspace',
         source='Creator profile', destination='Save location', options='Download preferences', activity='Activity',
         source_hint='Enter a full creator profile URL', folder_hint='Choose a folder for images and attachments',
         paste='Paste link', log='Activity log', log_hint='Your task history will appear here', ready='Ready',
@@ -49,8 +50,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='{current:.1f} MB received',
         paused='Scan paused', scanned='{pages} pages scanned · {posts} posts found',
         paste_empty='No usable link on the clipboard.', stop='Stop download', safe_stop='Stopping and cleaning up the unfinished post…',
-        settled='This download has ended', copy_empty='There is no log to copy yet', start_tip='Start download · Ctrl+Enter'),
-    '日本語': dict(workspace='ダウンロードワークスペース', tagline='お気に入りの作品を、心地よく整理。',
+        settled='This download has ended', copy_empty='There is no log to copy yet'),
+    '日本語': dict(workspace='ダウンロードワークスペース',
         source='クリエイターページ', destination='保存先', options='ダウンロード設定', activity='タスクの状況',
         source_hint='クリエイターページの完全なURLを入力', folder_hint='画像と添付ファイルの保存先を選択',
         paste='リンクを貼付', log='実行ログ', log_hint='タスクの履歴がここに表示されます', ready='準備完了',
@@ -63,7 +64,7 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='{current:.1f} MB 受信済み',
         paused='スキャン一時停止', scanned='{pages} ページ確認 · {posts} 件の投稿',
         paste_empty='クリップボードに有効なリンクがありません。', stop='ダウンロード停止', safe_stop='停止して未完了の投稿を削除しています…',
-        settled='今回のダウンロードは終了しました', copy_empty='コピーできるログがありません', start_tip='ダウンロード開始 · Ctrl+Enter'),
+        settled='今回のダウンロードは終了しました', copy_empty='コピーできるログがありません'),
 }
 
 
@@ -89,11 +90,38 @@ class ElidedLabel(QLabel):
         self._refresh()
 
 
+class RoundedLogo(QWidget):
+    def __init__(self,path,parent=None):
+        super().__init__(parent)
+        self.pixmap=QIcon(str(path)).pixmap(128,128)
+        self.setFixedSize(44,44)
+        self.setAccessibleName('Pawchive')
+
+    def paintEvent(self,event):
+        painter=QPainter(self)
+        try:
+            painter.setRenderHints(QPainter.RenderHint.Antialiasing|QPainter.RenderHint.SmoothPixmapTransform)
+            area=QRectF(self.rect()).adjusted(1,1,-1,-1)
+            mask=QPainterPath(); mask.addRoundedRect(area,11,11)
+            painter.setClipPath(mask)
+            painter.drawPixmap(area,self.pixmap,QRectF(self.pixmap.rect()))
+        finally: painter.end()
+
+
 class LogEditor(QTextEdit):
     def sizeHint(self):
         hint=super().sizeHint()
         hint.setHeight(110)
         return hint
+
+    def append(self,text):
+        # Artist titles and filenames are untrusted text, never HTML markup.
+        from PySide6.QtGui import QTextCursor
+        scrollbar=self.verticalScrollBar(); follow=scrollbar.value()>=scrollbar.maximum()-4
+        cursor=QTextCursor(self.document()); cursor.movePosition(QTextCursor.MoveOperation.End)
+        if not self.document().isEmpty():cursor.insertBlock()
+        cursor.insertText(str(text))
+        if follow:scrollbar.setValue(scrollbar.maximum())
 
 
 def text_label(text='', name=''):
@@ -110,22 +138,26 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     root.setSpacing(20)
     header = QHBoxLayout()
     header.setSpacing(14)
-    logo = text_label()
-    logo.setPixmap(QIcon(str(icon_path)).pixmap(42, 42))
-    logo.setFixedSize(44, 44)
-    header.addWidget(logo)
-    brand = QVBoxLayout()
-    brand.setSpacing(2)
+    w.logo=RoundedLogo(icon_path)
+    header.addWidget(w.logo)
     w.heading = text_label('Pawchive', 'brand')
     w.heading.setText('Pawchive')
-    w.tagline = ElidedLabel()
-    w.tagline.setObjectName('muted')
-    w.tagline.setMinimumHeight(18)
-    brand.addWidget(w.heading)
-    brand.addWidget(w.tagline)
-    header.addLayout(brand, 1)
-    w.edition = text_label('DESKTOP  /  DESIGN PREVIEW', 'edition')
+    header.addWidget(w.heading,1)
+    w.edition = text_label('DESKTOP  /  1.1', 'edition')
     header.addWidget(w.edition)
+    w.tools_button=QPushButton()
+    w.tools_button.setObjectName('toolButton'); w.tools_button.setFixedSize(40,40)
+    w.tools_menu=QMenu(w)
+    w.schedule_action=w.tools_menu.addAction('')
+    w.calendar_action=w.tools_menu.addAction('')
+    w.resume_action=w.tools_menu.addAction('')
+    w.background_action=w.tools_menu.addAction('')
+    w.schedule_action.triggered.connect(lambda: w.services.show_schedules() if w.services else None)
+    w.calendar_action.triggered.connect(lambda: w.services.show_calendar() if w.services else None)
+    w.resume_action.triggered.connect(lambda: w.services.offer_resume() if w.services else None)
+    w.background_action.triggered.connect(lambda: w.services.keep_background() if w.services else None)
+    w.tools_button.setMenu(w.tools_menu); w.tools_button.setEnabled(w.services is not None)
+    header.addWidget(w.tools_button)
     w.focus_button = QPushButton()
     w.focus_button.setObjectName('toolButton')
     w.focus_button.setFixedSize(40, 40)
@@ -382,7 +414,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     root.addLayout(content, 1)
 
     footer = QHBoxLayout()
-    w.footer_hint = text_label('Ctrl+Enter  /  Ctrl+L', 'footerHint')
+    w.footer_hint = text_label('', 'footerHint')
     footer.addWidget(w.footer_hint)
     footer.addStretch(1)
     w.credit = RainbowCredit('千泽音奈  ·  QQ：3412892533')
@@ -391,8 +423,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     footer.addWidget(w.credit)
     root.addLayout(footer)
     w.shortcuts = []
-    for sequence, callback in [('Ctrl+Return', w.start.click), ('Ctrl+L', w.toggle_logs),
-                               ('Ctrl+Shift+V', w.paste_profile)]:
+    for sequence, callback in [('Ctrl+L', w.toggle_logs), ('Ctrl+Shift+V', w.paste_profile)]:
         shortcut = QShortcut(QKeySequence(sequence), w)
         shortcut.activated.connect(callback)
         w.shortcuts.append(shortcut)
@@ -407,6 +438,8 @@ def apply_style(w, dark):
              bg='#f4f5f2', card='#ffffff', panel='#fafbf8', text='#252e42',
              muted='#68758a', small='#8993a3', line='#dee4e9', accent='#516aca',
              field='#f7f9fb', hover='#edf1fc', button='#536fd1', button_text='#ffffff')
+    p['glow']=DARK_GLOW if dark else LIGHT_GLOW
+    p['hover']='#2b243b' if dark else '#f1ecfa'
     w.setStyleSheet(f'''
         QWidget {{background:transparent;color:{p['text']};font-family:"Segoe UI","Microsoft YaHei UI";font-size:14px;}}
         QWidget#appRoot,QDialog {{background:{p['bg']};}}
@@ -428,26 +461,27 @@ def apply_style(w, dark):
         QFrame#separator {{background:{p['line']};border:0;}}
         QScrollArea,QScrollArea>QWidget>QWidget {{background:transparent;border:0;}}
         QLineEdit {{background:{p['field']};border:1px solid {p['line']};border-radius:11px;padding:10px 13px;selection-background-color:{p['accent']};}}
-        QLineEdit:focus {{border-color:{p['accent']};}}
+        QLineEdit:focus {{border-color:{p['glow']};}}
         QPushButton {{border:1px solid {p['line']};border-radius:11px;background:transparent;padding:9px 13px;font-size:13px;}}
-        QPushButton:hover {{background:{p['hover']};border-color:{p['accent']};}}
+        QPushButton:hover {{background:{p['hover']};border-color:{p['glow']};}}
         QPushButton:pressed {{background:{p['field']};}}
         QPushButton:disabled {{color:{p['small']};border-color:{p['line']};}}
         QPushButton#primaryButton {{background:{p['button']};color:{p['button_text']};border:0;font-size:15px;font-weight:600;border-radius:13px;}}
         QPushButton#primaryButton:hover {{background:{'#bbcbff' if dark else '#637ddd'};}}
         QPushButton#primaryButton:disabled {{background:{p['hover']};color:{p['small']};}}
         QPushButton#toolButton {{padding:6px;border-color:transparent;border-radius:10px;}}
-        QPushButton#toolButton:hover {{border-color:{p['line']};background:{p['hover']};}}
-        QPushButton#toolButton[selected="true"] {{border-color:{p['accent']};background:{p['hover']};}}
+        QPushButton#toolButton:hover {{border-color:{p['glow']};background:{p['hover']};}}
+        QPushButton#toolButton[selected="true"] {{border-color:{p['glow']};background:{p['hover']};}}
+        QPushButton[animatedGlow="true"],QPushButton[animatedGlow="true"]:hover,QPushButton[animatedGlow="true"]:disabled {{border-color:transparent;}}
         QPushButton#stopButton {{color:{'#ffadb4' if dark else '#b44457'};}}
         QComboBox {{background:{p['field']};border:1px solid {p['line']};border-radius:10px;padding:8px 26px 8px 12px;min-height:22px;}}
-        QComboBox:hover,QComboBox:focus {{border-color:{p['accent']};}}
+        QComboBox:hover,QComboBox:focus {{border-color:{p['glow']};}}
         QComboBox QAbstractItemView {{background:{p['card']};border:1px solid {p['line']};selection-background-color:{p['hover']};selection-color:{p['text']};outline:0;padding:6px;}}
         QComboBox::drop-down {{background:transparent;border:0;width:26px;}}
         QComboBox::down-arrow {{image:none;width:0;height:0;border:0;}}
         QCheckBox {{spacing:11px;padding:5px 0;background:transparent;}}
         QCheckBox::indicator {{width:19px;height:19px;border:1px solid {p['small']};border-radius:5px;background:{p['field']};}}
-        QCheckBox::indicator:hover {{border:1px solid {p['accent']};}}
+        QCheckBox::indicator:hover {{border:1px solid {p['glow']};}}
         QCheckBox::indicator:checked {{background:{p['accent']};border:1px solid {p['accent']};}}
         QCheckBox:disabled {{color:{p['small']};}}
         QSpinBox {{background:{p['field']};border:1px solid {p['line']};border-radius:8px;padding:6px 10px;}}
@@ -458,15 +492,31 @@ def apply_style(w, dark):
         QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {{height:0;}}
         QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical {{background:transparent;}}
         QToolTip {{background:{p['card']};color:{p['text']};border:1px solid {p['line']};padding:7px;}}
+        QMenu {{background:{p['card']};color:{p['text']};border:1px solid {p['line']};padding:6px;}}
+        QMenu::item {{padding:10px 18px;border-radius:7px;}}
+        QMenu::item:selected {{background:{p['hover']};}}
+        QPushButton::menu-indicator {{image:none;width:0;height:0;}}
+        QListWidget {{background:{p['field']};border:1px solid {p['line']};border-radius:10px;padding:7px;}}
+        QListWidget::item {{padding:9px;border-radius:6px;}}
+        QListWidget::item:selected {{background:{p['hover']};}}
+        QDateTimeEdit {{background:{p['field']};border:1px solid {p['line']};border-radius:9px;padding:8px;}}
+        QCalendarWidget QWidget#qt_calendar_navigationbar {{background:{p['card']};}}
+        QCalendarWidget QToolButton {{background:transparent;color:{p['text']};border:0;padding:7px;}}
+        QCalendarWidget QAbstractItemView {{background:{p['field']};color:{p['text']};selection-background-color:{p['glow']};selection-color:white;}}
     ''')
     w.stage_rail.set_theme(dark)
     w.workspace_heading.set_theme(dark)
     w.palette_tokens = p
+    for button in w.findChildren(QPushButton):
+        if button.property('animatedGlow'):
+            button.setProperty('glowColor',p['glow'])
+            button.setProperty('borderColor',p['line'])
+            button.update()
     for combo in (w.language,w.order_combo):
         combo.arrow_color=p['muted']; combo.update()
     for button, kind in ((w.paste_button,'paste'), (w.clear_cache,'broom'),
                          (w.copy_log,'copy'), (w.focus_button,'eye'),
-                         (w.browse,'folder'), (w.open_folder_button,'folder'), (w.start,'arrow')):
+                         (w.browse,'folder'), (w.open_folder_button,'folder'), (w.start,'arrow'),(w.tools_button,'settings')):
         button.setIcon(icon(kind, p['muted'] if button is not w.start else p['button_text']))
         button.setIconSize(QSize(17, 17))
     w.progress.track = p['line']
@@ -478,9 +528,9 @@ def apply_style(w, dark):
 
 
 def translate_interface(w, text, auxiliary):
+    from feature_text import tr
     t = COPY[w.lang]
     w.setWindowTitle(text['title'])
-    w.tagline.set_full_text(t['tagline'])
     w.workspace_heading.title_label.setText(t['workspace'])
     w.profile_label.setText(t['source'])
     w.profile.setPlaceholderText(t['source_hint'])
@@ -506,10 +556,17 @@ def translate_interface(w, text, auxiliary):
     theme_tip={'简体中文':'切换明暗主题','繁體中文':'切換明暗主題','English':'Toggle appearance','日本語':'明暗テーマを切替'}[w.lang]
     w.theme.setToolTip(theme_tip)
     w.theme.setAccessibleName(theme_tip)
-    w.start.setToolTip(t['start_tip'])
+    w.start.setToolTip(text['start'])
+    w.footer_hint.setText(t['expand'] if w.logs_hidden else t['focus'])
     w.stop_button.setText(t['stop'])
     w.stop_button.setToolTip(auxiliary['close_wait'])
     w.browse.setText(text['browse'])
     w.start.setText(text['start'])
     w.open_folder_button.setText(text['open_folder'])
     w.stage_rail.set_labels(t['steps'])
+    w.tools_button.setToolTip(tr(w.lang,'tools'))
+    w.tools_button.setAccessibleName(tr(w.lang,'tools'))
+    w.schedule_action.setText(tr(w.lang,'schedules'))
+    w.calendar_action.setText(tr(w.lang,'calendar'))
+    w.resume_action.setText(tr(w.lang,'resume'))
+    w.background_action.setText(tr(w.lang,'background'))

@@ -86,6 +86,10 @@ def icon(kind, color='#94afff', size=20):
             polyline((14, 6), (20, 12), (14, 18))
         elif kind == 'chevron':
             polyline((6, 9), (12, 15), (18, 9))
+        elif kind == 'left':
+            polyline((15, 6), (9, 12), (15, 18))
+        elif kind == 'right':
+            polyline((9, 6), (15, 12), (9, 18))
         elif kind == 'check':
             polyline((5, 12), (10, 17), (19, 7))
         elif kind == 'activity':

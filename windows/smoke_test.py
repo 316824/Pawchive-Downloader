@@ -7,6 +7,11 @@ from PySide6 import __version__ as pyside_version
 from PySide6.QtCore import QSettings, QTimer, qVersion
 from PySide6.QtWidgets import QApplication
 import requests
+from activation import load_public_key
+from app_state import AppState
+from download_journal import DownloadJournal
+from desktop_runtime import DesktopRuntime
+from feature_dialogs import ActivationDialog, CheckInDialog, ScheduleDialog
 
 
 def run(window_class, output):
@@ -21,7 +26,14 @@ def run(window_class, output):
     requests.sessions.Session.request = reject_network
     with tempfile.TemporaryDirectory(prefix='pawchive_startup_check_') as directory:
         settings=QSettings(str(Path(directory)/'settings.ini'),QSettings.Format.IniFormat)
-        window = window_class(settings=settings)
+        class NoSystemTasks:
+            def install(self,*args):raise RuntimeError('The offline startup check must not register a task.')
+            def remove(self,*args):raise RuntimeError('The offline startup check must not remove a task.')
+        state=AppState(Path(directory)/'state')
+        journal=DownloadJournal(Path(directory)/'state')
+        runtime=DesktopRuntime(app,state,journal,NoSystemTasks(),tray_enabled=False)
+        window = window_class(settings=settings,services=runtime)
+        runtime.attach(window)
         cache = window.cache_dir
 
         def check():
@@ -45,6 +57,12 @@ def run(window_class, output):
                 window.theme.click()
                 app.processEvents()
                 window.grab()
+                load_public_key()
+                for dialog in (ActivationDialog(state),ScheduleDialog(window,runtime),CheckInDialog(window,state)):
+                    if isinstance(dialog,ActivationDialog):
+                        if dialog.submit.isEnabled():raise RuntimeError('An empty invitation must not be submitted.')
+                        dialog.languages.setCurrentText('English'); dialog.languages.setCurrentText('简体中文')
+                    dialog.grab(); dialog.close(); dialog.deleteLater()
                 window.theme.click()
                 app.processEvents()
                 window.grab()
@@ -70,16 +88,18 @@ def run(window_class, output):
                     'QtCore/QtGui/QtWidgets import', 'native GUI startup',
                     'bundled icon', 'input validation', 'language switching',
                     'theme switching', 'rainbow progress painting',
-                    'cover picker and local title search'])
+                    'cover picker and local title search','QtNetwork and local lifecycle',
+                    'pinned invitation public key','invitation, schedule and calendar dialogs'])
             except Exception as error:
                 failures.append(str(error))
             finally:
-                window.close()
+                runtime.prepare_exit(); window.close()
                 app.quit()
 
         window.show()
         QTimer.singleShot(350, check)
         app.exec()
+        runtime.close()
         report['cache_removed'] = not cache.exists()
         report['ok'] = report['ok'] and report['cache_removed'] and not failures
         if failures:

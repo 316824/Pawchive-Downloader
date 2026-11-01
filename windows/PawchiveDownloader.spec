@@ -10,7 +10,7 @@ a = Analysis(
     [str(directory / 'download_pawchive_images.py')],
     pathex=[str(directory)],
     binaries=[],
-    datas=[(str(directory / '1.ico'), '.')],
+    datas=[(str(directory / '1.ico'), '.'),(str(directory/'activation_public.json'),'.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

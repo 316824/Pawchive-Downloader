@@ -22,14 +22,15 @@ and in this source directory.
 | cryptography / OpenSSL / CFFI | https://github.com/pyca/cryptography and https://www.openssl.org/ and https://cffi.readthedocs.io/ |
 | PyInstaller bootloader and packaging support | https://pyinstaller.org/en/stable/license.html and https://github.com/pyinstaller/pyinstaller |
 
-The v1.0.1 Windows build uses PySide6-Essentials / Shiboken6 6.12.0,
-Requests 2.34.2 and Beautiful Soup 4.15.0. The Essentials distribution provides
+The v1.1.0 Windows build uses PySide6-Essentials / Shiboken6 6.12.0,
+Requests 2.34.2, Beautiful Soup 4.15.0, cryptography 50.0.2, CFFI 2.1.1
+and pycparser 3.12. The Essentials distribution provides
 the required PySide6 modules without installing the complete Qt Addons,
 WebEngine or PDF distributions. Only modules and plugins needed by the
 application are selected for packaging. The direct runtime and build versions
 are recorded in `requirements.txt` and `requirements-build.txt`.
 
-Some license texts and component entries are retained from the v1.0.0 archive;
+Some license texts and component entries are retained from earlier archives;
 their presence does not mean every component is included in every version.
 The standard library's TLS support uses OpenSSL independently of whether the
 optional cryptography / CFFI packages are present.
@@ -41,13 +42,13 @@ and Windows build instructions in `README.md` allow rebuilding the application
 with replacement or updated dependencies; any such build must retain the
 applicable third-party notices.
 
-The v1.0.1 build configuration excludes conflicting copies of the Windows system
+The v1.1.0 build configuration retains the v1.0.1 fix that excludes conflicting copies of the Windows system
 ICU libraries and relies on the target operating system's implementation. It does
 not redistribute ICU DLLs taken from the build computer's Windows directory or
 from unrelated installed applications. See Microsoft's description of the
 [Windows ICU APIs](https://learn.microsoft.com/en-us/windows/win32/intl/international-components-for-unicode--icu-).
 
-Unlike the reused executable in v1.0.0, v1.0.1 is rebuilt using the repository's
+Unlike the reused executable in v1.0.0, v1.1.0 is rebuilt using the repository's
 `build_release.py` and `PawchiveDownloader.spec`. Publishing the application's MIT
 source does not relicense third-party libraries. License files copied from
 installed distributions retain the original upstream wording.

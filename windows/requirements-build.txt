@@ -13,3 +13,5 @@ idna==3.20
 urllib3==2.8.0
 soupsieve==3.0.4
 typing-extensions==4.16.0
+cffi==2.1.1
+pycparser==3.12
