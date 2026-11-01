@@ -174,7 +174,7 @@
 
 ### 发布者本机记录清理工具
 
-`publisher_cleanup.ps1` 与 `PawchivePublisherCleanup.cmd` 只供发布者在打包或交付前使用，不应放入公开发行包。它会：
+`publisher_cleanup.ps1` 与 `PawchivePublisherCleanup.cmd` 只供发布者在打包或交付前使用，不应放入公开发行包。本次整理不再生成“干净版压缩包”；发布者先运行清理工具，再单独分发 EXE 和说明文件。它会：
 
 1. 校验当前 Windows 用户的 SID，只定位该用户创建的 `PawchiveDownloader-<用户哈希>-<日程 ID>` 计划任务。
 2. 删除这些计划任务，避免后台预约继续启动旧副本。

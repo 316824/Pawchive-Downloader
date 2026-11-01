@@ -93,7 +93,7 @@ Windows 的语言、日程、签到和激活记录保存在 `%LOCALAPPDATA%\Pawc
 
 `windows/publisher_cleanup.ps1` 与 `windows/PawchivePublisherCleanup.cmd` 只面向维护者使用，不应放进公开发行包。工具会先校验当前 Windows 用户，只处理该用户创建的 `PawchiveDownloader-<当前用户哈希>-<日程 ID>` 计划任务，然后清理 `%LOCALAPPDATA%\PawchiveDownloader`（签到、等级、徽章、皮肤、激活、日程、断点、定时任务副本和错误日志）。它不会触碰已下载文件、用户下载目录、`.part` 分片或邀请码签发私钥。
 
-建议发布前先预览，再执行完整清理：
+本次整理不再生成“干净版压缩包”；发布前运行该工具，再单独分发 EXE 和说明文件。建议发布前先预览，再执行完整清理：
 
 ```powershell
 cd windows
