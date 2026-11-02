@@ -14,18 +14,70 @@ from PySide6.QtWidgets import QStyle, QStyleOptionButton
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QFrame,
     QAbstractButton, QCheckBox, QDialog, QDialogButtonBox,
-    QScrollArea, QGridLayout, QSpinBox, QSizePolicy, QGraphicsDropShadowEffect)
+    QScrollArea, QGridLayout, QSpinBox, QSizePolicy, QGraphicsDropShadowEffect,
+    QMessageBox)
 from background_store import BackgroundStore
 from background_ui import BackgroundLayer, BackgroundSettingsDialog, load_preview
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
 PAGE_SIZE = 50
+STALE_CACHE_AGE_SECONDS = 24 * 60 * 60
 PROFILE_URL_RE = re.compile(
     r'https://pawchive\.pw/(?:fanbox|patreon|subscribestar|discord|boosty)/user/[^/?#]+/?'
 )
 INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
+
+
+def cleanup_stale_cache_dirs(current=None, *, max_age=STALE_CACHE_AGE_SECONDS, now=None):
+    """Remove old Pawchive preview directories left by interrupted runs.
+
+    Only directories created by this application directly below the system
+    temporary directory are considered.  The active run's directory is always
+    preserved, recent directories are left alone, and junctions/symlinks are
+    skipped so a cleanup click cannot traverse outside the temp root.
+    Download folders and ``.part`` resume files are unrelated to this cache
+    and are deliberately never touched here.
+    """
+    try:
+        root = Path(tempfile.gettempdir()).resolve()
+    except (OSError, RuntimeError):
+        return 0
+    try:
+        active = Path(current).resolve() if current else None
+    except (OSError, RuntimeError, TypeError):
+        active = None
+    try:
+        timestamp = time.time() if now is None else float(now)
+    except (TypeError, ValueError, OverflowError):
+        timestamp = time.time()
+    try:
+        threshold = max(0.0, float(max_age))
+    except (TypeError, ValueError, OverflowError):
+        threshold = float(STALE_CACHE_AGE_SECONDS)
+    removed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.startswith('pawchive_cache_') or not entry.is_dir():
+            continue
+        if entry.is_symlink() or getattr(entry, 'is_junction', lambda: False)():
+            continue
+        try:
+            resolved = entry.resolve()
+            if resolved.parent != root or (active is not None and resolved == active):
+                continue
+            age = timestamp - entry.stat().st_mtime
+            if age < threshold:
+                continue
+            shutil.rmtree(entry)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        removed += 1
+    return removed
 
 
 def absolute_post_url(href):
@@ -99,10 +151,10 @@ TEXT = {
  '繁體中文': {'title':'Pawchive 圖片下載器','browse':'瀏覽…','start':'開始下載','ready':'準備就緒','working':'正在取得貼文附件…','done':'下載完成','open_folder':'開啟資料夾','empty':'找不到原圖附件。','choose':'選擇資料夾','error':'發生錯誤'}
 }
 AUX_TEXT = {
- '简体中文': {'profile_hint':'请输入画师主页链接。','profile_valid':'✓ 画师主页链接有效','folder_needed':'✓ 链接有效；请先选择图片保存文件夹','profile_invalid':'链接格式无效：请输入 pawchive.pw 下的完整画师主页链接。','note_titles':'默认：每个图集分别保存到以标题命名的文件夹中。','note_flat':'已关闭分文件夹；可选择按发布日期排序并为图片编号。','scan_status':'正在扫描画师主页标题…','scan_failed':'扫描失败','empty_scan':'没有扫描到完整图集标题。','close_wait':'正在停止并清理未完成的图集…','cache_cleared':'临时缓存已清理；下载文件未受影响。','cache_failed':'缓存清理失败：{}','log_copied':'日志已复制到剪贴板。','copy_tooltip':'复制日志','cache_tooltip':'清理临时缓存','choose_title':'选择要下载的图集','choose_summary':'扫描到 {count} 个图集。点击封面卡片选择。','select_all':'全选','select_none':'全不选','cover_missing':'封面暂不可用','no_direct':'无直链文件','back_top':'回到顶部','ok':'确定','cancel':'取消','scan_window':'正在寻找图集','scan_searching':'正在沿着画师主页寻找图集…','scan_paused':'扫描已暂停','scan_finishing':'正在完成当前图集…','scan_count':'已扫描 {pages} 页 · 找到 {posts} 个图集','unknown':'未知','cancelled':'用户已停止下载','bad_content':'响应内容与文件类型不匹配（Content-Type: {content_type}）','download_failed':'下载失败（已重试4次）：{title} / {filename} — {error}','album_failed':'下载中止：图集“{title}”的文件连续失败，已停止以避免留下不完整图集。','download_fail_prefix':'下载失败','no_selected':'没有找到所选图集。','pause':'暂停','resume':'继续','finish':'结束扫描','file_progress':'正在下载{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'正在下载{count}：{name} · 已接收 {current:.1f} MB'},
- '繁體中文': {'profile_hint':'請輸入畫師首頁連結。','profile_valid':'✓ 畫師首頁連結有效','folder_needed':'✓ 連結有效；請先選擇圖片儲存資料夾','profile_invalid':'連結格式無效：請輸入 pawchive.pw 下的完整畫師首頁連結。','note_titles':'預設：每篇圖集分別存入以標題命名的資料夾。','note_flat':'已關閉分資料夾；可選擇按發布日期排序並為圖片編號。','scan_status':'正在掃描畫師首頁標題…','scan_failed':'掃描失敗','empty_scan':'沒有掃描到完整圖集標題。','close_wait':'正在停止並清理未完成的圖集…','cache_cleared':'暫存快取已清理；下載檔案未受影響。','cache_failed':'快取清理失敗：{}','log_copied':'日誌已複製到剪貼簿。','copy_tooltip':'複製日誌','cache_tooltip':'清理暫存快取','choose_title':'選擇要下載的圖集','choose_summary':'掃描到 {count} 個圖集。點擊封面卡片選擇。','select_all':'全選','select_none':'全不選','cover_missing':'封面暫不可用','no_direct':'無直連檔案','back_top':'回到頂端','ok':'確定','cancel':'取消','scan_window':'正在尋找圖集','scan_searching':'正在沿著畫師首頁尋找圖集…','scan_paused':'掃描已暫停','scan_finishing':'正在完成目前圖集…','scan_count':'已掃描 {pages} 頁 · 找到 {posts} 個圖集','unknown':'未知','cancelled':'使用者已停止下載','bad_content':'回應內容與檔案類型不符（Content-Type: {content_type}）','download_failed':'下載失敗（已重試4次）：{title} / {filename} — {error}','album_failed':'下載中止：圖集「{title}」的檔案連續失敗，已停止以避免留下不完整圖集。','download_fail_prefix':'下載失敗','no_selected':'找不到所選圖集。','pause':'暫停','resume':'繼續','finish':'結束掃描','file_progress':'正在下載{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'正在下載{count}：{name} · 已接收 {current:.1f} MB'},
- 'English': {'profile_hint':'Enter a creator profile URL.','profile_valid':'✓ Creator profile URL is valid','folder_needed':'✓ URL is valid; choose a save folder','profile_invalid':'Invalid URL. Enter a complete creator profile link from pawchive.pw.','note_titles':'Default: save each post in a folder named after its title.','note_flat':'Post folders are off; you can number files by publication date.','scan_status':'Scanning creator posts…','scan_failed':'Scan failed','empty_scan':'No complete posts were found.','close_wait':'Stopping and cleaning up the unfinished post…','cache_cleared':'Temporary cache cleared; downloaded files were not changed.','cache_failed':'Could not clear cache: {}','log_copied':'Log copied to the clipboard.','copy_tooltip':'Copy log','cache_tooltip':'Clear temporary cache','choose_title':'Choose posts to download','choose_summary':'Found {count} posts. Click cover cards to select.','select_all':'Select all','select_none':'Select none','cover_missing':'Cover unavailable','no_direct':'No direct-link files','back_top':'Back to top','ok':'OK','cancel':'Cancel','scan_window':'Finding posts','scan_searching':'Searching creator posts…','scan_paused':'Scan paused','scan_finishing':'Finishing the current post…','scan_count':'Scanned {pages} pages · found {posts} posts','unknown':'unknown','cancelled':'Download stopped by the user','bad_content':'The response does not match the file type (Content-Type: {content_type})','download_failed':'Download failed after 4 attempts: {title} / {filename} — {error}','album_failed':'Stopped because a file in post “{title}” failed repeatedly. The incomplete post was removed.','download_fail_prefix':'Download failed','no_selected':'The selected posts could not be found.','pause':'Pause','resume':'Resume','finish':'Finish scan','file_progress':'Downloading{count}: {name} · {current:.1f}/{total:.1f} MB','unknown_progress':'Downloading{count}: {name} · {current:.1f} MB received'},
- '日本語': {'profile_hint':'クリエイターページのURLを入力してください。','profile_valid':'✓ クリエイターページURLは有効です','folder_needed':'✓ URLは有効です。保存先を選択してください','profile_invalid':'URLが無効です。pawchive.pw の完全なクリエイターページURLを入力してください。','note_titles':'既定：投稿ごとにタイトル名のフォルダーへ保存します。','note_flat':'投稿別フォルダーは無効です。公開日順に番号を付けられます。','scan_status':'クリエイターの投稿をスキャン中…','scan_failed':'スキャンに失敗しました','empty_scan':'完全な投稿が見つかりませんでした。','close_wait':'停止して未完了の投稿を削除しています…','cache_cleared':'一時キャッシュを削除しました。ダウンロード済みファイルは変更されていません。','cache_failed':'キャッシュを削除できませんでした：{}','log_copied':'ログをクリップボードにコピーしました。','copy_tooltip':'ログをコピー','cache_tooltip':'一時キャッシュを削除','choose_title':'ダウンロードする投稿を選択','choose_summary':'{count} 件の投稿が見つかりました。カバーをクリックして選択します。','select_all':'すべて選択','select_none':'選択解除','cover_missing':'カバーを表示できません','no_direct':'直接リンクのファイルなし','back_top':'先頭へ戻る','ok':'決定','cancel':'キャンセル','scan_window':'投稿を検索中','scan_searching':'クリエイターの投稿を検索中…','scan_paused':'スキャンを一時停止しました','scan_finishing':'現在の投稿を完了しています…','scan_count':'{pages} ページを確認 · {posts} 件の投稿','unknown':'不明','cancelled':'ユーザーがダウンロードを停止しました','bad_content':'応答内容がファイル形式と一致しません（Content-Type: {content_type}）','download_failed':'4回再試行しましたが失敗しました：{title} / {filename} — {error}','album_failed':'投稿「{title}」のファイルが連続して失敗したため中止しました。未完了の投稿を削除しました。','download_fail_prefix':'ダウンロード失敗','no_selected':'選択した投稿が見つかりません。','pause':'一時停止','resume':'再開','finish':'スキャン終了','file_progress':'ダウンロード中{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'ダウンロード中{count}：{name} · {current:.1f} MB 受信済み'}
+ '简体中文': {'profile_hint':'请输入画师主页链接。','profile_valid':'✓ 画师主页链接有效','folder_needed':'✓ 链接有效；请先选择图片保存文件夹','profile_invalid':'链接格式无效：请输入 pawchive.pw 下的完整画师主页链接。','note_titles':'默认：每个图集分别保存到以标题命名的文件夹中。','note_flat':'已关闭分文件夹；可选择按发布日期排序并为图片编号。','scan_status':'正在扫描画师主页标题…','scan_failed':'扫描失败','empty_scan':'没有扫描到完整图集标题。','close_wait':'正在停止并清理未完成的图集…','cache_cleared':'临时缓存和未使用背景已清理；下载文件未受影响。','cache_failed':'缓存清理失败：{}','log_copied':'日志已复制到剪贴板。','copy_tooltip':'复制日志','cache_tooltip':'清理临时缓存和未使用背景','choose_title':'选择要下载的图集','choose_summary':'扫描到 {count} 个图集。点击封面卡片选择。','select_all':'全选','select_none':'全不选','cover_missing':'封面暂不可用','no_direct':'无直链文件','back_top':'回到顶部','ok':'确定','cancel':'取消','scan_window':'正在寻找图集','scan_searching':'正在沿着画师主页寻找图集…','scan_paused':'扫描已暂停','scan_finishing':'正在完成当前图集…','scan_count':'已扫描 {pages} 页 · 找到 {posts} 个图集','unknown':'未知','cancelled':'用户已停止下载','bad_content':'响应内容与文件类型不匹配（Content-Type: {content_type}）','download_failed':'下载失败（已重试4次）：{title} / {filename} — {error}','album_failed':'下载中止：图集“{title}”的文件连续失败，已停止以避免留下不完整图集。','download_fail_prefix':'下载失败','no_selected':'没有找到所选图集。','pause':'暂停','resume':'继续','finish':'结束扫描','file_progress':'正在下载{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'正在下载{count}：{name} · 已接收 {current:.1f} MB'},
+ '繁體中文': {'profile_hint':'請輸入畫師首頁連結。','profile_valid':'✓ 畫師首頁連結有效','folder_needed':'✓ 連結有效；請先選擇圖片儲存資料夾','profile_invalid':'連結格式無效：請輸入 pawchive.pw 下的完整畫師首頁連結。','note_titles':'預設：每篇圖集分別存入以標題命名的資料夾。','note_flat':'已關閉分資料夾；可選擇按發布日期排序並為圖片編號。','scan_status':'正在掃描畫師首頁標題…','scan_failed':'掃描失敗','empty_scan':'沒有掃描到完整圖集標題。','close_wait':'正在停止並清理未完成的圖集…','cache_cleared':'暫存快取及未使用背景已清理；下載檔案未受影響。','cache_failed':'快取清理失敗：{}','log_copied':'日誌已複製到剪貼簿。','copy_tooltip':'複製日誌','cache_tooltip':'清理暫存快取及未使用背景','choose_title':'選擇要下載的圖集','choose_summary':'掃描到 {count} 個圖集。點擊封面卡片選擇。','select_all':'全選','select_none':'全不選','cover_missing':'封面暫不可用','no_direct':'無直連檔案','back_top':'回到頂端','ok':'確定','cancel':'取消','scan_window':'正在尋找圖集','scan_searching':'正在沿著畫師首頁尋找圖集…','scan_paused':'掃描已暫停','scan_finishing':'正在完成目前圖集…','scan_count':'已掃描 {pages} 頁 · 找到 {posts} 個圖集','unknown':'未知','cancelled':'使用者已停止下載','bad_content':'回應內容與檔案類型不符（Content-Type: {content_type}）','download_failed':'下載失敗（已重試4次）：{title} / {filename} — {error}','album_failed':'下載中止：圖集「{title}」的檔案連續失敗，已停止以避免留下不完整圖集。','download_fail_prefix':'下載失敗','no_selected':'找不到所選圖集。','pause':'暫停','resume':'繼續','finish':'結束掃描','file_progress':'正在下載{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'正在下載{count}：{name} · 已接收 {current:.1f} MB'},
+ 'English': {'profile_hint':'Enter a creator profile URL.','profile_valid':'✓ Creator profile URL is valid','folder_needed':'✓ URL is valid; choose a save folder','profile_invalid':'Invalid URL. Enter a complete creator profile link from pawchive.pw.','note_titles':'Default: save each post in a folder named after its title.','note_flat':'Post folders are off; you can number files by publication date.','scan_status':'Scanning creator posts…','scan_failed':'Scan failed','empty_scan':'No complete posts were found.','close_wait':'Stopping and cleaning up the unfinished post…','cache_cleared':'Temporary cache and unused backgrounds cleared; downloaded files were not changed.','cache_failed':'Could not clear cache: {}','log_copied':'Log copied to the clipboard.','copy_tooltip':'Copy log','cache_tooltip':'Clear temporary cache and unused backgrounds','choose_title':'Choose posts to download','choose_summary':'Found {count} posts. Click cover cards to select.','select_all':'Select all','select_none':'Select none','cover_missing':'Cover unavailable','no_direct':'No direct-link files','back_top':'Back to top','ok':'OK','cancel':'Cancel','scan_window':'Finding posts','scan_searching':'Searching creator posts…','scan_paused':'Scan paused','scan_finishing':'Finishing the current post…','scan_count':'Scanned {pages} pages · found {posts} posts','unknown':'unknown','cancelled':'Download stopped by the user','bad_content':'The response does not match the file type (Content-Type: {content_type})','download_failed':'Download failed after 4 attempts: {title} / {filename} — {error}','album_failed':'Stopped because a file in post “{title}” failed repeatedly. The incomplete post was removed.','download_fail_prefix':'Download failed','no_selected':'The selected posts could not be found.','pause':'Pause','resume':'Resume','finish':'Finish scan','file_progress':'Downloading{count}: {name} · {current:.1f}/{total:.1f} MB','unknown_progress':'Downloading{count}: {name} · {current:.1f} MB received'},
+ '日本語': {'profile_hint':'クリエイターページのURLを入力してください。','profile_valid':'✓ クリエイターページURLは有効です','folder_needed':'✓ URLは有効です。保存先を選択してください','profile_invalid':'URLが無効です。pawchive.pw の完全なクリエイターページURLを入力してください。','note_titles':'既定：投稿ごとにタイトル名のフォルダーへ保存します。','note_flat':'投稿別フォルダーは無効です。公開日順に番号を付けられます。','scan_status':'クリエイターの投稿をスキャン中…','scan_failed':'スキャンに失敗しました','empty_scan':'完全な投稿が見つかりませんでした。','close_wait':'停止して未完了の投稿を削除しています…','cache_cleared':'一時キャッシュと未使用背景を削除しました。ダウンロード済みファイルは変更されていません。','cache_failed':'キャッシュを削除できませんでした：{}','log_copied':'ログをクリップボードにコピーしました。','copy_tooltip':'ログをコピー','cache_tooltip':'一時キャッシュと未使用背景を削除','choose_title':'ダウンロードする投稿を選択','choose_summary':'{count} 件の投稿が見つかりました。カバーをクリックして選択します。','select_all':'すべて選択','select_none':'選択解除','cover_missing':'カバーを表示できません','no_direct':'直接リンクのファイルなし','back_top':'先頭へ戻る','ok':'決定','cancel':'キャンセル','scan_window':'投稿を検索中','scan_searching':'クリエイターの投稿を検索中…','scan_paused':'スキャンを一時停止しました','scan_finishing':'現在の投稿を完了しています…','scan_count':'{pages} ページを確認 · {posts} 件の投稿','unknown':'不明','cancelled':'ユーザーがダウンロードを停止しました','bad_content':'応答内容がファイル形式と一致しません（Content-Type: {content_type}）','download_failed':'4回再試行しましたが失敗しました：{title} / {filename} — {error}','album_failed':'投稿「{title}」のファイルが連続して失敗したため中止しました。未完了の投稿を削除しました。','download_fail_prefix':'ダウンロード失敗','no_selected':'選択した投稿が見つかりません。','pause':'一時停止','resume':'再開','finish':'スキャン終了','file_progress':'ダウンロード中{count}：{name} · {current:.1f}/{total:.1f} MB','unknown_progress':'ダウンロード中{count}：{name} · {current:.1f} MB 受信済み'}
 }
 
 class _LegacyWorker(QThread):
@@ -1111,10 +1163,38 @@ class App(QWidget):
     def clear_cache_files(self):
         if self.busy: return
         try:
-            for item in self.cache_dir.iterdir():
-                shutil.rmtree(item) if item.is_dir() else item.unlink(missing_ok=True)
+            if self.cache_dir.is_dir() and not self.cache_dir.is_symlink():
+                for item in self.cache_dir.iterdir():
+                    try:
+                        if item.is_symlink() or getattr(item, 'is_junction', lambda: False)():
+                            item.unlink(missing_ok=True)
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink(missing_ok=True)
+                    except OSError as exc:
+                        self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
+            cleanup_stale_cache_dirs(current=self.cache_dir)
+            if self.background_store:
+                remove_disabled=True
+                if self.background_store.has_custom() and self.background_store.mode()!='custom':
+                    prompt={
+                        '简体中文':'当前未启用的自定义背景将被删除，之后需要重新编辑才能使用。继续清理吗？',
+                        '繁體中文':'目前未啟用的自訂背景將被刪除，之後需要重新編輯才能使用。繼續清理嗎？',
+                        'English':'Unused custom backgrounds will be removed and must be edited again to use them. Continue?',
+                        '日本語':'現在使われていないカスタム背景を削除します。再び使うには編集し直す必要があります。続行しますか？',
+                    }.get(self.lang,'Unused custom backgrounds will be removed. Continue?')
+                    answer=QMessageBox.question(
+                        self,'Pawchive',prompt,
+                        QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No)
+                    remove_disabled=answer==QMessageBox.StandardButton.Yes
+                self.background_store.cleanup_unused(remove_disabled=remove_disabled)
+                self.background_store.clear_cache()
+                self.refresh_background()
             self.status.setText(AUX_TEXT[self.lang]['cache_cleared'])
-        except OSError as exc: self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
     def open_download_folder(self):
         folder=Path(self.completed_path) if self.completed_path else None
         if folder and folder.is_dir():

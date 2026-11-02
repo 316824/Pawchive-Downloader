@@ -61,14 +61,71 @@ function Remove-ApplicationTask {
     Write-Host "已删除计划任务：$TaskName" -ForegroundColor Green
 }
 
+function Get-BackgroundArtifacts {
+    param([string]$StateDirectory)
+
+    # BackgroundStore keeps only this manifest and bounded JPEG previews in
+    # the application data directory.  Keep the paths explicit here so a
+    # future state-directory layout change cannot silently leave them behind.
+    $paths = @(
+        (Join-Path $StateDirectory 'backgrounds.json'),
+        (Join-Path $StateDirectory 'backgrounds')
+    )
+    return @($paths | Where-Object { Test-Path -LiteralPath $_ })
+}
+
+function Get-StaleCacheDirectories {
+    param(
+        [string]$TempDirectory,
+        [datetime]$BeforeUtc
+    )
+
+    if (-not (Test-Path -LiteralPath $TempDirectory -PathType Container)) {
+        return @()
+    }
+    $result = [System.Collections.Generic.List[string]]::new()
+    try {
+        $entries = Get-ChildItem -LiteralPath $TempDirectory -Directory -Force -ErrorAction Stop
+        foreach ($entry in $entries) {
+            if ($entry.Name -notlike 'pawchive_cache_*') { continue }
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            if ($entry.LastWriteTimeUtc -ge $BeforeUtc) { continue }
+            $result.Add($entry.FullName)
+        }
+    }
+    catch {
+        Write-Warning "无法查询过期临时缓存：$($_.Exception.Message)"
+    }
+    return $result
+}
+
 $stateDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'PawchiveDownloader'
+$tempDir = [IO.Path]::GetTempPath()
+$staleCacheBefore = [DateTime]::UtcNow.AddHours(-24)
 $registryPath = 'HKCU:\Software\PawchiveTools\PawchiveDownloader'
 $prefix = Get-CurrentUserTaskPrefix
 $tasks = @(Get-ApplicationTasks -Prefix $prefix)
+$backgroundArtifacts = @(Get-BackgroundArtifacts -StateDirectory $stateDir)
+$staleCacheDirectories = @(Get-StaleCacheDirectories -TempDirectory $tempDir -BeforeUtc $staleCacheBefore)
 $processes = @(Get-Process -Name 'PawchiveDownloader' -ErrorAction SilentlyContinue)
 
 Write-Host 'Pawchive Downloader · 发布者本机记录清理工具' -ForegroundColor Cyan
 Write-Host "数据目录：$stateDir"
+Write-Host "临时缓存目录：$tempDir"
+if ($staleCacheDirectories.Count -eq 0) {
+    Write-Host '超过 24 小时的 Pawchive 临时缓存：未发现'
+}
+else {
+    Write-Host "超过 24 小时的 Pawchive 临时缓存：发现 $($staleCacheDirectories.Count) 项（随清理移除）"
+    $staleCacheDirectories | ForEach-Object { Write-Host "  $_" }
+}
+if ($backgroundArtifacts.Count -eq 0) {
+    Write-Host '背景图配置和缩略图缓存：未发现'
+}
+else {
+    Write-Host "背景图配置和缩略图缓存：发现 $($backgroundArtifacts.Count) 项（随本机数据一并清理）"
+    $backgroundArtifacts | ForEach-Object { Write-Host "  $_" }
+}
 Write-Host "注册表项：$registryPath"
 Write-Host "当前用户任务前缀：$prefix"
 if ($tasks.Count -eq 0) {
@@ -92,7 +149,7 @@ if ($Force) {
 
 if (-not $Preview -and -not $Force -and -not $WhatIfPreference) {
     Write-Host ''
-    Write-Host '本操作会删除签到/等级/徽章/皮肤、激活、日程、断点和本机设置。' -ForegroundColor Yellow
+    Write-Host '本操作会删除签到/等级/徽章/皮肤、激活、日程、断点、背景配置/缩略图、超过 24 小时的临时缓存和本机设置。' -ForegroundColor Yellow
     Write-Host '不会删除用户已下载的图片、附件或下载目录中的 .part 文件。' -ForegroundColor Yellow
     $answer = Read-Host '确认清理请输入 CLEAN，其他输入取消'
     if ($answer -cne 'CLEAN') {
@@ -103,6 +160,13 @@ if (-not $Preview -and -not $Force -and -not $WhatIfPreference) {
 
 foreach ($task in $tasks) {
     Remove-ApplicationTask -TaskName $task
+}
+
+foreach ($cacheDirectory in $staleCacheDirectories) {
+    if ($PSCmdlet.ShouldProcess($cacheDirectory, '删除过期 Pawchive 临时缓存')) {
+        Remove-Item -LiteralPath $cacheDirectory -Recurse -Force
+        Write-Host "已删除过期临时缓存：$cacheDirectory" -ForegroundColor Green
+    }
 }
 
 if (Test-Path -LiteralPath $stateDir) {

@@ -328,6 +328,78 @@ class BackgroundStore:
         with self._lock:
             self._cache.clear()
 
+    def cleanup_unused(self, *, remove_disabled=False):
+        """Remove orphaned background previews and interrupted atomic writes.
+
+        Page previews referenced by ``backgrounds.json`` are retained by
+        default even when the global mode currently uses the default or
+        reward theme.  A configured page may become active again later, so
+        callers that only want orphan cleanup should leave ``remove_disabled``
+        false.  The explicit user cleanup action may pass true to discard all
+        configured pages while the mode is not ``custom``.
+        Temporary files left by an interrupted atomic write are always removed.
+        """
+        removed = 0
+        with self._lock:
+            original_pages = dict(self._data['pages'])
+            valid_pages = {}
+            referenced = set()
+            configured_previews = []
+            removed_pages = []
+            for page, config in self._data['pages'].items():
+                if remove_disabled and self._data['mode'] != 'custom':
+                    preview = _safe_relative_preview(self.data_dir, config.get('preview'))
+                    if preview is not None:
+                        configured_previews.append(preview)
+                    removed_pages.append(page)
+                    continue
+                preview = _safe_relative_preview(self.data_dir, config.get('preview'))
+                if preview is not None and preview.is_file():
+                    valid_pages[page] = config
+                    referenced.add(preview.resolve())
+            if valid_pages != original_pages:
+                self._data['pages'] = valid_pages
+                try:
+                    self._write()
+                except Exception:
+                    self._data['pages'] = original_pages
+                    raise
+            for page in removed_pages:
+                self._cache.pop(page, None)
+            for preview in configured_previews:
+                try:
+                    if preview.is_file():
+                        preview.unlink()
+                        removed += 1
+                except OSError:
+                    pass
+
+            candidates = []
+            try:
+                candidates.extend(path for path in self.root.iterdir()
+                                 if path.is_file())
+            except OSError:
+                candidates = []
+            try:
+                candidates.extend(path for path in self.data_dir.iterdir()
+                                 if path.is_file() and path.name.startswith('.backgrounds-')
+                                 and path.name.endswith('.tmp'))
+            except OSError:
+                pass
+            for path in candidates:
+                try:
+                    resolved = path.resolve()
+                    if resolved in referenced:
+                        continue
+                    path.unlink(missing_ok=True)
+                    removed += 1
+                except (OSError, RuntimeError):
+                    continue
+            for key in list(self._cache):
+                if key not in valid_pages:
+                    self._cache.pop(key, None)
+        return removed
+
     def register_layer(self, page, layer):
         """Register a live Qt layer so inactive pages can release their pixmap."""
         page = normalize_page(page)
