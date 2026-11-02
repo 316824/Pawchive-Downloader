@@ -144,20 +144,29 @@ class DesktopRuntime(QObject):
         from feature_dialogs import ScheduleDialog
         self.show_window(); dialog=ScheduleDialog(self.window,self)
         try:dialog.exec()
-        finally:dialog.deleteLater()
+        finally:
+            dialog.deleteLater()
+            refresh=getattr(self.window,'refresh_background',None)
+            if callable(refresh):refresh()
 
     def show_calendar(self):
         from feature_dialogs import CheckInDialog
         self.show_window(); dialog=CheckInDialog(self.window,self.store)
         try:dialog.exec()
-        finally:dialog.deleteLater()
+        finally:
+            dialog.deleteLater()
+            refresh=getattr(self.window,'refresh_background',None)
+            if callable(refresh):refresh()
 
     def request_close(self):
         if self.exit_requested:return True
         from feature_dialogs import CloseChoice
         dialog=CloseChoice(self.window,self.tray is not None)
         try:dialog.exec(); choice=dialog.choice
-        finally:dialog.deleteLater()
+        finally:
+            dialog.deleteLater()
+            refresh=getattr(self.window,'refresh_background',None)
+            if callable(refresh):refresh()
         if choice=='background':
             self.keep_background()
             return False
@@ -321,7 +330,10 @@ class DesktopRuntime(QObject):
         job=max(jobs,key=lambda value:value.get('updated',0))
         dialog=ResumeChoice(self.window,job)
         try:dialog.exec(); choice=dialog.choice
-        finally:dialog.deleteLater()
+        finally:
+            dialog.deleteLater()
+            refresh=getattr(self.window,'refresh_background',None)
+            if callable(refresh):refresh()
         if self.window.busy or self.active_schedule is not None or self.exit_requested:return
         if choice=='resume':
             try:

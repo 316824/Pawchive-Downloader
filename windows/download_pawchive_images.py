@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
     QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QFrame,
     QAbstractButton, QCheckBox, QDialog, QDialogButtonBox,
     QScrollArea, QGridLayout, QSpinBox, QSizePolicy, QGraphicsDropShadowEffect)
+from background_store import BackgroundStore
+from background_ui import BackgroundLayer, BackgroundSettingsDialog, load_preview
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
@@ -589,6 +591,8 @@ class ScanAnimation(QDialog):
     """A small animated orbit shown while profile pages and covers are scanned."""
     def __init__(self,parent):
         super().__init__(parent); self.setFixedSize(390,250); self.setModal(False); self._allow_close=False
+        from background_ui import install_background_host
+        install_background_host(self,getattr(parent,'background_store',None),'scan')
         self.phase=0; self.pages=0; self.posts=0; self.paused=False; self.finish_requested=False; self.lang='简体中文'; self.scanner=None
         layout=QVBoxLayout(self); layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.art=QLabel(); self.art.setFixedSize(220,120); self.art.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.art,0,Qt.AlignmentFlag.AlignCenter)
@@ -636,6 +640,8 @@ class ScanAnimation(QDialog):
             return
         self.timer.stop()
         super().closeEvent(event)
+        refresh=getattr(self.parent(),'refresh_background',None)
+        if callable(refresh):QTimer.singleShot(0,refresh)
     def hideEvent(self,event):
         self.timer.stop()
         super().hideEvent(event)
@@ -721,13 +727,28 @@ class App(QWidget):
         self.portrait_mode=False
         self._restore_window_size=(self.width(), self.height())
         self._restore_maximized=False
+        self.background_page='workspace'
+        self._background_auto_portrait=False
+        self._background_previous_portrait=False
+        try:
+            self.background_store=BackgroundStore(services.store.data_dir) if services else None
+        except (OSError, ValueError):
+            # A read-only profile should not prevent the downloader from
+            # starting; background customization simply remains unavailable.
+            self.background_store=None
         self._transfer_sample=None; self._speed=0.; self.stop_requested=False
         self._scan_pages=0; self._scan_posts=0
         build_interface(self,ThemeSwitch=ThemeSwitch,SoftComboBox=SoftComboBox,
             GlowButton=GlowButton,GlowCheckBox=GlowCheckBox,RainbowProgress=RainbowProgress,
             RainbowCredit=RainbowCredit,languages=TEXT,icon_path=icon_path)
+        self.background_layer=BackgroundLayer(self)
+        self.background_layer.setGeometry(self.rect())
+        self.background_layer.show(); self.background_layer.lower()
+        if self.background_store:
+            self.background_store.register_layer('workspace',self.background_layer)
         self.set_lang(self.lang)
         self.apply_theme(True)
+        self.refresh_background()
         self.fx=QTimer(self); self.fx.timeout.connect(self.tick)
         self.overlay=ParticleOverlay(self); self.overlay.show(); self.overlay.raise_()
         self.credit.fireworkRequested.connect(self.overlay.launch_firework)
@@ -823,6 +844,111 @@ class App(QWidget):
         elif not self.busy and self.files_saved==0: self.file_name.set_full_text(self.ui_text()['waiting'])
         self.refresh_reward_badge()
         if hasattr(self,'splash') and self.splash.isVisible(): self.splash.set_language(l)
+
+    def _reward_theme_available(self):
+        if not self.services:
+            return False
+        try:
+            return len(self.services.store.reward_profile().get('skins', ())) > 1
+        except Exception:
+            return False
+
+    def refresh_background_controls(self):
+        controls=getattr(self,'background_controls',None)
+        switch=getattr(self,'background_mode_switch',None)
+        slider=getattr(self,'background_opacity',None)
+        if controls is None or switch is None or slider is None:
+            return
+        store=self.background_store
+        if store is None:
+            controls.hide(); return
+        has_custom=store.has_custom(); reward_available=self._reward_theme_available()
+        controls.setVisible(has_custom or reward_available)
+        mode=store.mode()
+        switch.blockSignals(True); switch.setChecked(mode=='custom'); switch.blockSignals(False)
+        switch.setEnabled(has_custom or reward_available)
+        config=store.page_config(self.background_page)
+        value=config.get('overlay',56) if config else 56
+        slider.blockSignals(True); slider.setValue(int(value)); slider.blockSignals(False)
+        slider.setEnabled(bool(config) and mode=='custom')
+        self.background_opacity_value.setEnabled(slider.isEnabled())
+        self.background_opacity_value.setText(f'{int(value)}%')
+
+    def toggle_background_source(self, checked):
+        store=self.background_store
+        if store is None:
+            return
+        if checked:
+            target='custom' if store.has_custom() else 'default'
+        else:
+            target='reward' if self._reward_theme_available() else 'default'
+        try:
+            store.set_mode(target)
+        except Exception:
+            return
+        if target=='reward':
+            self.apply_theme(self._dark)
+        self.refresh_background()
+
+    def set_background_opacity(self, value):
+        value=int(value)
+        if hasattr(self,'background_opacity_value'):
+            self.background_opacity_value.setText(f'{value}%')
+        store=self.background_store
+        if store is None:
+            return
+        try:
+            stored=store.set_overlay(self.background_page,value)
+        except Exception:
+            return
+        if self.background_layer and not self.background_layer.pixmap.isNull():
+            self.background_layer.overlay=stored; self.background_layer.update()
+
+    def show_background_settings(self):
+        if self.background_store is None:
+            return
+        dialog=BackgroundSettingsDialog(
+            self,self.background_store,language=self.lang,
+            reward_available=self._reward_theme_available(),
+            current_page=self.background_page)
+        dialog.changed.connect(self.refresh_background)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+        self.refresh_background()
+
+    def refresh_background(self):
+        store=self.background_store
+        if store is None:
+            self.background_layer.clear_background()
+            self.refresh_background_controls()
+            return
+        mode=store.mode()
+        config=store.page_config(self.background_page) if mode=='custom' else None
+        store.activate_page(self.background_page)
+        pixmap=store.cached_preview(self.background_page,load_preview) if config else None
+        if pixmap is None or config is None:
+            self.background_layer.clear_background()
+        else:
+            store.release_except(self.background_page)
+            self.background_layer.set_background(
+                pixmap,config.get('overlay',56),config.get('aspect',1.0))
+        self._apply_background_orientation(config)
+        self.refresh_background_controls()
+
+    def _apply_background_orientation(self, config):
+        tall=bool(config and float(config.get('aspect',1.0)) < .82)
+        if tall and not self._background_auto_portrait:
+            self._background_previous_portrait=self.portrait_mode
+            self._background_auto_portrait=True
+            if not self.portrait_mode:
+                self.set_layout_mode(True)
+        elif not tall and self._background_auto_portrait:
+            previous=self._background_previous_portrait
+            self._background_auto_portrait=False
+            if not previous and self.portrait_mode:
+                self.set_layout_mode(False)
     def update_note(self,checked=None):
         self.note.setText(AUX_TEXT[self.lang]['note_titles' if self.title_check.isChecked() else 'note_flat'])
     def set_busy_state(self,busy):
@@ -859,6 +985,7 @@ class App(QWidget):
         if hasattr(self,'splash'): self.splash.counter.setStyleSheet(f'color:{self.palette_tokens["muted"]}')
         if hasattr(self,'overlay'): self.overlay.update()
         self.refresh_reward_badge()
+        self.refresh_background_controls()
 
     def apply_reward_skin(self, skin):
         """Apply and persist an unlocked reward skin from the calendar."""
@@ -1130,6 +1257,10 @@ class App(QWidget):
             return
         QApplication.instance().removeEventFilter(self)
         self.credit.animation_timer.stop(); self.fx.stop()
+        if hasattr(self,'background_layer'):
+            self.background_layer.clear_background()
+        if self.background_store:
+            self.background_store.release_except(None)
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
         if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
@@ -1163,9 +1294,17 @@ class App(QWidget):
     def resizeEvent(self,e):
         super().resizeEvent(e)
         if hasattr(self,'edition'): self.edition.setVisible(self.width()>=1100)
+        if hasattr(self,'background_opacity'):
+            compact=self.width()<1000
+            self.background_opacity.setVisible(not compact)
+            self.background_opacity_value.setVisible(not compact)
+        if hasattr(self,'background_layer'):
+            self.background_layer.setGeometry(self.rect()); self.background_layer.lower(); self.background_layer.update()
         if hasattr(self,'overlay'): self.overlay.sync(); self.overlay.raise_()
     def showEvent(self,e):
         super().showEvent(e)
+        if hasattr(self,'background_layer'):
+            self.background_layer.setGeometry(self.rect()); self.background_layer.lower(); self.background_layer.update()
         if hasattr(self,'overlay'): self.overlay.sync(); self.overlay.raise_()
 
 if __name__=='__main__':

@@ -1,9 +1,9 @@
 """Desktop presentation: shared controls stay connected to the existing workers."""
 from PySide6.QtCore import Qt, QSize, QRectF
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QShortcut
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QMenu, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
-    QBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
+    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+    QTextEdit, QVBoxLayout, QWidget, QBoxLayout)
 
 from desktop_visuals import CardHeading, StageRail, icon
 from control_effects import DARK_GLOW, LIGHT_GLOW
@@ -166,10 +166,12 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.calendar_action=w.tools_menu.addAction('')
     w.resume_action=w.tools_menu.addAction('')
     w.background_action=w.tools_menu.addAction('')
+    w.background_settings_action=w.tools_menu.addAction('')
     w.schedule_action.triggered.connect(lambda: w.services.show_schedules() if w.services else None)
     w.calendar_action.triggered.connect(lambda: w.services.show_calendar() if w.services else None)
     w.resume_action.triggered.connect(lambda: w.services.offer_resume() if w.services else None)
     w.background_action.triggered.connect(lambda: w.services.keep_background() if w.services else None)
+    w.background_settings_action.triggered.connect(lambda: w.show_background_settings() if w.services else None)
     w.tools_button.setMenu(w.tools_menu); w.tools_button.setEnabled(w.services is not None)
     header.addWidget(w.tools_button)
     w.focus_button = QPushButton()
@@ -182,6 +184,30 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.layout_button.setFixedSize(40, 40)
     w.layout_button.clicked.connect(w.toggle_layout_mode)
     header.addWidget(w.layout_button)
+    w.background_controls=QWidget()
+    w.background_controls.setObjectName('backgroundControls')
+    background_row=QHBoxLayout(w.background_controls)
+    background_row.setContentsMargins(0,0,0,0)
+    background_row.setSpacing(6)
+    w.background_mode_switch=QCheckBox()
+    w.background_mode_switch.setObjectName('backgroundModeSwitch')
+    w.background_mode_switch.setFixedSize(36,24)
+    w.background_mode_switch.setToolTip('切换自定义背景 / 签到主题')
+    w.background_mode_switch.toggled.connect(w.toggle_background_source)
+    background_row.addWidget(w.background_mode_switch)
+    w.background_opacity=QSlider(Qt.Orientation.Horizontal)
+    w.background_opacity.setObjectName('backgroundOpacity')
+    w.background_opacity.setRange(15,85)
+    w.background_opacity.setValue(56)
+    w.background_opacity.setFixedWidth(82)
+    w.background_opacity.setToolTip('背景遮罩深度')
+    w.background_opacity.valueChanged.connect(w.set_background_opacity)
+    background_row.addWidget(w.background_opacity)
+    w.background_opacity_value=text_label('56%','small')
+    w.background_opacity_value.setMinimumWidth(30)
+    background_row.addWidget(w.background_opacity_value)
+    w.background_controls.setVisible(False)
+    header.addWidget(w.background_controls)
     w.theme = ThemeSwitch(w.apply_theme)
     header.addWidget(w.theme)
     w.clear_cache = QPushButton()
@@ -591,6 +617,13 @@ def apply_style(w, dark, skin='default'):
         QCheckBox::indicator:hover {{border:1px solid {p['glow']};}}
         QCheckBox::indicator:checked {{background:{p['accent']};border:1px solid {p['accent']};}}
         QCheckBox:disabled {{color:{p['small']};}}
+        QCheckBox#backgroundModeSwitch {{padding:0;background:transparent;}}
+        QCheckBox#backgroundModeSwitch::indicator {{width:30px;height:16px;border:1px solid {p['line']};border-radius:8px;background:{p['field']};}}
+        QCheckBox#backgroundModeSwitch::indicator:hover {{border-color:{p['glow']};}}
+        QCheckBox#backgroundModeSwitch::indicator:checked {{background:{p['accent']};border:1px solid {p['glow']};}}
+        QSlider#backgroundOpacity {{background:transparent;min-height:18px;}}
+        QSlider#backgroundOpacity::groove:horizontal {{height:4px;background:{p['line']};border-radius:2px;}}
+        QSlider#backgroundOpacity::handle:horizontal {{width:12px;height:12px;margin:-4px 0;border-radius:6px;background:{p['accent']};}}
         QSpinBox {{background:{p['field']};border:1px solid {p['line']};border-radius:8px;padding:6px 10px;}}
         QTextEdit {{background:transparent;border:0;padding:0;font-size:12px;selection-background-color:{p['hover']};}}
         QScrollBar:vertical {{background:transparent;width:9px;margin:4px 0;}}
@@ -681,3 +714,7 @@ def translate_interface(w, text, auxiliary):
     w.calendar_action.setText(tr(w.lang,'calendar'))
     w.resume_action.setText(tr(w.lang,'resume'))
     w.background_action.setText(tr(w.lang,'background'))
+    w.background_settings_action.setText(tr(w.lang,'background_settings'))
+    w.background_mode_switch.setToolTip(tr(w.lang,'background_mode'))
+    w.background_opacity.setToolTip(tr(w.lang,'background_opacity'))
+    w.background_opacity_value.setToolTip(tr(w.lang,'background_opacity'))

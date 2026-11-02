@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPainterPath, Q
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
+from background_ui import install_background_host
 from desktop_visuals import icon
 
 
@@ -197,6 +198,7 @@ class CoverCard(QFrame):
 class PostPicker(QDialog):
     def __init__(self, parent, titles, checkbox_class, text):
         super().__init__(parent)
+        install_background_host(self,getattr(parent,'background_store',None),'picker')
         self.titles, self.text = list(titles), text
         self.copy = COPY.get(getattr(parent, 'lang', '简体中文'), COPY['简体中文'])
         self.dark = bool(getattr(parent, '_dark', True))
@@ -391,3 +393,6 @@ def choose_posts(parent, titles, checkbox_class, text):
                 if dialog.titles[index].get('url')}
     finally:
         dialog.deleteLater()
+        refresh = getattr(parent, 'refresh_background', None)
+        if callable(refresh):
+            refresh()

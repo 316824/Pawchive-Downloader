@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QApplication, QCalendarWidget, QCheckBox, QComboB
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QTextEdit,
     QTabWidget, QToolButton, QVBoxLayout)
 
+from background_ui import install_background_host
 from feature_text import LANGUAGES, tr
 
 
@@ -28,6 +29,7 @@ class CloseChoice(QDialog):
     def __init__(self,parent,tray_available):
         super().__init__(parent)
         self.choice='cancel'
+        install_background_host(self,getattr(parent,'background_store',None),'close_choice')
         lang=parent.lang
         self.setWindowTitle(tr(lang,'close_title'))
         self.setMinimumWidth(440)
@@ -56,6 +58,7 @@ class ResumeChoice(QDialog):
     def __init__(self,parent,job):
         super().__init__(parent)
         self.choice='later'; lang=parent.lang
+        install_background_host(self,getattr(parent,'background_store',None),'resume_choice')
         self.setWindowTitle(tr(lang,'resume_title'))
         self.setMinimumWidth(480)
         layout=QVBoxLayout(self); layout.setContentsMargins(28,26,28,24); layout.setSpacing(16)
@@ -80,6 +83,12 @@ class ActivationDialog(QDialog):
         super().__init__(parent)
         import activation
         self.api=activation; self.store=store; self.lang=language
+        try:
+            from background_store import BackgroundStore
+            self.background_store=BackgroundStore(store.data_dir)
+        except (AttributeError, OSError, ValueError):
+            self.background_store=None
+        install_background_host(self,self.background_store,'activation')
         self._localized=[]
         self.setWindowTitle(tr(language,'activation'))
         self.setMinimumWidth(550)
@@ -155,6 +164,7 @@ class ScheduleDialog(QDialog):
     def __init__(self,parent,runtime):
         super().__init__(parent)
         self.runtime=runtime; self.lang=parent.lang
+        install_background_host(self,getattr(parent,'background_store',None),'schedules')
         self.setWindowTitle(tr(self.lang,'schedules')); self.resize(760,700)
         self.setMinimumSize(620,550)
         layout=QVBoxLayout(self); layout.setContentsMargins(26,24,26,24); layout.setSpacing(14)
@@ -228,6 +238,7 @@ class CheckInDialog(QDialog):
     def __init__(self,parent,store):
         super().__init__(parent)
         self.parent_window=parent; self.store=store; self.lang=parent.lang
+        install_background_host(self,getattr(parent,'background_store',None),'calendar')
         self.setWindowTitle(tr(self.lang,'calendar')); self.resize(700,760)
         layout=QVBoxLayout(self); layout.setContentsMargins(26,24,26,24); layout.setSpacing(12)
         title=label(tr(self.lang,'calendar')); title.setStyleSheet('font-size:22px;font-weight:600')
@@ -432,3 +443,5 @@ class CheckInDialog(QDialog):
         self.store.check_in(); self.refresh()
         refresh=getattr(self.parent_window,'refresh_reward_badge',None)
         if callable(refresh):refresh()
+        refresh_background=getattr(self.parent_window,'refresh_background_controls',None)
+        if callable(refresh_background):refresh_background()
