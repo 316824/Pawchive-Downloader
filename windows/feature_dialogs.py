@@ -259,12 +259,101 @@ class CheckInDialog(QDialog):
         layout.addLayout(theme_row)
         self.skin_notice=label('',True); layout.addWidget(self.skin_notice)
         self.tabs=QTabWidget()
+        # Keep the reward cabinet visually in the same language as the rest of
+        # the application.  The stock tab style varies across Windows themes
+        # (and made the achievements page look like a separate, unthemed
+        # panel), so the tab strip and its three list panes use the current
+        # palette tokens explicitly.
+        self.tabs.setObjectName('rewardTabs')
         self.badge_list=QListWidget(); self.gallery_list=QListWidget(); self.achievement_list=QListWidget()
+        self.badge_list.setObjectName('rewardBadges')
+        self.gallery_list.setObjectName('rewardGallery')
+        self.achievement_list.setObjectName('rewardAchievements')
         self.tabs.addTab(self.badge_list,''); self.tabs.addTab(self.gallery_list,''); self.tabs.addTab(self.achievement_list,'')
+        self._apply_reward_styles(tokens)
         layout.addWidget(self.tabs,1)
         layout.addWidget(label(tr(self.lang,'calendar_locked'),True))
         close=QPushButton(tr(self.lang,'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
         self.refresh()
+
+    def _apply_reward_styles(self, tokens):
+        """Style the reward tabs/lists with stable hover and selected states.
+
+        In particular, ``:selected:hover`` repeats the selected treatment so
+        moving over the active tab or achievement row never produces a second
+        (brighter or differently coloured) outline.  This also avoids the
+        platform-dependent native tab background that previously made the
+        achievements pane look unlike the badges and gallery panes.
+        """
+        glow=tokens['glow']; line=tokens['line']; field=tokens['field']
+        card=tokens['card']; hover=tokens['hover']; text=tokens['text']; muted=tokens['muted']
+        tab_bar=self.tabs.tabBar()
+        tab_bar.setObjectName('rewardTabBar')
+        self.tabs.setStyleSheet(f'''
+            QTabWidget#rewardTabs {{
+                background: transparent;
+            }}
+            QTabWidget#rewardTabs::pane {{
+                background: {field};
+                border: 1px solid {line};
+                border-radius: 12px;
+                top: -1px;
+            }}
+            QTabBar#rewardTabBar {{
+                background: transparent;
+            }}
+            QTabBar#rewardTabBar::tab {{
+                background: {card};
+                color: {muted};
+                border: 1px solid {line};
+                border-radius: 8px;
+                padding: 8px 14px;
+                margin-right: 6px;
+            }}
+            QTabBar#rewardTabBar::tab:hover,
+            QTabBar#rewardTabBar::tab:selected,
+            QTabBar#rewardTabBar::tab:selected:hover {{
+                background: {hover};
+                color: {text};
+                border-color: {glow};
+            }}
+            QListWidget#rewardBadges,
+            QListWidget#rewardGallery,
+            QListWidget#rewardAchievements {{
+                background: {field};
+                color: {text};
+                border: 0;
+                border-radius: 10px;
+                padding: 7px;
+                outline: 0;
+            }}
+            QListWidget#rewardBadges::item,
+            QListWidget#rewardGallery::item,
+            QListWidget#rewardAchievements::item {{
+                background: {card};
+                color: {text};
+                border: 1px solid transparent;
+                border-radius: 7px;
+                padding: 9px;
+                margin: 1px 0;
+            }}
+            QListWidget#rewardBadges::item:hover,
+            QListWidget#rewardGallery::item:hover,
+            QListWidget#rewardAchievements::item:selected,
+            QListWidget#rewardAchievements::item:selected:hover,
+            QListWidget#rewardBadges::item:selected,
+            QListWidget#rewardBadges::item:selected:hover,
+            QListWidget#rewardGallery::item:selected,
+            QListWidget#rewardGallery::item:selected:hover {{
+                background: {hover};
+                color: {text};
+                border-color: {glow};
+            }}
+        ''')
+        # Re-polish after assigning the object name: Qt may have already
+        # cached the selector during QTabWidget construction.
+        tab_bar.style().unpolish(tab_bar)
+        tab_bar.style().polish(tab_bar)
 
     def refresh(self):
         stats=self.store.checkin_stats()

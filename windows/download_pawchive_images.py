@@ -8,7 +8,7 @@ import shutil
 import sys, random, math
 import requests
 from bs4 import BeautifulSoup
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF, QRect, QRectF, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF, QRect, QRectF, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl, QSize
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QRadialGradient, QFont, QPixmap, QIcon, QLinearGradient, QGradient, QFontMetricsF, QPainterPath, QDesktopServices
 from PySide6.QtWidgets import QStyle, QStyleOptionButton
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -701,11 +701,15 @@ class App(QWidget):
         if self.lang not in TEXT:self.lang='简体中文'
         self.reward_skin=services.store.get_setting('reward_skin','default') if services else 'default'
         self.particles=[]; self.setMouseTracking(True)
+        # The normal presentation keeps the original wide minimum.  The
+        # portrait toggle temporarily lowers this constraint while the two
+        # primary panels are stacked.
         self.setMinimumSize(900,740); self.resize(1180,941)
         if QApplication.platformName()!='offscreen':
             available=QApplication.primaryScreen().availableGeometry()
             self.setMinimumHeight(min(740,max(520,available.height()-56)))
             self.resize(max(900,min(1180,available.width()-48)),max(self.minimumHeight(),min(941,available.height()-56)))
+        self._normal_minimum_size=QSize(self.minimumWidth(),self.minimumHeight())
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
         self.setWindowIcon(QIcon(str(icon_path)))
@@ -714,6 +718,9 @@ class App(QWidget):
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
         self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0
+        self.portrait_mode=False
+        self._restore_window_size=(self.width(), self.height())
+        self._restore_maximized=False
         self._transfer_sample=None; self._speed=0.; self.stop_requested=False
         self._scan_pages=0; self._scan_posts=0
         build_interface(self,ThemeSwitch=ThemeSwitch,SoftComboBox=SoftComboBox,
@@ -726,6 +733,60 @@ class App(QWidget):
         self.credit.fireworkRequested.connect(self.overlay.launch_firework)
         self._last_particle=QPointF(-1000,-1000)
         QApplication.instance().installEventFilter(self)
+
+    def toggle_layout_mode(self):
+        """Switch between the wide workspace and the stacked portrait view."""
+        self.set_layout_mode(not self.portrait_mode)
+
+    def set_layout_mode(self, portrait):
+        """Apply a layout mode without rebuilding or losing active controls."""
+        portrait=bool(portrait)
+        if portrait==self.portrait_mode:
+            return
+        from desktop_design import set_layout_mode
+        if portrait:
+            self._restore_window_size=QSize(self.width(),self.height())
+            self._restore_maximized=self.isMaximized()
+            if self._restore_maximized:
+                self.showNormal()
+            # Keep the portrait width comfortable for text fields while
+            # respecting the available desktop.  Height is allowed to grow,
+            # but never beyond the usable screen area.
+            screen=QApplication.primaryScreen()
+            available=screen.availableGeometry() if screen else self.geometry()
+            width=min(820,max(680,available.width()-48))
+            desired_height=min(1200,max(self.height()+120,980))
+            height=min(desired_height,max(520,available.height()-32))
+            self.setMinimumSize(640,520)
+            set_layout_mode(self,True)
+            self.resize(width,height)
+            self._center_in_available(available)
+        else:
+            normal_minimum=self._normal_minimum_size
+            was_maximized=self.isMaximized()
+            if was_maximized:
+                self.showNormal()
+            self.setMinimumSize(normal_minimum)
+            set_layout_mode(self,False)
+            restored=self._restore_window_size
+            width=max(normal_minimum.width(),restored.width())
+            height=max(normal_minimum.height(),restored.height())
+            screen=QApplication.primaryScreen()
+            available=screen.availableGeometry() if screen else self.geometry()
+            width=min(width,max(normal_minimum.width(),available.width()-48))
+            height=min(height,max(normal_minimum.height(),available.height()-32))
+            self.resize(width,height)
+            self._center_in_available(available)
+            if self._restore_maximized or was_maximized:
+                self.showMaximized()
+
+    def _center_in_available(self, available):
+        """Center a mode transition without moving the window off-screen."""
+        frame=self.frameGeometry()
+        x=available.x()+max(0,(available.width()-frame.width())//2)
+        y=available.y()+max(0,(available.height()-frame.height())//2)
+        self.move(x,y)
+
     def set_lang(self,l):
         self.lang=l
         if self.services:

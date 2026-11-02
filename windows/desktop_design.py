@@ -2,7 +2,8 @@
 from PySide6.QtCore import Qt, QSize, QRectF
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QShortcut
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QMenu, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget)
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QBoxLayout)
 
 from desktop_visuals import CardHeading, StageRail, icon
 from control_effects import DARK_GLOW, LIGHT_GLOW
@@ -22,7 +23,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='已接收 {current:.1f} MB',
         paused='扫描已暂停', scanned='已扫描 {pages} 页 · 收集 {posts} 个图集',
         paste_empty='剪贴板中没有可用的链接。', stop='停止下载', safe_stop='正在停止并清理未完成的图集…',
-        settled='本次下载已结束', copy_empty='暂无可复制的日志'),
+        settled='本次下载已结束', copy_empty='暂无可复制的日志',
+        portrait_mode='切换竖屏模式', window_mode='切换窗口模式'),
     '繁體中文': dict(workspace='下載工作台',
         source='畫師首頁', destination='儲存位置', options='下載方式', activity='任務概覽',
         source_hint='請輸入完整的畫師首頁連結', folder_hint='選擇儲存圖片與附件的資料夾',
@@ -36,7 +38,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='已接收 {current:.1f} MB',
         paused='掃描已暫停', scanned='已掃描 {pages} 頁 · 收集 {posts} 個圖集',
         paste_empty='剪貼簿中沒有可用的連結。', stop='停止下載', safe_stop='正在停止並清理未完成的圖集…',
-        settled='本次下載已結束', copy_empty='暫無可複製的日誌'),
+        settled='本次下載已結束', copy_empty='暫無可複製的日誌',
+        portrait_mode='切換直向模式', window_mode='切換視窗模式'),
     'English': dict(workspace='Download workspace',
         source='Creator profile', destination='Save location', options='Download preferences', activity='Activity',
         source_hint='Enter a full creator profile URL', folder_hint='Choose a folder for images and attachments',
@@ -50,7 +53,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='{current:.1f} MB received',
         paused='Scan paused', scanned='{pages} pages scanned · {posts} posts found',
         paste_empty='No usable link on the clipboard.', stop='Stop download', safe_stop='Stopping and cleaning up the unfinished post…',
-        settled='This download has ended', copy_empty='There is no log to copy yet'),
+        settled='This download has ended', copy_empty='There is no log to copy yet',
+        portrait_mode='Switch to portrait mode', window_mode='Switch to window mode'),
     '日本語': dict(workspace='ダウンロードワークスペース',
         source='クリエイターページ', destination='保存先', options='ダウンロード設定', activity='タスクの状況',
         source_hint='クリエイターページの完全なURLを入力', folder_hint='画像と添付ファイルの保存先を選択',
@@ -64,7 +68,8 @@ COPY = {
         received='{current:.1f} / {total:.1f} MB', unknown_size='{current:.1f} MB 受信済み',
         paused='スキャン一時停止', scanned='{pages} ページ確認 · {posts} 件の投稿',
         paste_empty='クリップボードに有効なリンクがありません。', stop='ダウンロード停止', safe_stop='停止して未完了の投稿を削除しています…',
-        settled='今回のダウンロードは終了しました', copy_empty='コピーできるログがありません'),
+        settled='今回のダウンロードは終了しました', copy_empty='コピーできるログがありません',
+        portrait_mode='縦長表示に切り替え', window_mode='通常表示に切り替え'),
 }
 
 
@@ -133,6 +138,9 @@ def text_label(text='', name=''):
 
 def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
                     RainbowProgress, RainbowCredit, languages, icon_path):
+    # Keep the two primary panels in one box layout so they can be switched
+    # between the wide and stacked presentations without rebuilding widgets.
+    w.portrait_mode = bool(getattr(w, 'portrait_mode', False))
     root = QVBoxLayout(w)
     root.setContentsMargins(30, 24, 30, 18)
     root.setSpacing(20)
@@ -169,6 +177,11 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.focus_button.setFixedSize(40, 40)
     w.focus_button.clicked.connect(w.toggle_logs)
     header.addWidget(w.focus_button)
+    w.layout_button = QPushButton()
+    w.layout_button.setObjectName('toolButton')
+    w.layout_button.setFixedSize(40, 40)
+    w.layout_button.clicked.connect(w.toggle_layout_mode)
+    header.addWidget(w.layout_button)
     w.theme = ThemeSwitch(w.apply_theme)
     header.addWidget(w.theme)
     w.clear_cache = QPushButton()
@@ -186,8 +199,9 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
 
     w.stage_rail = StageRail()
     root.addWidget(w.stage_rail)
-    content = QHBoxLayout()
+    content = QBoxLayout(QBoxLayout.Direction.LeftToRight)
     content.setSpacing(20)
+    w.content_layout = content
     w.main_scroll = QScrollArea()
     w.main_scroll.setObjectName('configurationScroll')
     w.main_scroll.setWidgetResizable(True)
@@ -437,6 +451,66 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
         button.setCursor(Qt.CursorShape.PointingHandCursor)
 
 
+def set_layout_mode(w, portrait):
+    """Switch the main content between wide and stacked presentations.
+
+    The scroll areas remain the same widgets, so active downloads, logs and
+    selections survive the transition. Only the box direction and minimum
+    size hints change.
+    """
+    portrait = bool(portrait)
+    w.portrait_mode = portrait
+    layout = getattr(w, 'content_layout', None)
+    if layout is not None:
+        layout.setDirection(QBoxLayout.Direction.TopToBottom if portrait
+                            else QBoxLayout.Direction.LeftToRight)
+        layout.setSpacing(16 if portrait else 20)
+        layout.setStretch(0, 3)
+        layout.setStretch(1, 2)
+    main_scroll = getattr(w, 'main_scroll', None)
+    activity_scroll = getattr(w, 'activity_scroll', None)
+    if main_scroll is not None and activity_scroll is not None:
+        if portrait:
+            main_scroll.setMinimumWidth(0)
+            activity_scroll.setMinimumWidth(0)
+            # Let the window size and the two scroll areas negotiate their
+            # height.  Hard minimum heights here would make the *window*
+            # minimum height exceed a short laptop screen; each panel already
+            # has its own vertical scroll bar for compact portrait layouts.
+            main_scroll.setMinimumHeight(0)
+            activity_scroll.setMinimumHeight(0)
+            main_scroll.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                      QSizePolicy.Policy.Expanding)
+            activity_scroll.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                          QSizePolicy.Policy.Expanding)
+        else:
+            main_scroll.setMinimumWidth(460)
+            activity_scroll.setMinimumWidth(0)
+            main_scroll.setMinimumHeight(0)
+            activity_scroll.setMinimumHeight(0)
+            main_scroll.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                      QSizePolicy.Policy.Preferred)
+            activity_scroll.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                          QSizePolicy.Policy.Preferred)
+    update_layout_button(w)
+    if hasattr(w, 'layout_button'):
+        labels = COPY.get(getattr(w, 'lang', '简体中文'), COPY['简体中文'])
+        key = 'window_mode' if portrait else 'portrait_mode'
+        w.layout_button.setToolTip(labels[key])
+        w.layout_button.setAccessibleName(labels[key])
+
+
+def update_layout_button(w):
+    button = getattr(w, 'layout_button', None)
+    if button is None:
+        return
+    palette = getattr(w, 'palette_tokens', {})
+    color = palette.get('muted', '#94a3bb')
+    kind = 'desktop' if getattr(w, 'portrait_mode', False) else 'phone'
+    button.setIcon(icon(kind, color))
+    button.setIconSize(QSize(18, 18))
+
+
 def apply_style(w, dark, skin='default'):
     p = dict(bg='#10141c', card='#171e29', panel='#141b25', text='#e9edf6',
              muted='#99a6bb', small='#748399', line='#2a3445', accent='#9cb3ff',
@@ -552,6 +626,7 @@ def apply_style(w, dark, skin='default'):
                          (w.browse,'folder'), (w.open_folder_button,'folder'), (w.start,'arrow'),(w.tools_button,'settings')):
         button.setIcon(icon(kind, p['muted'] if button is not w.start else p['button_text']))
         button.setIconSize(QSize(17, 17))
+    update_layout_button(w)
     w.progress.track = p['line']
     w.progress.colors = ['#f07e99','#f5b864','#e5ce72','#72cba3','#67c9d8','#91a7ef','#c094dd'] if dark else [
         '#d05d80','#d9983d','#c4a736','#3d9e78','#369aad','#647bd0','#9a66bc']
@@ -589,6 +664,9 @@ def translate_interface(w, text, auxiliary):
     theme_tip={'简体中文':'切换明暗主题','繁體中文':'切換明暗主題','English':'Toggle appearance','日本語':'明暗テーマを切替'}[w.lang]
     w.theme.setToolTip(theme_tip)
     w.theme.setAccessibleName(theme_tip)
+    mode_key = 'window_mode' if getattr(w, 'portrait_mode', False) else 'portrait_mode'
+    w.layout_button.setToolTip(t[mode_key])
+    w.layout_button.setAccessibleName(t[mode_key])
     w.start.setToolTip(text['start'])
     w.footer_hint.setText(t['expand'] if w.logs_hidden else t['focus'])
     w.stop_button.setText(t['stop'])

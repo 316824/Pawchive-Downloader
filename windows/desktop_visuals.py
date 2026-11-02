@@ -109,6 +109,17 @@ def icon(kind, color='#94afff', size=20):
                 angle = step * math.pi / 4
                 line(12 + 7 * math.cos(angle), 12 + 7 * math.sin(angle),
                      12 + 10 * math.cos(angle), 12 + 10 * math.sin(angle))
+        elif kind == 'phone':
+            # A compact phone outline communicates the action available in
+            # the default wide layout: switch to the tall, stacked view.
+            painter.drawRoundedRect(QRectF(7, 2.5, 10, 19), 2.3, 2.3)
+            line(10, 5, 14, 5)
+            painter.drawEllipse(QPointF(12, 18.5), 0.9, 0.9)
+        elif kind == 'desktop':
+            # The inverse action shown while the stacked view is active.
+            painter.drawRoundedRect(QRectF(3, 4, 18, 12), 1.6, 1.6)
+            line(12, 16, 12, 20)
+            line(8, 20, 16, 20)
         else:
             raise ValueError(f'Unknown desktop icon: {kind}')
         painter.drawPath(path)
