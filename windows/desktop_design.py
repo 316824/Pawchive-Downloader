@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import (QByteArray, QEvent, QMimeData, QPoint, QRectF, QSize,
+from PySide6.QtCore import (QByteArray, QEvent, QMimeData, QPoint, QRect, QRectF, QSize,
     Qt, QSignalBlocker, Signal)
 from PySide6.QtGui import (QColor, QDrag, QIcon, QKeySequence, QPainter, QPainterPath,
     QPixmap, QShortcut)
@@ -34,7 +34,7 @@ COPY = {
         link_choice_title='检测到帖子链接', link_choice_detail='要下载该画师的全部图集，还是只下载当前帖子？',
         link_choice_batch='扫描并选择图集', link_choice_single='只下载当前帖子', link_choice_cancel='取消',
         portrait_mode='切换竖屏模式', window_mode='切换窗口模式',
-        queue='下载队列', queue_empty='暂无排队图集', queue_count='{count} 个图集',
+        queue='下载队列', queue_empty='暂无排队图集', queue_count='{count} 个图集', recycle='回收站', queue_top='移到最前', queue_cancel_selected='取消选中',
         queue_pause='暂停', queue_resume='继续', queue_cancel='取消', queue_retry='重试',
         queue_waiting='等待中', queue_running='下载中', queue_paused='已暂停',
         queue_failed='下载失败', queue_cancelled='已取消', queue_complete='已完成'),
@@ -55,7 +55,7 @@ COPY = {
         link_choice_title='偵測到貼文連結', link_choice_detail='要下載這位畫師的全部圖集，還是只下載目前貼文？',
         link_choice_batch='掃描並選擇圖集', link_choice_single='只下載目前貼文', link_choice_cancel='取消',
         portrait_mode='切換直向模式', window_mode='切換視窗模式',
-        queue='下載佇列', queue_empty='目前沒有排隊圖集', queue_count='{count} 個圖集',
+        queue='下載佇列', queue_empty='目前沒有排隊圖集', queue_count='{count} 個圖集', recycle='回收站', queue_top='移到最前', queue_cancel_selected='取消選取',
         queue_pause='暫停', queue_resume='繼續', queue_cancel='取消', queue_retry='重試',
         queue_waiting='等待中', queue_running='下載中', queue_paused='已暫停',
         queue_failed='下載失敗', queue_cancelled='已取消', queue_complete='已完成'),
@@ -76,7 +76,7 @@ COPY = {
         link_choice_title='Post link detected', link_choice_detail='Download every post from this creator, or only this post?',
         link_choice_batch='Scan and choose posts', link_choice_single='Only this post', link_choice_cancel='Cancel',
         portrait_mode='Switch to portrait mode', window_mode='Switch to window mode',
-        queue='Download queue', queue_empty='No queued collections', queue_count='{count} collections',
+        queue='Download queue', queue_empty='No queued collections', queue_count='{count} collections', recycle='Recycle bin', queue_top='Move to top', queue_cancel_selected='Cancel selected',
         queue_pause='Pause', queue_resume='Resume', queue_cancel='Cancel', queue_retry='Retry',
         queue_waiting='Waiting', queue_running='Downloading', queue_paused='Paused',
         queue_failed='Download failed', queue_cancelled='Cancelled', queue_complete='Complete'),
@@ -97,7 +97,7 @@ COPY = {
         link_choice_title='投稿リンクを検出しました', link_choice_detail='このクリエイターの全投稿を取得しますか、それともこの投稿だけにしますか？',
         link_choice_batch='スキャンして投稿を選択', link_choice_single='この投稿だけ', link_choice_cancel='キャンセル',
         portrait_mode='縦長表示に切り替え', window_mode='通常表示に切り替え',
-        queue='ダウンロードキュー', queue_empty='待機中のコレクションはありません', queue_count='{count} 件',
+        queue='ダウンロードキュー', queue_empty='待機中のコレクションはありません', queue_count='{count} 件', recycle='ごみ箱', queue_top='先頭へ移動', queue_cancel_selected='選択をキャンセル',
         queue_pause='一時停止', queue_resume='再開', queue_cancel='キャンセル', queue_retry='再試行',
         queue_waiting='待機中', queue_running='ダウンロード中', queue_paused='一時停止',
         queue_failed='ダウンロード失敗', queue_cancelled='キャンセル済み', queue_complete='完了'),
@@ -336,9 +336,12 @@ class QueueItemWidget(QFrame):
         status = str(self._item_value(item, 'status', 'state', default='queued') or 'queued').lower()
         if status == 'running':
             self._status_key = 'queue_running'
-        elif status in {'paused', 'pause'}:
+        elif status in {'paused', 'pause', 'pausing'}:
             self._status_key = 'queue_paused'
             status = 'paused'
+        elif status in {'cancelling', 'canceling'}:
+            self._status_key = 'queue_cancelled'
+            status = 'cancelled'
         elif status in {'failed', 'error'}:
             self._status_key = 'queue_failed'
             status = 'failed'
@@ -357,7 +360,7 @@ class QueueItemWidget(QFrame):
         self.pause_button.setAccessibleName(self.pause_button.toolTip())
         self.pause_button.setText('Ⅱ' if status == 'running' else '▶')
         self.cancel_button.setVisible(status not in self.TERMINAL and status not in {'failed', 'paused'})
-        self.retry_button.setVisible(status in {'failed', 'cancelled', 'canceled'})
+        self.retry_button.setVisible(status in {'failed'})
         self.setProperty('queueState', status)
         self._polish()
 
@@ -605,6 +608,38 @@ class DownloadQueueWidget(QFrame):
     def _emit_order(self):
         self.orderChanged.emit(list(self._order))
 
+    def _rubber_local(self, watched, position):
+        try:
+            return self.mapFromGlobal(watched.mapToGlobal(position))
+        except (AttributeError, RuntimeError):
+            return QPoint(0, 0)
+
+    def _begin_rubber(self, watched, position):
+        self._rubber_origin=self._rubber_local(watched,position)
+        if self._rubber is None:
+            self._rubber=QRubberBand(QRubberBand.Shape.Rectangle,self)
+        self._rubber.setGeometry(QRectF(self._rubber_origin,self._rubber_origin).toRect())
+        self._rubber.show()
+
+    def _update_rubber(self, watched, position):
+        if self._rubber_origin is None:
+            return
+        current=self._rubber_local(watched,position)
+        rect=QRectF(self._rubber_origin,current).toRect().normalized()
+        self._rubber.setGeometry(rect)
+        for item_id,row in self._rows.items():
+            row_rect=QRect(row.mapTo(self,QPoint(0,0)),row.size())
+            selected=rect.intersects(row_rect)
+            if selected:
+                self._selected.add(item_id)
+            row.set_selected(item_id in self._selected)
+        self._emit_selection()
+
+    def _end_rubber(self):
+        self._rubber_origin=None
+        if self._rubber is not None:
+            self._rubber.hide()
+
     def _drag_id(self, event):
         mime = event.mimeData() if hasattr(event, 'mimeData') else None
         if mime is None or not mime.hasFormat('application/x-pawchive-queue-id'):
@@ -649,6 +684,16 @@ class DownloadQueueWidget(QFrame):
 
     def eventFilter(self, obj, event):
         if obj in {self.body, self.scroll.viewport()}:
+            if event.type()==QEvent.Type.MouseButtonPress and event.button()==Qt.MouseButton.LeftButton:
+                self._begin_rubber(obj,event.position().toPoint())
+                return True
+            if event.type()==QEvent.Type.MouseMove and event.buttons() & Qt.MouseButton.LeftButton:
+                self._update_rubber(obj,event.position().toPoint())
+                return True
+            if event.type()==QEvent.Type.MouseButtonRelease and event.button()==Qt.MouseButton.LeftButton:
+                self._update_rubber(obj,event.position().toPoint())
+                self._end_rubber()
+                return True
             if event.type() == QEvent.Type.DragEnter:
                 return self._accept_drag(event)
             if event.type() == QEvent.Type.DragMove:
@@ -673,7 +718,8 @@ class DownloadQueueWidget(QFrame):
             rect = QRectF(self._rubber_origin, current).toRect().normalized()
             self._rubber.setGeometry(rect)
             for item_id, row in self._rows.items():
-                selected = rect.intersects(row.geometry())
+                row_rect=QRect(row.mapTo(self,QPoint(0,0)),row.size())
+                selected = rect.intersects(row_rect)
                 if selected:
                     self._selected.add(item_id)
                 row.set_selected(item_id in self._selected)
@@ -1002,6 +1048,21 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     queue_header.addWidget(w.queue_heading, 1)
     w.queue_count = text_label('0', 'queueCount')
     queue_header.addWidget(w.queue_count, 0, Qt.AlignmentFlag.AlignRight)
+    w.recycle_button=QPushButton('♻')
+    w.recycle_button.setObjectName('toolButton')
+    w.recycle_button.setFixedSize(32,32)
+    w.recycle_button.clicked.connect(lambda: getattr(w,'show_recycle_bin',lambda: None)())
+    queue_header.addWidget(w.recycle_button)
+    w.queue_top_button=QPushButton('↑')
+    w.queue_top_button.setObjectName('toolButton')
+    w.queue_top_button.setFixedSize(32,32)
+    w.queue_top_button.clicked.connect(lambda: getattr(w,'handle_queue_selection_action',lambda *_: None)('top'))
+    queue_header.addWidget(w.queue_top_button)
+    w.queue_cancel_selected_button=QPushButton('×')
+    w.queue_cancel_selected_button.setObjectName('toolButton')
+    w.queue_cancel_selected_button.setFixedSize(32,32)
+    w.queue_cancel_selected_button.clicked.connect(lambda: getattr(w,'handle_queue_selection_action',lambda *_: None)('cancel'))
+    queue_header.addWidget(w.queue_cancel_selected_button)
     queue_box.addLayout(queue_header)
     w.download_queue = DownloadQueueWidget(RainbowProgress, w.queue_card)
     w.download_queue.setMinimumHeight(150)
@@ -1009,6 +1070,8 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
         lambda item_id, action: getattr(w, 'handle_queue_action', lambda *_: None)(item_id, action))
     w.download_queue.orderChanged.connect(
         lambda order: getattr(w, 'handle_queue_reorder', lambda *_: None)(order))
+    w.download_queue.selectionChanged.connect(
+        lambda ids: getattr(w, 'handle_queue_selection', lambda *_: None)(ids))
     queue_box.addWidget(w.download_queue, 1)
     sidebar.addWidget(w.queue_card, 4)
 
@@ -1276,6 +1339,12 @@ def translate_interface(w, text, auxiliary):
     if hasattr(w, 'queue_heading'):
         w.queue_heading.setText(t['queue'])
         w.queue_count.setText(t['queue_count'].format(count=len(getattr(w.download_queue, 'item_ids', []))))
+        w.recycle_button.setToolTip(t['recycle'])
+        w.recycle_button.setAccessibleName(t['recycle'])
+        w.queue_top_button.setToolTip(t['queue_top'])
+        w.queue_top_button.setAccessibleName(t['queue_top'])
+        w.queue_cancel_selected_button.setToolTip(t['queue_cancel_selected'])
+        w.queue_cancel_selected_button.setAccessibleName(t['queue_cancel_selected'])
         w.download_queue.set_language(w.lang)
     w.log_heading.setText(t['log'])
     w.log.setPlaceholderText(t['log_hint'])

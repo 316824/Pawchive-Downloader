@@ -44,7 +44,13 @@ def has_direct_attachment(formats: Iterable[Any]) -> bool:
     extensions are conservatively treated as direct attachments because they
     may be archives, videos, or other files that should stay serial.
     """
-    for value in formats or ():
+    values=tuple(formats or ())
+    # A scan that has not yet learned the attachment suffix is deliberately
+    # serialized.  It may turn out to be an archive or video, and opening a
+    # five-way pool before that is known is the unsafe choice.
+    if not values:
+        return True
+    for value in values:
         ext = _extension(value)
         if ext and ext not in IMAGE_EXTENSIONS:
             return True
@@ -219,7 +225,7 @@ class DownloadScheduler(QObject):
             self._emit(task)
             self.queue_changed.emit()
             if self._started:
-                self._schedule()
+                self._schedule_or_idle()
             return True
         if task.state in {'running', 'pausing'}:
             task.intent = 'pause'
@@ -395,6 +401,12 @@ class DownloadScheduler(QObject):
         active = [task for task in self._tasks.values() if task.is_active]
         if any(task.direct for task in active):
             return
+        first_queued=next((task for task in self.ordered_tasks() if task.state=='queued'),None)
+        if first_queued is not None and first_queued.direct:
+            # Direct links use a single global slot and block the image pool.
+            if not active:
+                self._start_task(first_queued)
+            return
         image_active = len(active)
         capacity = self.MAX_IMAGE_WORKERS - image_active
         if capacity <= 0:
@@ -461,6 +473,20 @@ class DownloadScheduler(QObject):
             return
         worker = self._workers.pop(task_id, None)
         completed_records = getattr(worker, 'completed_records', None)
+        # The production Worker keeps its durable records in DownloadJournal
+        # rather than duplicating them on the QThread object.  Read the
+        # completed records at the terminal signal so the UI can perform the
+        # final stable selection-order rename after priority reordering.
+        if completed_records is None and worker is not None:
+            journal = getattr(worker, 'journal', None)
+            job_id = getattr(worker, 'job_id', None)
+            if journal is not None and job_id:
+                try:
+                    job = journal.load(job_id)
+                    completed_records = [dict(record) for record in job.get('files', ())
+                                         if record.get('status') == 'complete']
+                except (KeyError, OSError, TypeError, ValueError):
+                    completed_records = None
         if completed_records is not None:
             try:
                 task.metadata['completed_records'] = list(completed_records)
@@ -493,7 +519,13 @@ class DownloadScheduler(QObject):
         task = self.task(task_id)
         if task is None or task_id not in self._workers:
             return
-        self._workers.pop(task_id, None)
+        worker=self._workers.pop(task_id, None)
+        completed_records=getattr(worker,'completed_records',None)
+        if completed_records is not None:
+            try:
+                task.metadata['completed_records']=list(completed_records)
+            except TypeError:
+                task.metadata['completed_records']=completed_records
         task.worker = None
         task.error = str(error or '下载失败')
         intent = task.intent

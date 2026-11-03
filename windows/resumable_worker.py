@@ -246,7 +246,10 @@ class DownloadEngine:
         try:
             self.w.folder.mkdir(parents=True,exist_ok=True)
             self.session=requests.Session(); self.session.headers['User-Agent']=self.h['USER_AGENT']
-            self.job['status']='running'; self.normalize(); posts=self.posts()
+            self.job['status']='running'; self.normalize()
+            self.w.completed_records=[dict(record) for record in self.job.get('files',[])
+                                      if record.get('status') in ('complete','ready')]
+            posts=self.posts()
             done=self.job.setdefault('done_posts',[])
             for index,(date,post_url,title) in enumerate(posts,1):
                 self.interrupted()
@@ -276,6 +279,9 @@ class DownloadEngine:
                         self.w.wait_interruptibly(random.uniform(1.8,3.8))
                     label=f'({index}/{len(posts)}) {title} / {Path(record["target"]).name}'
                     self.transfer(record,label); self.current=None
+                    if record.get('status') in ('complete','ready'):
+                        self.w.completed_records=[dict(item) for item in self.job.get('files',[])
+                                                  if item.get('status') in ('complete','ready')]
                     self.w.progress.emit('✓  '+label,1,1)
                 done.append(post_url); self.journal.mark_post_done(self.job['id'],post_url)
                 self.job['album']=None; self.w.current_album=None; self.w.created_album=False; self.save()
@@ -288,10 +294,14 @@ class DownloadEngine:
                                     if filename.lower().endswith(suffix)),Path(filename).suffix)
                     target=Path(record['target']).with_name(f'{number}{extension}')
                     self.move_record(record,target); record['number']=number; self.save(record)
+            self.w.completed_records=[dict(record) for record in self.job.get('files',[])
+                                      if record.get('status') in ('complete','ready')]
             count=sum(r['status']=='complete' for r in self.job['files'])
             self.job.update(status='completed',album=None,saved_count=count,error='',posts=None,files=[],done_posts=[])
             self.journal.save(self.job); self.w.finished_ok.emit(count)
         except Exception as exc:
+            self.w.completed_records=[dict(record) for record in self.job.get('files',[])
+                                      if record.get('status') in ('complete','ready')]
             paused=self.w.isInterruptionRequested() and self.w.preserve_on_interrupt
             try:
                 if not paused:

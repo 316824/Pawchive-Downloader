@@ -5,7 +5,7 @@ import re
 import time
 import tempfile
 import shutil
-import sys, random, math
+import sys, random, math, uuid
 import requests
 from bs4 import BeautifulSoup
 from PySide6.QtCore import QEvent, Qt, QThread, Signal, QTimer, QPointF, QRect, QRectF, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl, QSize
@@ -15,10 +15,13 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
     QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QFrame,
     QAbstractButton, QCheckBox, QDialog, QDialogButtonBox,
     QScrollArea, QGridLayout, QSpinBox, QSizePolicy, QGraphicsDropShadowEffect,
+    QListWidget, QListWidgetItem,
     QMessageBox)
 from background_store import BackgroundStore
 from background_ui import BackgroundLayer, BackgroundSettingsDialog, load_preview
 from link_utils import LinkInfo, extract_link
+from download_scheduler import DownloadScheduler
+from recycle_bin import RecycleBin
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
@@ -174,6 +177,7 @@ class _LegacyWorker(QThread):
         self.text = AUX_TEXT[lang]
         self.current_album = None
         self.created_album = False
+        self.completed_records = []
     def wait_interruptibly(self,seconds):
         deadline=time.monotonic()+seconds
         while not self.isInterruptionRequested():
@@ -291,7 +295,7 @@ class _LegacyWorker(QThread):
                     if last_error is not None:
                         self.progress.emit(self.text['download_failed'].format(title=safe,filename=target.name,error=last_error),len(visited),total)
                         raise RuntimeError(self.text['album_failed'].format(title=safe))
-                    saved+=1; downloaded.append((dt,target,post_url,safe,name)); owners[target.name]=post_url; current_temp=None; self.progress.emit(f'✓  ({post_index}/{total}) {safe} / {target.name}',1,1)
+                    saved+=1; downloaded.append((dt,target,post_url,safe,name)); self.completed_records=list(downloaded); owners[target.name]=post_url; current_temp=None; self.progress.emit(f'✓  ({post_index}/{total}) {safe} / {target.name}',1,1)
                 self.current_album=None; self.created_album=False
             if self.rename_order:
                 for index,(_,path,_,_,_) in enumerate(sorted(downloaded,key=lambda item:item[0]),self.start_number):
@@ -301,6 +305,7 @@ class _LegacyWorker(QThread):
                     while renamed.exists() and renamed!=path:
                         renamed=path.with_name(f'{index}_{bump}{extension}'); bump+=1
                     if renamed!=path: path.rename(renamed)
+            self.completed_records=list(downloaded)
             self.finished_ok.emit(saved)
         except Exception as e:
             if current_temp:
@@ -738,7 +743,7 @@ class ProfileScanWorker(QThread):
                     formats=[]
                     try:
                         detail=session.get(post_url,timeout=12); detail.raise_for_status(); ds=BeautifulSoup(detail.text,'html.parser')
-                        for attachment in ds.select('a.post__attachment-link[href]'):
+                        for attachment in ds.select('.post__files a.fileThumb[href], a.post__attachment-link[href]'):
                             ext=Path(urlparse(attachment['href']).path).suffix.lower()
                             if ext and ext not in formats: formats.append(ext)
                     except requests.RequestException: pass
@@ -777,6 +782,9 @@ class App(QWidget):
         self.setWindowIcon(QIcon(str(icon_path)))
         self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_'))
         self.busy=False; self._close_when_worker_stops=False; self._link_prompt_active=False; self._handling_link_input=False
+        self.queue_scheduler=None; self._queue_scan_entries=[]; self._queue_profile=''
+        self._queue_completed_files=0; self._queue_recycle_ids=set(); self._queue_job_ids={}
+        self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
         self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0
@@ -792,6 +800,15 @@ class App(QWidget):
             # A read-only profile should not prevent the downloader from
             # starting; background customization simply remains unavailable.
             self.background_store=None
+        try:
+            self.recycle_bin=RecycleBin(services.store.data_dir) if services else None
+        except (OSError, ValueError, RuntimeError):
+            self.recycle_bin=None
+        self.recycle_timer=QTimer(self)
+        self.recycle_timer.setInterval(60 * 60 * 1000)
+        self.recycle_timer.timeout.connect(self.refresh_recycle_bin)
+        if self.recycle_bin is not None:
+            self.recycle_timer.start()
         self._transfer_sample=None; self._speed=0.; self.stop_requested=False
         self._scan_pages=0; self._scan_posts=0
         build_interface(self,ThemeSwitch=ThemeSwitch,SoftComboBox=SoftComboBox,
@@ -1198,6 +1215,11 @@ class App(QWidget):
         self.focus_button.setProperty('selected',self.logs_hidden)
         self.focus_button.style().unpolish(self.focus_button); self.focus_button.style().polish(self.focus_button)
     def stop_download(self):
+        if self.queue_scheduler is not None and self.busy:
+            for task in list(self.queue_scheduler.active_tasks):
+                self.queue_scheduler.pause(task.id)
+            self.status.setText(self.ui_text()['paused'])
+            return
         if not self.busy or self.workflow_state not in {'download','stopping'}: return
         self.stop_requested=True
         worker=getattr(self,'worker',None)
@@ -1290,6 +1312,7 @@ class App(QWidget):
                 self.background_store.cleanup_unused(remove_disabled=remove_disabled)
                 self.background_store.clear_cache()
                 self.refresh_background()
+            self.refresh_recycle_bin()
             self.status.setText(AUX_TEXT[self.lang]['cache_cleared'])
         except (OSError, ValueError, RuntimeError) as exc:
             self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
@@ -1302,6 +1325,387 @@ class App(QWidget):
     def choose_titles(self,titles):
         from post_picker import choose_posts
         return choose_posts(self,titles,GlowCheckBox,AUX_TEXT[self.lang])
+
+    def _queue_worker_factory(self, task):
+        """Create one journal-aware worker for a single selected collection."""
+        selected={str(task.url).rstrip('/'), str(task.url).rstrip('/')+'/' }
+        extra={}
+        resume_id=(task.metadata or {}).get('job_id')
+        if self.services:
+            extra=dict(journal=self.services.journal, resume_job_id=resume_id)
+        order='newest' if self.order_combo.currentIndex()==0 else 'oldest'
+        worker=Worker(self.path.text(), self._queue_profile or self.profile.text().strip(),
+                      order, self.title_check.isChecked(), selected,
+                      False, 1, self.lang, **extra)
+        if getattr(worker,'job_id',None):
+            self._queue_job_ids[task.id]=worker.job_id
+        return worker
+
+    def _queue_view(self):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        self.download_queue.set_items(scheduler.tasks)
+        self.queue_count.setText(self.ui_text()['queue_count'].format(count=len(scheduler.tasks)))
+
+    def _queue_task_updated(self, task):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        job_id=self._queue_job_ids.get(task.id)
+        actual=scheduler.task(task.id)
+        if actual is not None and job_id:
+            actual.metadata['job_id']=job_id
+        self._queue_view()
+        if task.state in {'running','pausing','cancelling'} and task.label:
+            self.update_progress(task.label, task.current, task.total)
+
+    def _queue_task_finished(self, task):
+        if task.state=='completed':
+            self._queue_completed_files += max(0,int(task.completed_files or 0))
+        self._queue_view()
+
+    def _queue_payload_path(self, task):
+        """Find a private album/partial path which can be moved to recycle bin."""
+        folder=Path(self.path.text()).expanduser() if self.path.text().strip() else None
+        by_title=bool((task.metadata or {}).get('by_title',self.title_check.isChecked()))
+        if folder and by_title:
+            try:
+                candidate=folder/safe_path_component(task.title,limit=100)
+                if candidate.exists() and candidate.is_dir():
+                    return candidate
+            except (OSError,ValueError):
+                pass
+        job_id=self._queue_job_ids.get(task.id) or (task.metadata or {}).get('job_id')
+        if self.services and job_id:
+            try:
+                job=self.services.journal.load(job_id)
+                album=job.get('album') or {}
+                if album.get('path') and Path(album['path']).is_dir():
+                    return Path(album['path'])
+                for record in job.get('files',[]):
+                    part=record.get('part')
+                    if part and Path(part).is_file():
+                        return Path(part)
+            except (KeyError,ValueError,OSError):
+                pass
+        return None
+
+    def _queue_task_recycled(self, task):
+        if task.id in self._queue_recycle_ids:
+            return
+        self._queue_recycle_ids.add(task.id)
+        if self.recycle_bin is not None:
+            metadata=dict(task.metadata or {})
+            metadata.update({'task_id':task.id,'sequence':int(task.sequence),
+                             'formats':list(task.formats),'by_title':self.title_check.isChecked()})
+            try:
+                self.recycle_bin.add(
+                    title=task.title,
+                    profile_url=self._queue_profile or self.profile.text().strip(),
+                    post_url=task.url,
+                    download_url=task.url,
+                    cover_path=task.thumbnail,
+                    payload_path=self._queue_payload_path(task),
+                    metadata=metadata)
+            except (OSError,ValueError,RuntimeError) as exc:
+                self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
+        job_id=self._queue_job_ids.pop(task.id,None) or (task.metadata or {}).get('job_id')
+        if self.services and job_id:
+            try:
+                self.services.journal.discard(job_id)
+            except (KeyError,ValueError,OSError):
+                pass
+        self.refresh_recycle_bin()
+        self._queue_view()
+
+    def _queue_worker_idle(self):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        self._queue_rename_completed()
+        tasks=list(scheduler.tasks)
+        completed=all(task.state=='completed' for task in tasks) if tasks else False
+        paused=any(task.state=='paused' for task in tasks)
+        failed=any(task.state=='failed' for task in tasks)
+        cancelled=any(task.state=='cancelled' for task in tasks)
+        self.set_busy_state(False)
+        self.stop_button.hide()
+        self.set_workflow('complete' if completed else 'stopped' if paused or cancelled else 'error' if failed else 'complete')
+        if completed:
+            self.status.setText(f"{TEXT[self.lang]['done']} · {self._queue_completed_files}")
+            self.file_name.set_full_text(self.ui_text()['settled'])
+            self.files_saved=self._queue_completed_files
+            self.files_value.setText(str(self.files_saved))
+            self.progress.setValue(100)
+            self.percent_label.setText('100')
+        elif paused:
+            self.status.setText(self.ui_text()['paused'])
+        elif cancelled:
+            self.status.setText(AUX_TEXT[self.lang]['cancelled'])
+        if self.services:
+            try:
+                newly_completed=sum(max(0,int(task.completed_files or 0))
+                                   for task in tasks
+                                   if task.state=='completed' and task.id not in self._queue_rewarded_ids)
+                if newly_completed:
+                    self.services.store.record_download(newly_completed)
+                    self._queue_rewarded_ids.update(task.id for task in tasks if task.state=='completed')
+                self.refresh_reward_badge()
+                self.services.task_finished(completed, paused=paused)
+            except Exception:
+                pass
+        if self._queue_closing:
+            QTimer.singleShot(0,self.close)
+
+    @staticmethod
+    def _record_target(record):
+        if isinstance(record,dict):
+            return record.get('target')
+        if isinstance(record,(tuple,list)) and len(record)>1:
+            return record[1]
+        return None
+
+    @staticmethod
+    def _file_extension(path):
+        name=Path(path).name.lower()
+        for suffix in ('.tar.gz','.tar.xz','.tar.bz2'):
+            if name.endswith(suffix):
+                return name[-len(suffix):]
+        return Path(path).suffix
+
+    def _queue_rename_completed(self):
+        if self.title_check.isChecked() or not self.rename_check.isChecked() or self.queue_scheduler is None:
+            return
+        root=Path(self.path.text()).resolve() if self.path.text().strip() else None
+        if root is None or not root.is_dir():
+            return
+        targets=[]
+        seen=set()
+        for task in self.queue_scheduler.selection_order():
+            records=(task.metadata or {}).get('completed_records',())
+            for record_index,record in enumerate(records):
+                value=self._record_target(record)
+                if not value:
+                    continue
+                try:
+                    target=Path(value).resolve()
+                    if target in seen or not target.is_file() or not target.is_relative_to(root):
+                        continue
+                except (OSError,ValueError):
+                    continue
+                seen.add(target); targets.append(target)
+        if not targets:
+            return
+        staged=[]
+        try:
+            for target in targets:
+                temporary=target.with_name(f'.pawchive-rename-{uuid.uuid4().hex}{self._file_extension(target)}')
+                target.rename(temporary); staged.append((temporary,self._file_extension(target)))
+            number=int(self.start_number.value())
+            for temporary,extension in staged:
+                destination=root/f'{number}{extension}'
+                while destination.exists():
+                    number+=1; destination=root/f'{number}{extension}'
+                temporary.rename(destination); number+=1
+        except (OSError,ValueError) as exc:
+            self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
+
+    def _start_queue(self, entries, profile):
+        if self.busy:
+            return False
+        if not self.path.text().strip():
+            self.pick()
+            if not self.path.text().strip():
+                return False
+        entries=[dict(entry) for entry in entries if isinstance(entry,dict) and entry.get('url')]
+        if not entries:
+            return False
+        self._queue_scan_entries=entries
+        self._queue_profile=str(profile).strip().rstrip('/')
+        self._queue_completed_files=0
+        self._queue_recycle_ids=set()
+        self._queue_job_ids={}
+        self._queue_rewarded_ids=set()
+        self._queue_selected_ids=[]
+        self.reset_dashboard(len(entries))
+        self.queue_scheduler=DownloadScheduler(self._queue_worker_factory,self)
+        self.queue_scheduler.task_updated.connect(self._queue_task_updated)
+        self.queue_scheduler.task_finished.connect(self._queue_task_finished)
+        self.queue_scheduler.task_recycled.connect(self._queue_task_recycled)
+        self.queue_scheduler.queue_changed.connect(self._queue_view)
+        self.queue_scheduler.became_idle.connect(self._queue_worker_idle)
+        tasks=[]
+        for sequence,entry in enumerate(entries):
+            item=dict(entry)
+            item.setdefault('metadata',{})
+            item['metadata']=dict(item['metadata'])
+            item['metadata'].update({'profile_url':self._queue_profile,
+                                     'ordinal':sequence,
+                                     'by_title':self.title_check.isChecked()})
+            tasks.append(item)
+        self.queue_scheduler.add_tasks(tasks)
+        self._queue_view()
+        self.set_busy_state(True)
+        self.set_workflow('download')
+        self.stop_button.hide()
+        self.status.setText(TEXT[self.lang]['working'])
+        self.queue_scheduler.start()
+        return True
+
+    def handle_queue_action(self, item_id, action):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        action=str(action)
+        actual=scheduler.task(item_id)
+        if actual is not None and self._queue_job_ids.get(str(item_id)):
+            actual.metadata['job_id']=self._queue_job_ids[str(item_id)]
+        if action=='pause':
+            scheduler.pause(item_id)
+        elif action=='resume':
+            scheduler.resume(item_id)
+        elif action=='retry':
+            scheduler.retry(item_id)
+        elif action=='cancel':
+            scheduler.cancel(item_id)
+        self._queue_view()
+
+    def handle_queue_reorder(self, order):
+        if self.queue_scheduler is not None:
+            self.queue_scheduler.set_order(order)
+            self._queue_view()
+
+    def handle_queue_selection(self, item_ids):
+        self._queue_selected_ids=[str(item_id) for item_id in item_ids or []]
+
+    def handle_queue_selection_action(self, action):
+        scheduler=self.queue_scheduler
+        selected=list(self._queue_selected_ids)
+        if scheduler is None or not selected:
+            return
+        action=str(action)
+        if action=='top':
+            scheduler.move_to_top(selected)
+        elif action=='cancel':
+            scheduler.cancel_many(selected)
+        elif action=='pause':
+            for item_id in selected:
+                scheduler.pause(item_id)
+        self._queue_view()
+
+    def prepare_queue_exit(self):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        self._queue_closing=True
+        for task in scheduler.tasks:
+            if task.state in {'queued','running','pausing'}:
+                scheduler.pause(task.id)
+        if not scheduler.active_tasks:
+            self.set_busy_state(False)
+
+    def refresh_recycle_bin(self):
+        if self.recycle_bin is None:
+            return
+        try:
+            self.recycle_bin.cleanup()
+        except (OSError,ValueError,RuntimeError):
+            return
+
+    def _recycle_task_from_entry(self, entry):
+        metadata=dict(entry.metadata or {})
+        task_meta=metadata.get('task') if isinstance(metadata.get('task'),dict) else {}
+        formats=metadata.get('formats') or task_meta.get('formats') or []
+        return {
+            'title':entry.title,
+            'url':entry.post_url or entry.download_url,
+            'image':entry.cover_path or '',
+            'formats':formats,
+            'metadata':{'recycled_from':entry.id,'profile_url':entry.profile_url,
+                        'by_title':metadata.get('by_title',self.title_check.isChecked())},
+        }
+
+    def restore_recycle_entry(self, identifier):
+        if self.recycle_bin is None:
+            return False
+        try:
+            entry=self.recycle_bin.get(identifier)
+        except (OSError,ValueError,RuntimeError):
+            return False
+        if entry is None or self.busy:
+            return False
+        # Keep the cover alive in the application cache after removing the
+        # private recycle directory.
+        cover=''
+        if entry.cover_path and Path(entry.cover_path).is_file():
+            try:
+                destination=self.cache_dir/f'recycle-{entry.id}{Path(entry.cover_path).suffix.lower()}'
+                shutil.copy2(entry.cover_path,destination); cover=str(destination)
+            except OSError:
+                cover=''
+        task=self._recycle_task_from_entry(entry)
+        task['image']=cover
+        profile=entry.profile_url or self.profile.text().strip()
+        if not self._start_queue([task],profile):
+            return False
+        try:
+            self.recycle_bin.take(entry.id)
+        except (OSError,ValueError,RuntimeError):
+            pass
+        self.refresh_recycle_bin()
+        return True
+
+    def remove_recycle_entry(self, identifier):
+        if self.recycle_bin is None:
+            return False
+        try:
+            return self.recycle_bin.remove(identifier) is not None
+        except (OSError,ValueError,RuntimeError):
+            return False
+
+    def show_recycle_bin(self):
+        if self.recycle_bin is None:
+            return
+        self.refresh_recycle_bin()
+        try:
+            entries=self.recycle_bin.list_entries()
+        except (OSError,ValueError,RuntimeError):
+            entries=[]
+        dialog=QDialog(self)
+        dialog.setWindowTitle({'简体中文':'下载回收站','繁體中文':'下載回收站','English':'Download recycle bin','日本語':'ダウンロードごみ箱'}.get(self.lang,'Download recycle bin'))
+        dialog.setMinimumSize(560,360)
+        layout=QVBoxLayout(dialog)
+        list_widget=QListWidget(dialog)
+        list_widget.setObjectName('recycleList')
+        layout.addWidget(list_widget,1)
+        if not entries:
+            item=QListWidgetItem({'简体中文':'回收站目前为空','繁體中文':'回收站目前為空','English':'The recycle bin is empty','日本語':'ごみ箱は空です'}.get(self.lang,'The recycle bin is empty'))
+            list_widget.addItem(item)
+        for entry in entries:
+            row=QListWidgetItem(f'{entry.title}\n{entry.download_url}')
+            row.setData(Qt.ItemDataRole.UserRole,entry.id)
+            if entry.cover_path and Path(entry.cover_path).is_file():
+                cover=QPixmap(entry.cover_path)
+                if not cover.isNull():
+                    row.setIcon(QIcon(cover.scaled(64,64,Qt.AspectRatioMode.KeepAspectRatio,
+                                                  Qt.TransformationMode.SmoothTransformation)))
+            list_widget.addItem(row)
+        buttons=QHBoxLayout()
+        restore=QPushButton({'简体中文':'恢复下载','繁體中文':'恢復下載','English':'Restore download','日本語':'ダウンロードを復元'}.get(self.lang,'Restore download'))
+        remove=QPushButton({'简体中文':'删除选中项','繁體中文':'刪除選取項目','English':'Delete selected','日本語':'選択項目を削除'}.get(self.lang,'Delete selected'))
+        close=QPushButton({'简体中文':'关闭','繁體中文':'關閉','English':'Close','日本語':'閉じる'}.get(self.lang,'Close'))
+        buttons.addWidget(restore); buttons.addWidget(remove); buttons.addStretch(1); buttons.addWidget(close)
+        layout.addLayout(buttons)
+        def selected_id():
+            current=list_widget.currentItem()
+            return current.data(Qt.ItemDataRole.UserRole) if current else None
+        restore.clicked.connect(lambda: (self.restore_recycle_entry(selected_id()) if selected_id() else False, dialog.accept()))
+        remove.clicked.connect(lambda: (self.remove_recycle_entry(selected_id()) if selected_id() else False, dialog.accept()))
+        close.clicked.connect(dialog.reject)
+        dialog.exec()
+        dialog.deleteLater()
+        self.refresh_recycle_bin()
     @staticmethod
     def _set_card_selection(index,state,selected,widget,colors):
         if state:
@@ -1341,7 +1745,10 @@ class App(QWidget):
             return
         if selected is None or not selected:
             self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready']); return
-        self.launch_worker(self.profile.text().strip(),selected)
+        selected_entries=[dict(entry) for entry in titles if str(entry.get('url','')) in selected]
+        self.set_busy_state(False)
+        if not self._start_queue(selected_entries,self.profile.text().strip()):
+            self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready'])
     def scan_failed(self,message):
         if hasattr(self,'scanner') and self.scanner.isRunning(): self.scanner.wait()
         if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.close()
@@ -1427,8 +1834,11 @@ class App(QWidget):
             if self.services:
                 from feature_text import tr
                 self.status.setText(tr(self.lang,'saving'))
-            worker=getattr(self,'worker',None)
-            if worker and worker.isRunning(): worker.requestInterruption()
+            if self.queue_scheduler is not None:
+                self.prepare_queue_exit()
+            else:
+                worker=getattr(self,'worker',None)
+                if worker and worker.isRunning(): worker.requestInterruption()
             if hasattr(self,'scanner') and self.scanner.isRunning():
                 self.scanner.requestInterruption()
                 if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.hide()
@@ -1439,6 +1849,10 @@ class App(QWidget):
             self.background_layer.clear_background()
         if self.background_store:
             self.background_store.release_except(None)
+        if self.recycle_timer.isActive():
+            self.recycle_timer.stop()
+        if self.recycle_bin:
+            self.recycle_bin.close()
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
         if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
