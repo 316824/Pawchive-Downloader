@@ -1,9 +1,16 @@
 """Desktop presentation: shared controls stay connected to the existing workers."""
-from PySide6.QtCore import Qt, QSize, QRectF
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QShortcut
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import (QByteArray, QEvent, QMimeData, QPoint, QRectF, QSize,
+    Qt, QSignalBlocker, Signal)
+from PySide6.QtGui import (QColor, QDrag, QIcon, QKeySequence, QPainter, QPainterPath,
+    QPixmap, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
     QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
-    QTextEdit, QVBoxLayout, QWidget, QBoxLayout)
+    QTextEdit, QVBoxLayout, QWidget, QBoxLayout, QApplication, QAbstractButton,
+    QRubberBand)
 
 from desktop_visuals import CardHeading, StageRail, icon
 from control_effects import DARK_GLOW, LIGHT_GLOW
@@ -26,7 +33,11 @@ COPY = {
         settled='本次下载已结束', copy_empty='暂无可复制的日志',
         link_choice_title='检测到帖子链接', link_choice_detail='要下载该画师的全部图集，还是只下载当前帖子？',
         link_choice_batch='扫描并选择图集', link_choice_single='只下载当前帖子', link_choice_cancel='取消',
-        portrait_mode='切换竖屏模式', window_mode='切换窗口模式'),
+        portrait_mode='切换竖屏模式', window_mode='切换窗口模式',
+        queue='下载队列', queue_empty='暂无排队图集', queue_count='{count} 个图集',
+        queue_pause='暂停', queue_resume='继续', queue_cancel='取消', queue_retry='重试',
+        queue_waiting='等待中', queue_running='下载中', queue_paused='已暂停',
+        queue_failed='下载失败', queue_cancelled='已取消', queue_complete='已完成'),
     '繁體中文': dict(workspace='下載工作台',
         source='畫師首頁', destination='儲存位置', options='下載方式', activity='任務概覽',
         source_hint='請輸入完整的畫師首頁連結', folder_hint='選擇儲存圖片與附件的資料夾',
@@ -43,7 +54,11 @@ COPY = {
         settled='本次下載已結束', copy_empty='暫無可複製的日誌',
         link_choice_title='偵測到貼文連結', link_choice_detail='要下載這位畫師的全部圖集，還是只下載目前貼文？',
         link_choice_batch='掃描並選擇圖集', link_choice_single='只下載目前貼文', link_choice_cancel='取消',
-        portrait_mode='切換直向模式', window_mode='切換視窗模式'),
+        portrait_mode='切換直向模式', window_mode='切換視窗模式',
+        queue='下載佇列', queue_empty='目前沒有排隊圖集', queue_count='{count} 個圖集',
+        queue_pause='暫停', queue_resume='繼續', queue_cancel='取消', queue_retry='重試',
+        queue_waiting='等待中', queue_running='下載中', queue_paused='已暫停',
+        queue_failed='下載失敗', queue_cancelled='已取消', queue_complete='已完成'),
     'English': dict(workspace='Download workspace',
         source='Creator profile', destination='Save location', options='Download preferences', activity='Activity',
         source_hint='Enter a full creator profile URL', folder_hint='Choose a folder for images and attachments',
@@ -60,7 +75,11 @@ COPY = {
         settled='This download has ended', copy_empty='There is no log to copy yet',
         link_choice_title='Post link detected', link_choice_detail='Download every post from this creator, or only this post?',
         link_choice_batch='Scan and choose posts', link_choice_single='Only this post', link_choice_cancel='Cancel',
-        portrait_mode='Switch to portrait mode', window_mode='Switch to window mode'),
+        portrait_mode='Switch to portrait mode', window_mode='Switch to window mode',
+        queue='Download queue', queue_empty='No queued collections', queue_count='{count} collections',
+        queue_pause='Pause', queue_resume='Resume', queue_cancel='Cancel', queue_retry='Retry',
+        queue_waiting='Waiting', queue_running='Downloading', queue_paused='Paused',
+        queue_failed='Download failed', queue_cancelled='Cancelled', queue_complete='Complete'),
     '日本語': dict(workspace='ダウンロードワークスペース',
         source='クリエイターページ', destination='保存先', options='ダウンロード設定', activity='タスクの状況',
         source_hint='クリエイターページの完全なURLを入力', folder_hint='画像と添付ファイルの保存先を選択',
@@ -77,7 +96,11 @@ COPY = {
         settled='今回のダウンロードは終了しました', copy_empty='コピーできるログがありません',
         link_choice_title='投稿リンクを検出しました', link_choice_detail='このクリエイターの全投稿を取得しますか、それともこの投稿だけにしますか？',
         link_choice_batch='スキャンして投稿を選択', link_choice_single='この投稿だけ', link_choice_cancel='キャンセル',
-        portrait_mode='縦長表示に切り替え', window_mode='通常表示に切り替え'),
+        portrait_mode='縦長表示に切り替え', window_mode='通常表示に切り替え',
+        queue='ダウンロードキュー', queue_empty='待機中のコレクションはありません', queue_count='{count} 件',
+        queue_pause='一時停止', queue_resume='再開', queue_cancel='キャンセル', queue_retry='再試行',
+        queue_waiting='待機中', queue_running='ダウンロード中', queue_paused='一時停止',
+        queue_failed='ダウンロード失敗', queue_cancelled='キャンセル済み', queue_complete='完了'),
 }
 
 
@@ -135,6 +158,534 @@ class LogEditor(QTextEdit):
         if not self.document().isEmpty():cursor.insertBlock()
         cursor.insertText(str(text))
         if follow:scrollbar.setValue(scrollbar.maximum())
+
+
+class QueueThumbnail(QLabel):
+    """Small cover preview used by one download queue row."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.failed = False
+        self.setFixedSize(56, 56)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setText('◇')
+        self.setObjectName('queueThumbnail')
+        self.setScaledContents(False)
+
+    def set_source(self, source):
+        pixmap = None
+        if isinstance(source, QPixmap):
+            pixmap = source
+        elif source:
+            try:
+                candidate = QPixmap(str(source))
+                if not candidate.isNull():
+                    pixmap = candidate
+            except (OSError, TypeError, ValueError):
+                pixmap = None
+        if pixmap is None or pixmap.isNull():
+            self.clear()
+            self.setText('◇')
+        else:
+            self.setText('')
+            self.setPixmap(pixmap.scaled(
+                self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation))
+        self.update()
+
+    def set_failed(self, failed):
+        self.failed = bool(failed)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.failed:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            center = self.rect().topRight() + QPoint(-9, 9)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor('#e86478'))
+            painter.drawEllipse(center, 10, 10)
+            painter.setPen(QColor('#ffffff'))
+            painter.drawText(self.rect().adjusted(self.width() - 20, 0, 0, -self.height() + 20),
+                             Qt.AlignmentFlag.AlignCenter, '!')
+        finally:
+            painter.end()
+
+
+class QueueItemWidget(QFrame):
+    """One reorderable download entry driven by a loose item mapping."""
+
+    actionRequested = Signal(str, str)
+    selectionChanged = Signal(str, bool)
+    TERMINAL = frozenset({'completed', 'complete', 'cancelled', 'canceled'})
+
+    def __init__(self, item=None, progress_class=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName('queueItem')
+        self.setMinimumHeight(92)
+        self.setMouseTracking(True)
+        self._press_pos = None
+        self._selected = False
+        self.item = {}
+        self.item_id = ''
+        self.progress_class = progress_class
+        self.language = '简体中文'
+        self._status_key = 'queue_waiting'
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(9)
+        self.thumbnail = QueueThumbnail(self)
+        outer.addWidget(self.thumbnail, 0, Qt.AlignmentFlag.AlignTop)
+
+        middle = QVBoxLayout()
+        middle.setContentsMargins(0, 0, 0, 0)
+        middle.setSpacing(5)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(6)
+        self.title = QLabel('')
+        self.title.setObjectName('queueTitle')
+        self.title.setTextFormat(Qt.TextFormat.PlainText)
+        self.title.setWordWrap(False)
+        self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title_row.addWidget(self.title, 1)
+        self.status = QLabel('')
+        self.status.setObjectName('queueStatus')
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        title_row.addWidget(self.status, 0)
+        middle.addLayout(title_row)
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(6)
+        if progress_class is not None:
+            self.progress = progress_class()
+            self.progress.setFixedHeight(13)
+            self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            progress_row.addWidget(self.progress, 1)
+        else:
+            self.progress = None
+        self.percent = QLabel('0%')
+        self.percent.setObjectName('queuePercent')
+        self.percent.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.percent.setMinimumWidth(40)
+        progress_row.addWidget(self.percent, 0)
+        middle.addLayout(progress_row)
+        self.detail = QLabel('')
+        self.detail.setObjectName('queueDetail')
+        self.detail.setTextFormat(Qt.TextFormat.PlainText)
+        self.detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        middle.addWidget(self.detail)
+        outer.addLayout(middle, 1)
+
+        controls = QVBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(3)
+        self.pause_button = self._button('Ⅱ', 'pause')
+        self.cancel_button = self._button('×', 'cancel')
+        self.retry_button = self._button('↻', 'retry')
+        controls.addWidget(self.pause_button)
+        controls.addWidget(self.cancel_button)
+        controls.addWidget(self.retry_button)
+        outer.addLayout(controls)
+        self.set_item(item or {})
+
+    def _button(self, text, action):
+        button = QPushButton(text)
+        button.setObjectName('queueAction')
+        button.setFixedSize(25, 25)
+        button.setToolTip(action)
+        button.setAccessibleName(action)
+        button.clicked.connect(lambda: self.actionRequested.emit(self.item_id, action))
+        return button
+
+    @staticmethod
+    def _item_value(item, *names, default=None):
+        for name in names:
+            if isinstance(item, dict) and name in item:
+                return item[name]
+            if hasattr(item, name):
+                return getattr(item, name)
+        return default
+
+    @staticmethod
+    def _percent_value(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if 0 <= value <= 1:
+            value *= 100
+        return max(0, min(100, int(round(value))))
+
+    def set_item(self, item):
+        self.item = dict(item) if isinstance(item, dict) else item
+        self.item_id = str(self._item_value(item, 'id', 'key', 'post_url', 'url', default=''))
+        if not self.item_id:
+            self.item_id = str(id(item))
+        title = self._item_value(item, 'title', 'name', 'label', default='') or 'Untitled collection'
+        self.title.setText(str(title))
+        self.title.setToolTip(str(title))
+        thumbnail = self._item_value(item, 'thumbnail', 'cover', 'image', 'thumb', default=None)
+        self.thumbnail.set_source(thumbnail)
+        progress = self._percent_value(self._item_value(item, 'progress', 'percent', 'value', default=0))
+        if self.progress is not None:
+            self.progress.setValue(progress)
+        self.percent.setText(f'{progress}%')
+        status = str(self._item_value(item, 'status', 'state', default='queued') or 'queued').lower()
+        if status == 'running':
+            self._status_key = 'queue_running'
+        elif status in {'paused', 'pause'}:
+            self._status_key = 'queue_paused'
+            status = 'paused'
+        elif status in {'failed', 'error'}:
+            self._status_key = 'queue_failed'
+            status = 'failed'
+        elif status in self.TERMINAL:
+            self._status_key = 'queue_complete' if status in {'completed', 'complete'} else 'queue_cancelled'
+        else:
+            self._status_key = 'queue_waiting'
+            status = 'queued'
+        self.status.setText(COPY.get(self.language, COPY['简体中文']).get(self._status_key, self._status_key))
+        detail = self._item_value(item, 'detail', 'error', 'message', default='') or ''
+        self.detail.setText(str(detail))
+        self.thumbnail.set_failed(status == 'failed')
+        self.pause_button.setVisible(status in {'running', 'paused'})
+        labels = COPY.get(self.language, COPY['简体中文'])
+        self.pause_button.setToolTip(labels['queue_pause'] if status == 'running' else labels['queue_resume'])
+        self.pause_button.setAccessibleName(self.pause_button.toolTip())
+        self.pause_button.setText('Ⅱ' if status == 'running' else '▶')
+        self.cancel_button.setVisible(status not in self.TERMINAL and status not in {'failed', 'paused'})
+        self.retry_button.setVisible(status in {'failed', 'cancelled', 'canceled'})
+        self.setProperty('queueState', status)
+        self._polish()
+
+    def set_language(self, language):
+        self.language = language if language in COPY else '简体中文'
+        labels = COPY[self.language]
+        self.status.setText(labels.get(self._status_key, self._status_key))
+        self.pause_button.setToolTip(labels['queue_pause'] if self.pause_button.text() == 'Ⅱ' else labels['queue_resume'])
+        self.cancel_button.setToolTip(labels['queue_cancel'])
+        self.retry_button.setToolTip(labels['queue_retry'])
+        self.pause_button.setAccessibleName(self.pause_button.toolTip())
+        self.cancel_button.setAccessibleName(labels['queue_cancel'])
+        self.retry_button.setAccessibleName(labels['queue_retry'])
+
+    def set_progress_style(self, track, colors):
+        if self.progress is None:
+            return
+        self.progress.track = track
+        self.progress.colors = [QColor(color) if not isinstance(color, QColor) else color
+                                for color in colors]
+        self.progress.update()
+
+    def set_selected(self, selected):
+        selected = bool(selected)
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self.setProperty('selected', selected)
+        self._polish()
+
+    def is_selected(self):
+        return self._selected
+
+    def _polish(self):
+        style = self.style()
+        if style is not None:
+            style.unpolish(self)
+            style.polish(self)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+            modifiers = event.modifiers()
+            self.selectionChanged.emit(self.item_id,
+                                       bool(modifiers & Qt.KeyboardModifier.ControlModifier))
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (self._press_pos is not None and event.buttons() & Qt.MouseButton.LeftButton
+                and (event.position().toPoint() - self._press_pos).manhattanLength()
+                >= QApplication.startDragDistance()):
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setData('application/x-pawchive-queue-id', QByteArray(self.item_id.encode('utf-8')))
+            drag.setMimeData(mime)
+            drag.exec(Qt.DropAction.MoveAction)
+            self._press_pos = None
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+
+class DownloadQueueWidget(QFrame):
+    """Scrollable, reorderable queue panel for batch downloads."""
+
+    actionRequested = Signal(str, str)
+    orderChanged = Signal(list)
+    selectionChanged = Signal(list)
+
+    def __init__(self, progress_class=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName('downloadQueue')
+        self.progress_class = progress_class
+        self.language = '简体中文'
+        self._rows = {}
+        self._order = []
+        self._selected = set()
+        self._rubber_origin = None
+        self._rubber = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName('queueScroll')
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setAcceptDrops(True)
+        self.scroll.viewport().setAcceptDrops(True)
+        self.scroll.viewport().installEventFilter(self)
+        self.body = QWidget()
+        self.body.setObjectName('queueBody')
+        self.body.setAcceptDrops(True)
+        self.body.installEventFilter(self)
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(7)
+        self.body_layout.addStretch(1)
+        self.scroll.setWidget(self.body)
+        outer.addWidget(self.scroll)
+        self.setAcceptDrops(True)
+
+    @property
+    def item_ids(self):
+        return list(self._order)
+
+    def set_language(self, language):
+        self.language = language if language in COPY else '简体中文'
+        for row in self._rows.values():
+            row.set_language(self.language)
+
+    def set_progress_style(self, track, colors):
+        for row in self._rows.values():
+            row.set_progress_style(track, colors)
+
+    def _insert_row(self, row, index=None):
+        if index is None or index >= len(self._order):
+            index = len(self._order)
+        index = max(0, index)
+        self._order.insert(index, row.item_id)
+        self._rows[row.item_id] = row
+        row.set_language(getattr(self, 'language', '简体中文'))
+        self.body_layout.insertWidget(index, row)
+        row.actionRequested.connect(self.actionRequested)
+        row.selectionChanged.connect(self._row_selection_changed)
+
+    def set_items(self, items):
+        normalized = list(items or [])
+        wanted = []
+        for item in normalized:
+            row_id = QueueItemWidget._item_value(item, 'id', 'key', 'post_url', 'url', default='')
+            row_id = str(row_id or id(item))
+            wanted.append((row_id, item))
+        wanted_ids = {row_id for row_id, _ in wanted}
+        for row_id in list(self._order):
+            if row_id not in wanted_ids:
+                self.remove_item(row_id, emit=False)
+        for index, (row_id, item) in enumerate(wanted):
+            row = self._rows.get(row_id)
+            if row is None:
+                row = QueueItemWidget(item, self.progress_class, self.body)
+                self._insert_row(row, index)
+            else:
+                row.set_item(item)
+                self._move_row_local(row_id, index)
+        self._emit_selection()
+
+    def upsert_item(self, item, index=None):
+        row_id = str(QueueItemWidget._item_value(item, 'id', 'key', 'post_url', 'url', default='') or id(item))
+        row = self._rows.get(row_id)
+        if row is None:
+            row = QueueItemWidget(item, self.progress_class, self.body)
+            self._insert_row(row, len(self._order) if index is None else index)
+        else:
+            row.set_item(item)
+            if index is not None:
+                self._move_row_local(row_id, index)
+        return row
+
+    def update_item(self, item_id, **updates):
+        row = self._rows.get(str(item_id))
+        if row is None:
+            return False
+        data = dict(row.item) if isinstance(row.item, dict) else {}
+        data.update(updates)
+        row.set_item(data)
+        return True
+
+    def remove_item(self, item_id, *, emit=True):
+        item_id = str(item_id)
+        row = self._rows.pop(item_id, None)
+        if row is None:
+            return False
+        if item_id in self._order:
+            self._order.remove(item_id)
+        self._selected.discard(item_id)
+        row.deleteLater()
+        if emit:
+            self._emit_order()
+            self._emit_selection()
+        return True
+
+    def clear_items(self):
+        for item_id in list(self._order):
+            self.remove_item(item_id, emit=False)
+        self._order.clear()
+        self._selected.clear()
+        self._emit_selection()
+
+    def _move_row_local(self, item_id, index):
+        item_id = str(item_id)
+        if item_id not in self._rows:
+            return False
+        old = self._order.index(item_id)
+        index = max(0, min(int(index), len(self._order) - 1))
+        if old == index:
+            return False
+        self._order.pop(old)
+        self._order.insert(index, item_id)
+        row = self._rows[item_id]
+        self.body_layout.removeWidget(row)
+        self.body_layout.insertWidget(index, row)
+        return True
+
+    def move_item(self, item_id, index, *, emit=True):
+        moved = self._move_row_local(item_id, index)
+        if moved and emit:
+            self._emit_order()
+        return moved
+
+    def move_selected_to_top(self):
+        if not self._selected:
+            return False
+        selected = [item_id for item_id in self._order if item_id in self._selected]
+        remaining = [item_id for item_id in self._order if item_id not in self._selected]
+        new_order = selected + remaining
+        if new_order == self._order:
+            return False
+        for index, item_id in enumerate(new_order):
+            self._move_row_local(item_id, index)
+        self._emit_order()
+        return True
+
+    def _row_selection_changed(self, item_id, additive):
+        item_id = str(item_id)
+        if additive:
+            if item_id in self._selected:
+                self._selected.remove(item_id)
+            else:
+                self._selected.add(item_id)
+        else:
+            self._selected = {item_id}
+        for key, row in self._rows.items():
+            row.set_selected(key in self._selected)
+        self._emit_selection()
+
+    def _emit_selection(self):
+        self.selectionChanged.emit([item_id for item_id in self._order if item_id in self._selected])
+
+    def _emit_order(self):
+        self.orderChanged.emit(list(self._order))
+
+    def _drag_id(self, event):
+        mime = event.mimeData() if hasattr(event, 'mimeData') else None
+        if mime is None or not mime.hasFormat('application/x-pawchive-queue-id'):
+            return None
+        try:
+            return bytes(mime.data('application/x-pawchive-queue-id')).decode('utf-8')
+        except (UnicodeDecodeError, TypeError, ValueError):
+            return None
+
+    def _drop_index(self, position):
+        local = self.body.mapFrom(self, position) if position is not None else QPoint(0, 0)
+        for index, item_id in enumerate(self._order):
+            row = self._rows.get(item_id)
+            if row is None:
+                continue
+            if local.y() < row.geometry().center().y():
+                return index
+        return max(0, len(self._order) - 1)
+
+    def _accept_drag(self, event):
+        if self._drag_id(event):
+            event.acceptProposedAction()
+            return True
+        return False
+
+    def dragEnterEvent(self, event):
+        if not self._accept_drag(event):
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if not self._accept_drag(event):
+            event.ignore()
+
+    def dropEvent(self, event):
+        item_id = self._drag_id(event)
+        if item_id in self._rows:
+            index = self._drop_index(event.position().toPoint())
+            self.move_item(item_id, index, emit=True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def eventFilter(self, obj, event):
+        if obj in {self.body, self.scroll.viewport()}:
+            if event.type() == QEvent.Type.DragEnter:
+                return self._accept_drag(event)
+            if event.type() == QEvent.Type.DragMove:
+                return self._accept_drag(event)
+            if event.type() == QEvent.Type.Drop:
+                self.dropEvent(event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._rubber_origin = event.position().toPoint()
+            if self._rubber is None:
+                self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self)
+            self._rubber.setGeometry(self._rubber_origin.x(), self._rubber_origin.y(), 1, 1)
+            self._rubber.show()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._rubber_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            current = event.position().toPoint()
+            rect = QRectF(self._rubber_origin, current).toRect().normalized()
+            self._rubber.setGeometry(rect)
+            for item_id, row in self._rows.items():
+                selected = rect.intersects(row.geometry())
+                if selected:
+                    self._selected.add(item_id)
+                row.set_selected(item_id in self._selected)
+            self._emit_selection()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._rubber_origin = None
+            if self._rubber is not None:
+                self._rubber.hide()
+        super().mouseReleaseEvent(event)
 
 
 def text_label(text='', name=''):
@@ -438,6 +989,29 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     task.addStretch(1)
     sidebar.addWidget(w.task_card, 3)
 
+    # Per-collection queue.  The scheduler can feed DownloadTask snapshots via
+    # ``set_items``/``upsert_item`` without making the existing aggregate card
+    # or log panel depend on the scheduler implementation.
+    w.queue_card = QFrame()
+    w.queue_card.setObjectName('queueCard')
+    queue_box = QVBoxLayout(w.queue_card)
+    queue_box.setContentsMargins(18, 16, 18, 16)
+    queue_box.setSpacing(9)
+    queue_header = QHBoxLayout()
+    w.queue_heading = text_label('', 'sectionLabel')
+    queue_header.addWidget(w.queue_heading, 1)
+    w.queue_count = text_label('0', 'queueCount')
+    queue_header.addWidget(w.queue_count, 0, Qt.AlignmentFlag.AlignRight)
+    queue_box.addLayout(queue_header)
+    w.download_queue = DownloadQueueWidget(RainbowProgress, w.queue_card)
+    w.download_queue.setMinimumHeight(150)
+    w.download_queue.actionRequested.connect(
+        lambda item_id, action: getattr(w, 'handle_queue_action', lambda *_: None)(item_id, action))
+    w.download_queue.orderChanged.connect(
+        lambda order: getattr(w, 'handle_queue_reorder', lambda *_: None)(order))
+    queue_box.addWidget(w.download_queue, 1)
+    sidebar.addWidget(w.queue_card, 4)
+
     w.logs_card = QFrame()
     w.logs_card.setObjectName('logCard')
     logs = QVBoxLayout(w.logs_card)
@@ -597,8 +1171,18 @@ def apply_style(w, dark, skin='default'):
         QLabel#metric {{font-size:17px;font-weight:600;}}
         QLabel#fileName {{font-size:13px;}}
         QLabel#stateBadge {{color:{p['accent']};background:{p['hover']};border-radius:9px;padding:5px 9px;font-size:11px;}}
-        QFrame#mainCard,QFrame#taskCard,QFrame#logCard {{background:{p['card']};border:1px solid {p['line']};border-radius:19px;}}
+        QFrame#mainCard,QFrame#taskCard,QFrame#logCard,QFrame#queueCard {{background:{p['card']};border:1px solid {p['line']};border-radius:19px;}}
         QFrame#logCard {{background:{p['panel']};}}
+        QFrame#queueItem {{background:{p['field']};border:1px solid {p['line']};border-radius:12px;}}
+        QFrame#queueItem[selected="true"] {{background:{p['hover']};border-color:{p['glow']};}}
+        QLabel#queueThumbnail {{background:{p['hover']};color:{p['muted']};border:1px solid {p['line']};border-radius:9px;font-size:22px;}}
+        QLabel#queueTitle {{font-size:13px;font-weight:600;}}
+        QLabel#queueStatus {{color:{p['accent']};font-size:11px;}}
+        QLabel#queuePercent {{color:{p['text']};font-size:12px;font-weight:600;}}
+        QLabel#queueDetail {{color:{p['small']};font-size:10px;}}
+        QLabel#queueCount {{color:{p['muted']};font-size:11px;}}
+        QPushButton#queueAction {{padding:0;border-radius:7px;font-size:13px;color:{p['muted']};}}
+        QPushButton#queueAction:hover {{color:{p['text']};border-color:{p['glow']};background:{p['hover']};}}
         QFrame#separator {{background:{p['line']};border:0;}}
         QScrollArea,QScrollArea>QWidget>QWidget {{background:transparent;border:0;}}
         QLineEdit {{background:{p['field']};border:1px solid {p['line']};border-radius:11px;padding:10px 13px;selection-background-color:{p['accent']};}}
@@ -673,6 +1257,9 @@ def apply_style(w, dark, skin='default'):
         '#d05d80','#d9983d','#c4a736','#3d9e78','#369aad','#647bd0','#9a66bc']
     w.progress.colors = [QColor(c) for c in w.progress.colors]
     w.progress.update()
+    if hasattr(w, 'download_queue'):
+        w.download_queue.set_progress_style(w.progress.track, w.progress.colors)
+        w.download_queue.set_language(w.lang)
     w.set_workflow(w.workflow_state)
 
 
@@ -686,6 +1273,10 @@ def translate_interface(w, text, auxiliary):
     w.folder_label.setText(t['destination'])
     w.path.setPlaceholderText(t['folder_hint'])
     w.activity_heading.setText(t['activity'])
+    if hasattr(w, 'queue_heading'):
+        w.queue_heading.setText(t['queue'])
+        w.queue_count.setText(t['queue_count'].format(count=len(getattr(w.download_queue, 'item_ids', []))))
+        w.download_queue.set_language(w.lang)
     w.log_heading.setText(t['log'])
     w.log.setPlaceholderText(t['log_hint'])
     w.plan_label.setText(t['plan'])
