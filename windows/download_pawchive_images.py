@@ -8,7 +8,7 @@ import shutil
 import sys, random, math
 import requests
 from bs4 import BeautifulSoup
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF, QRect, QRectF, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl, QSize
+from PySide6.QtCore import QEvent, Qt, QThread, Signal, QTimer, QPointF, QRect, QRectF, QEasingCurve, QPropertyAnimation, Property, QSettings, QUrl, QSize
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QRadialGradient, QFont, QPixmap, QIcon, QLinearGradient, QGradient, QFontMetricsF, QPainterPath, QDesktopServices
 from PySide6.QtWidgets import QStyle, QStyleOptionButton
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
     QMessageBox)
 from background_store import BackgroundStore
 from background_ui import BackgroundLayer, BackgroundSettingsDialog, load_preview
+from link_utils import LinkInfo, extract_link
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
@@ -204,7 +205,9 @@ class _LegacyWorker(QThread):
                 if len(cards)<PAGE_SIZE or len(posts)==page_post_count: break
                 offset+=PAGE_SIZE
             if not posts: raise RuntimeError('EMPTY')
-            if self.selected_post_urls: posts=[p for p in posts if p[1] in self.selected_post_urls]
+            if self.selected_post_urls:
+                selected={str(url).rstrip('/') for url in self.selected_post_urls}
+                posts=[p for p in posts if p[1].rstrip('/') in selected]
             if not posts: raise RuntimeError('NO_SELECTED_POSTS')
             posts.sort(key=lambda x:x[0],reverse=self.order=='newest')
             saved=0; total=len(posts); downloaded=[]; owners={}; duplicate_names=set()
@@ -753,6 +756,7 @@ class App(QWidget):
     def __init__(self,settings=None,services=None):
         super().__init__()
         self.services=services
+        self.setAcceptDrops(True)
         from desktop_design import build_interface
         self.setObjectName('appRoot')
         self.lang=services.store.get_setting('language','简体中文') if services else '简体中文'
@@ -772,7 +776,7 @@ class App(QWidget):
         icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
         self.setWindowIcon(QIcon(str(icon_path)))
         self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_'))
-        self.busy=False; self._close_when_worker_stops=False
+        self.busy=False; self._close_when_worker_stops=False; self._link_prompt_active=False; self._handling_link_input=False
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
         self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0
@@ -805,6 +809,7 @@ class App(QWidget):
         self.overlay=ParticleOverlay(self); self.overlay.show(); self.overlay.raise_()
         self.credit.fireworkRequested.connect(self.overlay.launch_firework)
         self._last_particle=QPointF(-1000,-1000)
+        self.profile.textChanged.connect(self._profile_text_changed)
         QApplication.instance().installEventFilter(self)
 
     def toggle_layout_mode(self):
@@ -1085,12 +1090,105 @@ class App(QWidget):
         self.plan.setText('  ·  '.join([t['newest' if self.order_combo.currentIndex()==0 else 'oldest'],
             t['folders' if self.title_check.isChecked() else 'flat'],
             t['selection' if self.select_posts_check.isChecked() else 'all_posts']]))
+    @staticmethod
+    def _mime_link_text(mime):
+        values=[]
+        if mime is None:
+            return ''
+        if mime.hasText():
+            values.append(mime.text())
+        if mime.hasUrls():
+            values.extend(url.toString() for url in mime.urls())
+        return '\n'.join(value for value in values if value)
+
+    def handle_link_text(self, text, *, prompt_post=True):
+        """Accept a profile/post link from paste, drag-and-drop, or the sentinel."""
+        if self.busy:
+            return None
+        info=extract_link(text)
+        if info is None:
+            self.status.setText(self.ui_text()['paste_empty'])
+            return None
+        suppress=getattr(self.services,'suppress_clipboard_text',None)
+        if callable(suppress):
+            suppress(text)
+        self._handling_link_input=True
+        try:
+            self.profile.setText(info.profile_url)
+        finally:
+            self._handling_link_input=False
+        self.profile.setFocus()
+        if info.post_url and prompt_post:
+            self.offer_post_link(info)
+        return info
+
+    def _profile_text_changed(self, text):
+        """Handle context-menu paste, which does not produce Ctrl+V key events."""
+        if self.busy or self._handling_link_input or self._link_prompt_active:
+            return
+        info=extract_link(text)
+        clipboard_info=extract_link(QApplication.clipboard().text())
+        if (info is not None and info.post_url and clipboard_info is not None
+                and clipboard_info.post_url==info.post_url):
+            self.handle_link_text(text)
+
+    def offer_post_link(self, info):
+        if self._link_prompt_active or not isinstance(info, LinkInfo) or not info.post_url:
+            return
+        self._link_prompt_active=True
+        try:
+            copy=self.ui_text()
+            dialog=QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setWindowTitle(copy['link_choice_title'])
+            dialog.setText(copy['link_choice_detail'])
+            batch=dialog.addButton(copy['link_choice_batch'],QMessageBox.ButtonRole.AcceptRole)
+            single=dialog.addButton(copy['link_choice_single'],QMessageBox.ButtonRole.ActionRole)
+            dialog.addButton(copy['link_choice_cancel'],QMessageBox.ButtonRole.RejectRole)
+            dialog.exec()
+            clicked=dialog.clickedButton()
+            if clicked is batch:
+                self.select_posts_check.setChecked(True)
+                self.update_plan()
+                self.download()
+            elif clicked is single:
+                self.download_single_post(info)
+        finally:
+            self._link_prompt_active=False
+
+    def download_single_post(self, info):
+        if not isinstance(info, LinkInfo) or not info.post_url:
+            return
+        if not self.path.text().strip():
+            self.pick()
+            if not self.path.text().strip():
+                self.status.setText(AUX_TEXT[self.lang]['folder_needed'])
+                self.path.setFocus()
+                return
+        # The existing Worker already knows how to fetch one selected post;
+        # retain both slash variants because profile pages are inconsistent.
+        selected={info.post_url.rstrip('/'), info.post_url.rstrip('/')+'/' }
+        self.launch_worker(info.profile_url, selected)
+
     def paste_profile(self):
         if self.busy: return
         value=QApplication.clipboard().text().strip()
         if value:
-            self.profile.setText(value); self.profile.setFocus()
+            self.handle_link_text(value)
         else: self.status.setText(self.ui_text()['paste_empty'])
+
+    def dragEnterEvent(self,event):
+        if extract_link(self._mime_link_text(event.mimeData())) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self,event):
+        info=self.handle_link_text(self._mime_link_text(event.mimeData()))
+        if info is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
     def toggle_logs(self):
         self.logs_hidden=not self.logs_hidden
         self.logs_card.setVisible(not self.logs_hidden)
@@ -1344,6 +1442,21 @@ class App(QWidget):
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
         if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
+        if isinstance(obj,QWidget) and (obj is self or self.isAncestorOf(obj)):
+            if event.type() in (QEvent.Type.DragEnter,QEvent.Type.DragMove):
+                if extract_link(self._mime_link_text(event.mimeData())) is not None:
+                    event.acceptProposedAction()
+                    return True
+            elif event.type()==QEvent.Type.Drop:
+                info=self.handle_link_text(self._mime_link_text(event.mimeData()))
+                if info is not None:
+                    event.acceptProposedAction()
+                    return True
+        if obj is getattr(self,'profile',None):
+            if event.type()==QEvent.Type.KeyPress and event.key()==Qt.Key.Key_V and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.paste_profile()
+                event.accept()
+                return True
         if event.type()==event.Type.MouseMove:
             gp=event.globalPosition().toPoint(); local=self.mapFromGlobal(gp)
             dx=local.x()-self._last_particle.x(); dy=local.y()-self._last_particle.y()

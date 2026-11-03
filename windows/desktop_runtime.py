@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from app_state import AppState
 from download_journal import DownloadJournal
 from feature_text import tr
+from link_utils import extract_profile_url
 from windows_tasks import TaskAction, WindowsTaskScheduler, boot_time
 
 
@@ -93,6 +94,10 @@ class SingleInstance(QObject):
 
 
 class DesktopRuntime(QObject):
+    CLIPBOARD_POLL_INTERVAL_MS = 1500
+    CLIPBOARD_NOTICE_COOLDOWN_SECONDS = 12.0
+    CLIPBOARD_NOTICE_TIMEOUT_MS = 9000
+
     def __init__(self,app,store=None,journal=None,task_scheduler=None,instance=None,*,tray_enabled=True):
         super().__init__()
         self.app=app; self.store=store if store is not None else AppState()
@@ -105,6 +110,14 @@ class DesktopRuntime(QObject):
         self.startup_schedule_ids=set()
         self._last_poll_error=''; self._last_poll_error_at=0.
         self.timer=QTimer(self); self.timer.setInterval(2000); self.timer.timeout.connect(self.poll)
+        self.clipboard_timer=QTimer(self)
+        self.clipboard_timer.setInterval(self.CLIPBOARD_POLL_INTERVAL_MS)
+        self.clipboard_timer.timeout.connect(self.poll_clipboard)
+        self._clipboard_last_text=''
+        self._clipboard_seen=set()
+        self._clipboard_last_notice_at=0.0
+        self._clipboard_pending=None
+        self._clipboard_deferred=None
         self.app.setQuitOnLastWindowClosed(False)
         if instance:instance.message.connect(self.handle_command)
 
@@ -117,9 +130,14 @@ class DesktopRuntime(QObject):
         if self.tray_enabled and QSystemTrayIcon.isSystemTrayAvailable():
             self.tray=QSystemTrayIcon(window.windowIcon(),self)
             self.tray.activated.connect(self.tray_activated)
+            self.tray.messageClicked.connect(self.accept_clipboard_download)
             self.update_language(); self.tray.show()
+            self._clipboard_last_text=self._clipboard_text()
+            self.clipboard_timer.start()
         self.reconcile_schedules()
         self.timer.start()
+        if self.tray is not None:
+            QTimer.singleShot(0,self.poll_clipboard)
         while self.commands:self.handle_command(self.commands.popleft())
 
     def update_language(self):
@@ -139,6 +157,80 @@ class DesktopRuntime(QObject):
 
     def show_window(self):
         if self.window:self.window.showNormal(); self.window.raise_(); self.window.activateWindow()
+
+    @staticmethod
+    def _clipboard_text():
+        try:
+            value=QApplication.clipboard().text()
+        except (RuntimeError, AttributeError):
+            return ''
+        return value[:8192] if isinstance(value,str) else ''
+
+    def poll_clipboard(self):
+        """Notice a newly copied Pawchive creator link once per process run."""
+        if self.closed or self.exit_requested or self.tray is None or self.window is None:
+            return
+        text=self._clipboard_text()
+        if text!=self._clipboard_last_text:
+            self._clipboard_last_text=text
+            link=extract_profile_url(text)
+            if not link or link in self._clipboard_seen:
+                self._clipboard_deferred=None
+                return
+            self._clipboard_deferred=(text,link)
+        elif self._clipboard_deferred:
+            deferred_text,link=self._clipboard_deferred
+            if deferred_text!=text:
+                self._clipboard_deferred=None
+                return
+        else:
+            return
+        if self.window.busy or self.app.activeModalWidget() is not None:
+            return
+        now=time.monotonic()
+        if now-self._clipboard_last_notice_at < self.CLIPBOARD_NOTICE_COOLDOWN_SECONDS:
+            return
+        self._clipboard_seen.add(link)
+        if len(self._clipboard_seen)>256:
+            self._clipboard_seen.clear(); self._clipboard_seen.add(link)
+        self._clipboard_last_notice_at=now
+        self._clipboard_deferred=None
+        self._clipboard_pending=link
+        self.tray.showMessage(
+            tr(self.language,'clipboard_title'),
+            tr(self.language,'clipboard_prompt'),
+            QSystemTrayIcon.MessageIcon.Information,
+            self.CLIPBOARD_NOTICE_TIMEOUT_MS)
+        QTimer.singleShot(self.CLIPBOARD_NOTICE_TIMEOUT_MS,self._clear_clipboard_pending)
+
+    def _clear_clipboard_pending(self):
+        self._clipboard_pending=None
+
+    def suppress_clipboard_text(self,text):
+        """Mark text handled by the visible UI so the sentinel stays quiet."""
+        if not isinstance(text,str):
+            return
+        value=text[:8192]
+        self._clipboard_last_text=value
+        self._clipboard_deferred=None
+        link=extract_profile_url(value)
+        if link:
+            self._clipboard_seen.add(link)
+            if len(self._clipboard_seen)>256:
+                self._clipboard_seen.clear(); self._clipboard_seen.add(link)
+
+    def accept_clipboard_download(self):
+        """Treat a click on the clipboard balloon as the affirmative action."""
+        link=self._clipboard_pending
+        self._clipboard_pending=None
+        if not link or self.window is None or self.exit_requested:
+            return
+        self.window.profile.setText(link)
+        self.window.profile.setFocus()
+        self.show_window()
+        if self.window.busy:
+            return
+        self.window.download()
 
     def show_schedules(self):
         from feature_dialogs import ScheduleDialog
@@ -180,7 +272,7 @@ class DesktopRuntime(QObject):
         self.tray.showMessage('Pawchive',tr(self.language,'tray_message'),QSystemTrayIcon.MessageIcon.Information,3500)
 
     def prepare_exit(self):
-        self.exit_requested=True; self.timer.stop()
+        self.exit_requested=True; self.timer.stop(); self.clipboard_timer.stop(); self._clipboard_pending=None; self._clipboard_deferred=None
         worker=getattr(self.window,'worker',None)
         if worker and worker.isRunning():worker.preserve_on_interrupt=True
 
@@ -319,7 +411,8 @@ class DesktopRuntime(QObject):
             except Exception as exception:self.window.log.append(str(exception))
         self.restore_controls()
         if self.tray and not self.window.isVisible():
-            self.tray.showMessage('Pawchive',tr(self.language,'completed' if success else 'paused' if paused else 'failed'),QSystemTrayIcon.MessageIcon.Information,3500)
+            message='download_complete' if success else 'paused' if paused else 'failed'
+            self.tray.showMessage('Pawchive',tr(self.language,message),QSystemTrayIcon.MessageIcon.Information,3500)
         if not self.exit_requested:QTimer.singleShot(0,self.poll)
 
     def offer_resume(self):
@@ -359,6 +452,7 @@ class DesktopRuntime(QObject):
     def close(self):
         if self.closed:return
         self.closed=True; self.timer.stop()
+        self.clipboard_timer.stop(); self._clipboard_pending=None; self._clipboard_deferred=None
         if self.tray:self.tray.hide()
         if self.instance:self.instance.close()
         self.journal.close(); self.store.close()
