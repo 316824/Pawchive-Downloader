@@ -785,6 +785,7 @@ class App(QWidget):
         self.queue_scheduler=None; self._queue_scan_entries=[]; self._queue_profile=''
         self._queue_completed_files=0; self._queue_recycle_ids=set(); self._queue_job_ids={}
         self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
+        self._artist_avatar_workers={}
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
         self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0
@@ -1087,6 +1088,56 @@ class App(QWidget):
         badge.setText(f'✦ {name}' + (f' · {badge_name}' if badge_name else ''))
         badge.setToolTip(reward_tr(self.lang,'downloads',files=profile['downloaded_files'],sessions=profile['download_sessions'])
                          + (f' · {badge_name}' if badge_name else ''))
+        cards_button=getattr(self,'artist_cards_button',None)
+        if cards_button is not None:
+            from artist_cards import list_cards
+            count=sum(1 for card in list_cards(self.services.store) if card.get('achievement')=='master')
+            cards_button.setText('✦' if count == 0 else f'✦ {count}')
+            cards_button.setToolTip(('画师档案卡' if self.lang=='简体中文' else '畫師檔案卡' if self.lang=='繁體中文' else 'Artist cards' if self.lang=='English' else 'アーティストカード') + (f' · {count}' if count else ''))
+
+    def show_artist_cards(self):
+        if not self.services:
+            return
+        from feature_dialogs import ArtistCardsDialog
+        dialog=ArtistCardsDialog(self,self.services.store)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+            self.refresh_background()
+
+    def _maybe_artist_card(self, profile, posts=1, files=0):
+        if not self.services:
+            return
+        try:
+            from artist_cards import AvatarFetchWorker, record_download
+            card=record_download(self.services.store, profile, posts=posts, files=files)
+        except (OSError, ValueError, RuntimeError):
+            return
+        if not card or not card.get('new_master'):
+            self.refresh_reward_badge(); return
+        worker=AvatarFetchWorker(self.services.store.data_dir, profile, self)
+        self._artist_avatar_workers[card['profile']]=worker
+        worker.finished.connect(self._artist_avatar_finished)
+        worker.finished.connect(lambda *_: worker.deleteLater())
+        worker.start()
+        self.refresh_reward_badge()
+
+    def _artist_avatar_finished(self, profile, path, error):
+        worker=self._artist_avatar_workers.pop(profile, None)
+        if not self.services:
+            return
+        try:
+            from artist_cards import list_cards
+            cards={card['profile']:dict(card) for card in list_cards(self.services.store)}
+            card=cards.get(profile)
+            if card is not None:
+                card['avatar_path']=path if path else ''
+                card['avatar_status']='ready' if path else 'missing'
+                self.services.store.set_setting('artist_cards', cards)
+        except (OSError, ValueError, RuntimeError):
+            return
+        self.refresh_reward_badge()
     def ui_text(self):
         from desktop_design import COPY
         return COPY[self.lang]
@@ -1312,6 +1363,12 @@ class App(QWidget):
                 self.background_store.cleanup_unused(remove_disabled=remove_disabled)
                 self.background_store.clear_cache()
                 self.refresh_background()
+            if self.services:
+                try:
+                    from artist_cards import cleanup_cache
+                    cleanup_cache(self.services.store)
+                except (OSError, ValueError, RuntimeError):
+                    pass
             self.refresh_recycle_bin()
             self.status.setText(AUX_TEXT[self.lang]['cache_cleared'])
         except (OSError, ValueError, RuntimeError) as exc:
@@ -1445,12 +1502,14 @@ class App(QWidget):
             self.status.setText(AUX_TEXT[self.lang]['cancelled'])
         if self.services:
             try:
-                newly_completed=sum(max(0,int(task.completed_files or 0))
-                                   for task in tasks
-                                   if task.state=='completed' and task.id not in self._queue_rewarded_ids)
+                newly_completed_tasks=[task for task in tasks
+                                       if task.state=='completed' and task.id not in self._queue_rewarded_ids]
+                newly_completed=sum(max(0,int(task.completed_files or 0)) for task in newly_completed_tasks)
                 if newly_completed:
                     self.services.store.record_download(newly_completed)
                     self._queue_rewarded_ids.update(task.id for task in tasks if task.state=='completed')
+                    self._maybe_artist_card(self._queue_profile, posts=len(newly_completed_tasks),
+                                            files=sum(max(0,int(task.completed_files or 0)) for task in newly_completed_tasks))
                 self.refresh_reward_badge()
                 self.services.task_finished(completed, paused=paused)
             except Exception:
@@ -1805,6 +1864,7 @@ class App(QWidget):
         if self.services:
             try:
                 self.services.store.record_download(n)
+                self._maybe_artist_card(self.profile.text().strip(), posts=1, files=n)
             except Exception:
                 # A transient local-state failure must not turn a completed
                 # download into a visible task error; rewards can catch up on

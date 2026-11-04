@@ -252,18 +252,14 @@ class DesktopRuntime(QObject):
 
     def request_close(self):
         if self.exit_requested:return True
-        from feature_dialogs import CloseChoice
-        dialog=CloseChoice(self.window,self.tray is not None)
-        try:dialog.exec(); choice=dialog.choice
-        finally:
-            dialog.deleteLater()
-            refresh=getattr(self.window,'refresh_background',None)
-            if callable(refresh):refresh()
-        if choice=='background':
+        # Closing the main window is a reversible hide action.  A complete
+        # shutdown is deliberately available only from the tray menu, which
+        # prevents an accidental X click from interrupting a long download.
+        if self.tray is not None:
             self.keep_background()
             return False
-        if choice!='exit':return False
-        self.prepare_exit(); return True
+        self.prepare_exit()
+        return True
 
     def keep_background(self):
         if self.tray is None:

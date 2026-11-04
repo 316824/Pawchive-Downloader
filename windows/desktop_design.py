@@ -764,6 +764,11 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.reward_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
     w.reward_badge.setToolTip('')
     header.addWidget(w.reward_badge)
+    w.artist_cards_button = QPushButton('✦')
+    w.artist_cards_button.setObjectName('toolButton')
+    w.artist_cards_button.setFixedSize(40, 40)
+    w.artist_cards_button.clicked.connect(lambda: getattr(w, 'show_artist_cards', lambda: None)())
+    header.addWidget(w.artist_cards_button)
     w.tools_button=QPushButton()
     w.tools_button.setObjectName('toolButton'); w.tools_button.setFixedSize(40,40)
     w.tools_menu=QMenu(w)
@@ -1315,6 +1320,9 @@ def apply_style(w, dark, skin='default'):
         button.setIcon(icon(kind, p['muted'] if button is not w.start else p['button_text']))
         button.setIconSize(QSize(17, 17))
     update_layout_button(w)
+    if hasattr(w, 'artist_cards_button'):
+        w.artist_cards_button.setToolTip({'简体中文':'画师档案卡','繁體中文':'畫師檔案卡','English':'Artist cards','日本語':'アーティストカード'}.get(w.lang, 'Artist cards'))
+        w.artist_cards_button.setAccessibleName(w.artist_cards_button.toolTip())
     w.progress.track = p['line']
     w.progress.colors = ['#f07e99','#f5b864','#e5ce72','#72cba3','#67c9d8','#91a7ef','#c094dd'] if dark else [
         '#d05d80','#d9983d','#c4a736','#3d9e78','#369aad','#647bd0','#9a66bc']
@@ -1365,6 +1373,9 @@ def translate_interface(w, text, auxiliary):
     theme_tip={'简体中文':'切换明暗主题','繁體中文':'切換明暗主題','English':'Toggle appearance','日本語':'明暗テーマを切替'}[w.lang]
     w.theme.setToolTip(theme_tip)
     w.theme.setAccessibleName(theme_tip)
+    if hasattr(w, 'artist_cards_button'):
+        card_tip={'简体中文':'画师档案卡','繁體中文':'畫師檔案卡','English':'Artist cards','日本語':'アーティストカード'}[w.lang]
+        w.artist_cards_button.setToolTip(card_tip); w.artist_cards_button.setAccessibleName(card_tip)
     mode_key = 'window_mode' if getattr(w, 'portrait_mode', False) else 'portrait_mode'
     w.layout_button.setToolTip(t[mode_key])
     w.layout_button.setAccessibleName(t[mode_key])

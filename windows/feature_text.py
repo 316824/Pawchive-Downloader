@@ -17,8 +17,8 @@ TEXT={
  'download_complete':('主人，你的图集下载好了哦～','主人，你的圖集下載好了哦～','Your collection is ready～','コレクションのダウンロードが終わりました～'),
  'quit':('保存并退出','儲存並退出','Save and quit','保存して終了'),
  'quit_idle':('退出软件','退出軟體','Quit application','アプリを終了'),
- 'close_title':('这次，想如何离开？','這次，想如何離開？','How would you like to leave?','終了方法を選んでください'),
- 'close_detail':('后台会继续当前任务；退出会保存未完成的下载进度。','背景會繼續目前任務；退出會儲存未完成的下載進度。','Background mode keeps your task running. Quitting saves unfinished download progress.','バックグラウンドでは処理を続け、終了時は未完了の進捗を保存します。'),
+ 'close_title':('窗口已最小化到托盘','視窗已最小化到系統匣','The window was minimized to the tray','ウィンドウをトレイに最小化しました'),
+ 'close_detail':('关闭窗口会继续在后台运行；请从托盘右键菜单选择“退出软件”来完全结束。','關閉視窗會繼續在背景執行；請從系統匣右鍵選單選擇「退出軟體」來完全結束。','Closing the window keeps the app running. Use the tray menu to quit completely.','ウィンドウを閉じても動作を続けます。完全終了はトレイメニューから行ってください。'),
  'no_tray':('当前系统未提供通知区域，请正常退出。','目前系統未提供通知區域，請正常退出。','The system tray is unavailable. Please quit normally.','通知領域を利用できません。通常終了してください。'),
  'tray_message':('已留在后台，可从系统托盘重新打开。','已留在背景，可從系統匣重新開啟。','Running in the background. Open the workspace from the system tray.','バックグラウンドで動作中です。通知領域から開けます。'),
  'saved_progress':('下载进度已保存。下次打开时可以继续。','下載進度已儲存。下次開啟時可以繼續。','Progress saved. You can resume the next time you open the app.','進捗を保存しました。次回の起動時に再開できます。'),
@@ -118,6 +118,12 @@ REWARD_TEXT={
  'skin_default':('暮色原野','暮色原野','Dusk default','夕暮れの原野'),
  'skin_ocean':('海蓝潮汐','海藍潮汐','Ocean tide','海色の潮汐'),
  'skin_cyberpunk':('霓虹赛博','霓虹賽博','Neon cyberpunk','ネオン・サイバー'),
+ 'artist_cards':('画师档案卡','畫師檔案卡','Artist cards','アーティストカード'),
+ 'artist_cards_empty':('完成某位画师的最高成就后，这里会生成专属档案卡。','完成某位畫師的最高成就後，這裡會生成專屬檔案卡。','Reach an artist’s highest achievement to create a profile card here.','クリエイターの最高実績を達成すると、ここにプロフィールカードが生成されます。'),
+ 'artist_card_master':('最高成就 · 典藏画师','最高成就 · 典藏畫師','Highest achievement · Master collector','最高実績 · マスターコレクター'),
+ 'artist_card_progress':('已完成 {posts} 个图集 · {files} 个文件','已完成 {posts} 個圖集 · {files} 個檔案','{posts} collections · {files} files','{posts} コレクション · {files} ファイル'),
+ 'artist_card_avatar_pending':('头像获取中…','頭像取得中…','Fetching avatar…','アバターを取得中…'),
+ 'artist_card_avatar_missing':('头像暂不可用','頭像暫不可用','Avatar unavailable','アバターを取得できません'),
 }
 
 

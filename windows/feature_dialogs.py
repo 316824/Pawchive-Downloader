@@ -2,8 +2,8 @@
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, Qt
-from PySide6.QtGui import QColor, QPalette, QTextCharFormat
+from PySide6.QtCore import QDate, QDateTime, QLocale, Qt, QPropertyAnimation, QEasingCurve, QTimer, QRect
+from PySide6.QtGui import QColor, QPalette, QTextCharFormat, QPixmap, QIcon
 from PySide6.QtWidgets import (QApplication, QCalendarWidget, QCheckBox, QComboBox,
     QDateTimeEdit, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QTextEdit,
@@ -23,6 +23,39 @@ def label(text,muted=False):
     value.setWordWrap(True)
     if muted: value.setObjectName('muted')
     return value
+
+
+class CopyFeedbackButton(QPushButton):
+    """A tiny press/rebound animation that keeps the activation flow clear."""
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self._press_rect = None
+        self._animation = None
+
+    def _move_to(self, target):
+        if self._animation is not None:
+            self._animation.stop()
+        animation = QPropertyAnimation(self, b'geometry', self)
+        animation.setDuration(95)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.setStartValue(self.geometry())
+        animation.setEndValue(target)
+        animation.start()
+        self._animation = animation
+
+    def mousePressEvent(self, event):
+        self._press_rect = self.geometry()
+        rect = QRect(self._press_rect)
+        dx = max(1, int(rect.width() * .035)); dy = max(1, int(rect.height() * .06))
+        rect.adjust(dx, dy, -dx, -dy)
+        self._move_to(rect)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self._press_rect is not None:
+            target = QRect(self._press_rect)
+            QTimer.singleShot(20, lambda: self._move_to(target))
 
 
 class CloseChoice(QDialog):
@@ -107,7 +140,8 @@ class ActivationDialog(QDialog):
         layout.addLayout(header); layout.addWidget(self.translated_label('activation_info'))
         layout.addWidget(self.translated_label('device'))
         row=QHBoxLayout(); self.device=QLineEdit(activation.device_code()); self.device.setReadOnly(True)
-        copy=QPushButton(tr(language,'copy_device')); copy.clicked.connect(lambda:QApplication.clipboard().setText(self.device.text()))
+        copy=CopyFeedbackButton(tr(language,'copy_device')); self.copy_button=copy
+        copy.clicked.connect(self.copy_device_code)
         self._localized.append((copy,'copy_device'))
         row.addWidget(self.device,1); row.addWidget(copy); layout.addLayout(row)
         layout.addWidget(self.translated_label('invitation'))
@@ -136,6 +170,15 @@ class ActivationDialog(QDialog):
         self.setWindowTitle(tr(language,'activation'))
         for widget,key in self._localized:widget.setText(tr(language,key))
         self.error.clear(); self.update_limit()
+
+    def copy_device_code(self):
+        QApplication.clipboard().setText(self.device.text())
+        self.copy_button.setText({'简体中文':'已复制','繁體中文':'已複製','English':'Copied','日本語':'コピー済み'}.get(self.lang, 'Copied'))
+        QTimer.singleShot(1800, self.restore_copy_device_label)
+
+    def restore_copy_device_label(self):
+        if self.copy_button is not None:
+            self.copy_button.setText(tr(self.lang, 'copy_device'))
 
     def update_limit(self):
         remaining=self.api.remaining_attempts(self.store)
@@ -445,3 +488,44 @@ class CheckInDialog(QDialog):
         if callable(refresh):refresh()
         refresh_background=getattr(self.parent_window,'refresh_background_controls',None)
         if callable(refresh_background):refresh_background()
+
+
+class ArtistCardsDialog(QDialog):
+    """Small gallery of locally earned artist profile cards."""
+    def __init__(self, parent, store):
+        super().__init__(parent)
+        from artist_cards import list_cards
+        from feature_text import reward_tr
+        self.parent_window = parent; self.store = store; self.lang = parent.lang
+        install_background_host(self, getattr(parent, 'background_store', None), 'artist_cards')
+        self.setWindowTitle(reward_tr(self.lang, 'artist_cards')); self.resize(720, 560)
+        layout = QVBoxLayout(self); layout.setContentsMargins(26, 24, 26, 24); layout.setSpacing(14)
+        heading = label(reward_tr(self.lang, 'artist_cards')); heading.setStyleSheet('font-size:22px;font-weight:600')
+        layout.addWidget(heading)
+        self.cards = QListWidget(); self.cards.setIconSize(QPixmap(64, 64).size())
+        self.cards.setSpacing(8); layout.addWidget(self.cards, 1)
+        layout.addWidget(label(reward_tr(self.lang, 'artist_cards_empty'), True))
+        close = QPushButton(tr(self.lang, 'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
+        self.refresh(list_cards(store))
+
+    def refresh(self, cards):
+        from feature_text import reward_tr
+        self.cards.clear()
+        for card in cards:
+            if card.get('achievement') != 'master':
+                continue
+            title = str(card.get('profile', '')).rsplit('/user/', 1)[-1]
+            status = reward_tr(self.lang, 'artist_card_master')
+            detail = reward_tr(self.lang, 'artist_card_progress', posts=card.get('posts', 0), files=card.get('files', 0))
+            avatar_path = str(card.get('avatar_path') or '')
+            item = QListWidgetItem(f'✦ {title}\n{status}  ·  {detail}')
+            item.setToolTip(str(card.get('profile', '')))
+            if avatar_path:
+                pixmap = QPixmap(avatar_path)
+                if not pixmap.isNull():
+                    item.setIcon(QIcon(pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)))
+            elif card.get('avatar_status') == 'pending':
+                item.setToolTip(reward_tr(self.lang, 'artist_card_avatar_pending'))
+            else:
+                item.setToolTip(reward_tr(self.lang, 'artist_card_avatar_missing'))
+            self.cards.addItem(item)
