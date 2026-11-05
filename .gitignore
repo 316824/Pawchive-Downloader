@@ -33,3 +33,5 @@ windows/preview/
 *.sqlite3
 *.sqlite3-*
 instance.lock
+
+release/
