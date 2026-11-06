@@ -163,6 +163,7 @@ AUX_TEXT = {
 
 class _LegacyWorker(QThread):
     progress = Signal(str, int, int)
+    file_progress = Signal(int, int)
     finished_ok = Signal(int)
     failed = Signal(str)
     def __init__(self, folder, profile, order, by_title, selected_post_urls=None, rename_order=False, start_number=1, lang='简体中文'):
@@ -236,6 +237,8 @@ class _LegacyWorker(QThread):
                             name=re.sub(r'^Download\s+','',a.get_text(' ',strip=True),flags=re.I)
                         link_urls.add(u); links.append((u,name,direct))
                 for j,(url,name,direct) in enumerate(links,1):
+                    if j == 1:
+                        self.file_progress.emit(0, len(links))
                     name=safe_path_component(unquote(name or Path(urlparse(url).path).name), fallback=f'image_{j}.bin')
                     target=dest/name
                     if not self.by_title and name in duplicate_names:
@@ -295,7 +298,7 @@ class _LegacyWorker(QThread):
                     if last_error is not None:
                         self.progress.emit(self.text['download_failed'].format(title=safe,filename=target.name,error=last_error),len(visited),total)
                         raise RuntimeError(self.text['album_failed'].format(title=safe))
-                    saved+=1; downloaded.append((dt,target,post_url,safe,name)); self.completed_records=list(downloaded); owners[target.name]=post_url; current_temp=None; self.progress.emit(f'✓  ({post_index}/{total}) {safe} / {target.name}',1,1)
+                    saved+=1; downloaded.append((dt,target,post_url,safe,name)); self.completed_records=list(downloaded); owners[target.name]=post_url; current_temp=None; self.progress.emit(f'✓  ({post_index}/{total}) {safe} / {target.name}',1,1); self.file_progress.emit(j, len(links))
                 self.current_album=None; self.created_album=False
             if self.rename_order:
                 for index,(_,path,_,_,_) in enumerate(sorted(downloaded,key=lambda item:item[0]),self.start_number):
@@ -785,6 +788,7 @@ class App(QWidget):
         self.queue_scheduler=None; self._queue_scan_entries=[]; self._queue_profile=''
         self._queue_completed_files=0; self._queue_recycle_ids=set(); self._queue_job_ids={}
         self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
+        self._queue_view_pending=False
         self._artist_avatar_workers={}
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
@@ -1399,6 +1403,20 @@ class App(QWidget):
         return worker
 
     def _queue_view(self):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        # Progress signals arrive several times per second from up to five
+        # workers. Rebuilding every queue row synchronously made thumbnail
+        # loading and style polishing compete with painting. Coalesce updates
+        # onto the GUI event loop and render at a bounded cadence.
+        if self._queue_view_pending:
+            return
+        self._queue_view_pending=True
+        QTimer.singleShot(80,self._flush_queue_view)
+
+    def _flush_queue_view(self):
+        self._queue_view_pending=False
         scheduler=self.queue_scheduler
         if scheduler is None:
             return

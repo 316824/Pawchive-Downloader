@@ -87,6 +87,15 @@ def _clamp_rect(rect, bounds, minimum=24.0):
     return QRectF(left, top, max(minimum, right - left), max(minimum, bottom - top))
 
 
+def _clamp_moved_rect(rect, bounds):
+    """Clamp a translated crop rectangle without changing its dimensions."""
+    width = min(max(1.0, rect.width()), bounds.width())
+    height = min(max(1.0, rect.height()), bounds.height())
+    left = min(max(rect.left(), bounds.left()), bounds.right() - width)
+    top = min(max(rect.top(), bounds.top()), bounds.bottom() - height)
+    return QRectF(left, top, width, height)
+
+
 class CropView(QGraphicsView):
     """Image scene with movable/resizable crop rectangle and wheel zoom."""
 
@@ -110,27 +119,42 @@ class CropView(QGraphicsView):
         self._last_scene = QPointF()
         self._last_view = QPoint()
 
-    def set_image(self, image, target_aspect=1.25):
+    def set_image(self, image, target_aspect=1.25, initial_crop=None):
         self.scene_obj.clear()
         self.image_item = QGraphicsPixmapItem(QPixmap.fromImage(image))
         self.scene_obj.addItem(self.image_item)
         self.image_size = image.size()
         bounds = QRectF(0, 0, image.width(), image.height())
         aspect = max(0.2, min(5.0, float(target_aspect or 1.25)))
-        if image.width() / max(1, image.height()) > aspect:
-            height = image.height() * .78
-            width = height * aspect
-        else:
-            width = image.width() * .78
-            height = width / aspect
-        crop = QRectF((image.width() - width) / 2, (image.height() - height) / 2,
-                      width, height)
+        crop = None
+        if isinstance(initial_crop, dict):
+            try:
+                crop = QRectF(
+                    float(initial_crop.get('x', 0.0)) * image.width(),
+                    float(initial_crop.get('y', 0.0)) * image.height(),
+                    float(initial_crop.get('width', 1.0)) * image.width(),
+                    float(initial_crop.get('height', 1.0)) * image.height())
+            except (TypeError, ValueError):
+                crop = None
+        if crop is None or crop.width() <= 1 or crop.height() <= 1:
+            # The default crop fills the largest possible rectangle matching
+            # the current window aspect, so the first preview represents the
+            # whole window instead of an arbitrary 78% of the source image.
+            if image.width() / max(1, image.height()) > aspect:
+                height = image.height()
+                width = height * aspect
+            else:
+                width = image.width()
+                height = width / aspect
+            crop = QRectF((image.width() - width) / 2, (image.height() - height) / 2,
+                          width, height)
+        crop = _clamp_rect(crop, bounds)
         self.crop_item = QGraphicsRectItem(crop)
         self.crop_item.setPen(QPen(QColor('#b89af4'), 3))
         self.crop_item.setBrush(QBrush(QColor(137, 99, 207, 36)))
         self.crop_item.setZValue(2)
         self.scene_obj.addItem(self.crop_item)
-        self.handle_item = QGraphicsRectItem(0, 0, 14, 14)
+        self.handle_item = QGraphicsRectItem(0, 0, 18, 18)
         self.handle_item.setPen(QPen(QColor('#ffffff'), 1))
         self.handle_item.setBrush(QBrush(QColor('#b89af4')))
         self.handle_item.setZValue(3)
@@ -146,7 +170,19 @@ class CropView(QGraphicsView):
         if self.crop_item is None or self.handle_item is None:
             return
         rect = self.crop_item.rect()
-        self.handle_item.setRect(rect.right() - 7, rect.bottom() - 7, 14, 14)
+        self.handle_item.setRect(rect.right() - 9, rect.bottom() - 9, 18, 18)
+
+    def _handle_hit_rect(self):
+        """Return a forgiving hit area around the visible resize handle."""
+        if self.crop_item is None:
+            return QRectF()
+        rect = self.crop_item.rect()
+        scale_x = max(abs(self.transform().m11()), 1e-6)
+        scale_y = max(abs(self.transform().m22()), 1e-6)
+        radius_x = min(24.0 / scale_x, max(8.0 / scale_x, rect.width() / 2.0))
+        radius_y = min(24.0 / scale_y, max(8.0 / scale_y, rect.height() / 2.0))
+        return QRectF(rect.right() - radius_x, rect.bottom() - radius_y,
+                      radius_x * 2.0, radius_y * 2.0)
 
     def normalized_crop(self):
         if self.crop_item is None or self.image_size is None:
@@ -185,7 +221,7 @@ class CropView(QGraphicsView):
         self._last_scene = scene_pos
         self._last_view = event.position().toPoint()
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.handle_item and self.handle_item.contains(scene_pos):
+            if self.handle_item and self._handle_hit_rect().contains(scene_pos):
                 self._interaction = 'resize'
             elif self.crop_item.contains(scene_pos):
                 self._interaction = 'move'
@@ -206,7 +242,7 @@ class CropView(QGraphicsView):
         bounds = self.scene_obj.sceneRect()
         if self._interaction == 'move':
             delta = scene_pos - self._last_scene
-            self.crop_item.setRect(_clamp_rect(self.crop_item.rect().translated(delta), bounds))
+            self.crop_item.setRect(_clamp_moved_rect(self.crop_item.rect().translated(delta), bounds))
             self._sync_handle(); self.cropChanged.emit()
         elif self._interaction == 'resize':
             rect = self.crop_item.rect()
@@ -368,11 +404,12 @@ class BackgroundEditorDialog(QDialog):
     """Choose a source image and save a bounded crop preview."""
 
     def __init__(self, parent, store, page='workspace', *, target_aspect=1.25,
-                 initial_source=''):
+                 initial_source='', initial_crop=None):
         super().__init__(parent)
         self.store = store
         self.page = str(page)
         self.target_aspect = target_aspect
+        self.initial_crop = initial_crop if isinstance(initial_crop, dict) else None
         self.source_path = None
         self.source_image = QImage()
         self.result_config = None
@@ -427,7 +464,9 @@ class BackgroundEditorDialog(QDialog):
         self.source_path = resolved
         self.source_image = image
         self.path_label.setText(f'{resolved.name} · {image.width()} × {image.height()}')
-        self.view.set_image(image, self.target_aspect)
+        initial_crop = self.initial_crop
+        self.initial_crop = None
+        self.view.set_image(image, self.target_aspect, initial_crop=initial_crop)
         self.save_button.setEnabled(True)
         self.update_coordinates()
 
@@ -587,12 +626,14 @@ class BackgroundSettingsDialog(QDialog):
     def edit_current(self):
         config = self.store.page_config(self.current_page)
         initial = config.get('source', '') if config else ''
-        parent = self.parentWidget()
-        width = max(1, parent.width()) if parent else 1180
-        height = max(1, parent.height()) if parent else 941
+        initial_crop = config.get('crop') if config else None
+        host = self.parentWidget()
+        width = max(1, host.width()) if host else 1180
+        height = max(1, host.height()) if host else 941
         editor = BackgroundEditorDialog(
             self, self.store, self.current_page,
-            target_aspect=width / height, initial_source=initial)
+            target_aspect=width / height, initial_source=initial,
+            initial_crop=initial_crop)
         try:
             if editor.exec() == QDialog.DialogCode.Accepted:
                 self.store.set_mode('custom')

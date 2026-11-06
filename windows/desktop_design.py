@@ -166,6 +166,7 @@ class QueueThumbnail(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.failed = False
+        self._source_token = None
         self.setFixedSize(56, 56)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setText('◇')
@@ -173,6 +174,15 @@ class QueueThumbnail(QLabel):
         self.setScaledContents(False)
 
     def set_source(self, source):
+        if isinstance(source, QPixmap):
+            token = ('pixmap', int(source.cacheKey()), source.size().width(), source.size().height())
+        elif source:
+            token = ('path', str(source))
+        else:
+            token = None
+        if token == self._source_token:
+            return
+        self._source_token = token
         pixmap = None
         if isinstance(source, QPixmap):
             pixmap = source
@@ -351,7 +361,11 @@ class QueueItemWidget(QFrame):
             self._status_key = 'queue_waiting'
             status = 'queued'
         self.status.setText(COPY.get(self.language, COPY['简体中文']).get(self._status_key, self._status_key))
-        detail = self._item_value(item, 'detail', 'error', 'message', default='') or ''
+        detail = self._item_value(item, 'detail', 'error', 'message', 'label', default='') or ''
+        files_current = self._item_value(item, 'files_current', default=0)
+        files_total = self._item_value(item, 'files_total', default=0)
+        if files_total:
+            detail = f'{detail} · {int(files_current or 0)}/{int(files_total)} files' if detail else f'{int(files_current or 0)}/{int(files_total)} files'
         self.detail.setText(str(detail))
         self.thumbnail.set_failed(status == 'failed')
         self.pause_button.setVisible(status in {'running', 'paused'})

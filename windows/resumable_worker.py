@@ -266,7 +266,17 @@ class DownloadEngine:
                 self.w.current_album=dest if self.w.by_title else None; self.w.created_album=created
                 self.job['album']=dict(path=str(dest),created=created,post_url=post_url) if self.w.by_title else None
                 self.save(); seen=set()
-                for number,anchor in enumerate(soup.select('.post__files a.fileThumb[href],a.post__attachment-link[href]'),1):
+                anchors=soup.select('.post__files a.fileThumb[href],a.post__attachment-link[href]')
+                unique_anchors=[]; anchor_urls=set()
+                for candidate in anchors:
+                    candidate_url=candidate.get('href','').strip()
+                    if original_url(candidate_url) and candidate_url not in anchor_urls:
+                        anchor_urls.add(candidate_url); unique_anchors.append(candidate)
+                file_total=len(unique_anchors)
+                file_done=0
+                if hasattr(self.w,'file_progress'):
+                    self.w.file_progress.emit(0,file_total)
+                for number,anchor in enumerate(unique_anchors,1):
                     url=anchor.get('href','').strip()
                     if not original_url(url) or url in seen: continue
                     seen.add(url); direct='post__attachment-link' in (anchor.get('class') or [])
@@ -274,7 +284,10 @@ class DownloadEngine:
                     name=name or re.sub(r'^Download\s+','',anchor.get_text(' ',strip=True),flags=re.I)
                     name=self.h['safe_path_component'](unquote(name or Path(urlparse(url).path).name),fallback=f'image_{number}.bin')
                     record=self.record(date,post_url,title,url,name,direct,dest)
-                    if record['status']=='complete': continue
+                    if record['status']=='complete':
+                        file_done+=1
+                        if hasattr(self.w,'file_progress'): self.w.file_progress.emit(file_done,file_total)
+                        continue
                     if Path(urlparse(url).path).suffix.lower() in {'.zip','.rar','.7z','.tar','.gz','.psd','.clip','.mp4','.mov','.webm','.mkv','.pdf'} and self.job['saved_count']:
                         self.w.wait_interruptibly(random.uniform(1.8,3.8))
                     label=f'({index}/{len(posts)}) {title} / {Path(record["target"]).name}'
@@ -283,6 +296,8 @@ class DownloadEngine:
                         self.w.completed_records=[dict(item) for item in self.job.get('files',[])
                                                   if item.get('status') in ('complete','ready')]
                     self.w.progress.emit('✓  '+label,1,1)
+                    file_done+=1
+                    if hasattr(self.w,'file_progress'): self.w.file_progress.emit(file_done,file_total)
                 done.append(post_url); self.journal.mark_post_done(self.job['id'],post_url)
                 self.job['album']=None; self.w.current_album=None; self.w.created_album=False; self.save()
             if self.w.rename_order:

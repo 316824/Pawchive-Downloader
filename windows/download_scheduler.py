@@ -77,6 +77,10 @@ class DownloadTask:
     error: str = ''
     attempts: int = 0
     completed_files: int = 0
+    files_current: int = 0
+    files_total: int = 0
+    file_bytes_current: int = 0
+    file_bytes_total: int = 0
     intent: str = ''
     worker: Any = field(default=None, repr=False, compare=False)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -361,8 +365,11 @@ class DownloadScheduler(QObject):
 
     def move_to_top(self, task_ids: Iterable[str]) -> bool:
         selected = {str(task_id) for task_id in task_ids}
+        # Priority order is visible even while another task is running. The
+        # running worker remains untouched, but a retried task must become the
+        # first queued priority entry instead of being inserted after it.
         before = next((task.id for task in self.ordered_tasks()
-                       if task.id not in selected and task.state == 'queued'), None)
+                       if task.id not in selected), None)
         return self.reorder(selected, before)
 
     def selection_order(self) -> list[DownloadTask]:
@@ -439,6 +446,10 @@ class DownloadScheduler(QObject):
             if progress is not None:
                 progress.connect(lambda label, current, total, task_id=task.id:
                                  self._on_progress(task_id, label, current, total))
+            file_progress = getattr(worker, 'file_progress', None)
+            if file_progress is not None:
+                file_progress.connect(lambda current, total, task_id=task.id:
+                                      self._on_file_progress(task_id, current, total))
             finished = getattr(worker, 'finished_ok', None)
             if finished is not None:
                 finished.connect(lambda count, task_id=task.id:
@@ -464,7 +475,28 @@ class DownloadScheduler(QObject):
             task.total = max(0, int(total or 0))
         except (TypeError, ValueError):
             task.total = 0
-        task.progress = min(1.0, task.current / task.total) if task.total else 0.0
+        task.file_bytes_current = task.current
+        task.file_bytes_total = task.total
+        if task.files_total:
+            fraction = task.current / task.total if task.total else 0.0
+            task.progress = min(1.0, (task.files_current + fraction) / task.files_total)
+        else:
+            task.progress = min(1.0, task.current / task.total) if task.total else 0.0
+        self._emit(task)
+
+    def _on_file_progress(self, task_id: str, current: Any, total: Any) -> None:
+        task = self.task(task_id)
+        if task is None or task.state not in {'running', 'pausing', 'cancelling'}:
+            return
+        try:
+            task.files_current = max(0, int(current or 0))
+        except (TypeError, ValueError):
+            task.files_current = 0
+        try:
+            task.files_total = max(0, int(total or 0))
+        except (TypeError, ValueError):
+            task.files_total = 0
+        task.progress = min(1.0, task.files_current / task.files_total) if task.files_total else 0.0
         self._emit(task)
 
     def _on_success(self, task_id: str, count: Any) -> None:
@@ -510,6 +542,8 @@ class DownloadScheduler(QObject):
                 task.completed_files = max(0, int(count or 0))
             except (TypeError, ValueError):
                 task.completed_files = 0
+            task.files_current = task.completed_files
+            task.files_total = max(task.files_total, task.completed_files)
             self._emit(task)
             self.task_finished.emit(task.public_copy())
         self.queue_changed.emit()
