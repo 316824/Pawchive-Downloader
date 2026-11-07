@@ -743,15 +743,17 @@ class ProfileScanWorker(QThread):
                                 ir=session.get(src,timeout=8); ir.raise_for_status(); suffix=Path(unquote(urlparse(src).path)).suffix.lower(); suffix=suffix if re.fullmatch(r'\.[a-z0-9]{1,8}',suffix) else '.img'; image_path=self.cache_dir/f'{len(titles):06}{suffix}'; image_path.write_bytes(ir.content)
                             except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    formats=[]
+                    formats=[]; file_count=0
                     try:
                         detail=session.get(post_url,timeout=12); detail.raise_for_status(); ds=BeautifulSoup(detail.text,'html.parser')
-                        for attachment in ds.select('.post__files a.fileThumb[href], a.post__attachment-link[href]'):
+                        attachments=ds.select('.post__files a.fileThumb[href], a.post__attachment-link[href]')
+                        file_count=len(attachments)
+                        for attachment in attachments:
                             ext=Path(urlparse(attachment['href']).path).suffix.lower()
                             if ext and ext not in formats: formats.append(ext)
                     except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    seen.add(post_url); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'formats':formats}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
+                    seen.add(post_url); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'formats':formats,'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                     if self.finish_requested: break
                 if self.finish_requested or len(cards)<PAGE_SIZE or len(titles)==page_post_count: break
                 offset+=PAGE_SIZE
@@ -792,7 +794,7 @@ class App(QWidget):
         self._artist_avatar_workers={}
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
-        self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0
+        self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0; self._file_current=0; self._file_total=0
         self.portrait_mode=False
         self._restore_window_size=(self.width(), self.height())
         self._restore_maximized=False
@@ -1294,6 +1296,7 @@ class App(QWidget):
             self.status.setText(AUX_TEXT[self.lang]['scan_status']); self.state_badge.setText(self.ui_text()['scan'])
     def reset_dashboard(self,total=0):
         self.files_saved=0; self._album_current=0; self._album_total=total
+        self._file_current=0; self._file_total=0
         self._transfer_sample=None; self._speed=0.; self.stop_requested=False
         self._scan_pages=0; self._scan_posts=0
         self.files_value.setText('0'); self.album_value.setText(f'— / {total}' if total else '— / —')
@@ -1423,6 +1426,21 @@ class App(QWidget):
         self.download_queue.set_items(scheduler.tasks)
         self.queue_count.setText(self.ui_text()['queue_count'].format(count=len(scheduler.tasks)))
 
+    def _update_queue_aggregate_progress(self):
+        scheduler=self.queue_scheduler
+        if scheduler is None:
+            return
+        tasks=scheduler.tasks
+        total=sum(max(0,int(task.files_total or 0)) for task in tasks)
+        if total <= 0:
+            return
+        completed=sum(min(float(task.files_total), max(0.0, float(task.progress)) * task.files_total)
+                      for task in tasks if task.files_total)
+        value=max(0,min(100,int(round(completed * 100 / total))))
+        self.progress.setValue(value)
+        self.percent_label.setText(str(value))
+        self.percent_unit.show()
+
     def _queue_task_updated(self, task):
         scheduler=self.queue_scheduler
         if scheduler is None:
@@ -1434,11 +1452,13 @@ class App(QWidget):
         self._queue_view()
         if task.state in {'running','pausing','cancelling'} and task.label:
             self.update_progress(task.label, task.current, task.total)
+        self._update_queue_aggregate_progress()
 
     def _queue_task_finished(self, task):
         if task.state=='completed':
             self._queue_completed_files += max(0,int(task.completed_files or 0))
         self._queue_view()
+        self._update_queue_aggregate_progress()
 
     def _queue_payload_path(self, task):
         """Find a private album/partial path which can be moved to recycle bin."""
@@ -1846,6 +1866,7 @@ class App(QWidget):
             self.files_saved=getattr(self.worker,'resume_saved_count',0)
             self.files_value.setText(str(self.files_saved))
             self.worker.progress.connect(self.update_progress); self.worker.finished_ok.connect(self.done)
+            self.worker.file_progress.connect(self.update_file_progress)
             self.worker.failed.connect(self.error)
             if self.services:self.services.worker_created(self.worker)
             self.worker.start()
@@ -1861,17 +1882,38 @@ class App(QWidget):
         failure_prefixes=tuple(text['download_fail_prefix'] for text in AUX_TEXT.values())
         if not name.startswith(failure_prefixes): self.update_transfer(name,i,total)
         if name.startswith('✓'):
-            self.progress.setValue(100); self.log.append(name); return
+            if self._file_total:
+                self.progress.setValue(max(0,min(100,int(round(self._file_current * 100 / self._file_total)))))
+            else:
+                self.progress.setValue(100)
+            self.log.append(name); return
         if name.startswith(failure_prefixes):
             self.log.append(name); return
         if total:
-            self.progress.setValue(int(i*100/total))
+            if self._file_total:
+                fraction=self._file_current + min(1.0,max(0.0,float(i)/float(total)))
+                self.progress.setValue(max(0,min(100,int(round(fraction * 100 / self._file_total)))))
+            else:
+                self.progress.setValue(int(i*100/total))
         else:
             self.progress.setIndeterminate()
         match=re.search(r'\((\d+/\d+)\)',name); count=f' {match.group(0)}' if match else ''
         message='file_progress' if total else 'unknown_progress'
         self.status.setToolTip(name)
         self.status.setText(self.ui_text()['received' if total else 'unknown_size'].format(current=i/1048576,total=total/1048576))
+
+    def update_file_progress(self,current,total):
+        try:
+            self._file_current=max(0,int(current or 0))
+        except (TypeError,ValueError):
+            self._file_current=0
+        try:
+            self._file_total=max(0,int(total or 0))
+        except (TypeError,ValueError):
+            self._file_total=0
+        if self._file_total:
+            value=max(0,min(100,int(round(self._file_current * 100 / self._file_total))))
+            self.progress.setValue(value); self.percent_label.setText(str(value)); self.percent_unit.show()
     def done(self,n):
         worker=getattr(self,'worker',None)
         if worker and worker.isRunning(): worker.wait()

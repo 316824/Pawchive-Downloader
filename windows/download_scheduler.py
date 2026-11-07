@@ -122,6 +122,7 @@ def normalize_task(value: DownloadTask | dict[str, Any] | Any, sequence: int) ->
         direct = bool(get('direct')) or has_direct_attachment(formats)
         task_id = str(get('id') or uuid.uuid4().hex)
         metadata = dict(get('metadata') or {})
+        expected_files = get('file_count', get('expected_files', metadata.get('file_count', 0)))
     else:
         title = str(getattr(value, 'title', '') or getattr(value, 'name', '') or '未命名图集')
         url = str(getattr(value, 'url', '') or getattr(value, 'post_url', '') or '')
@@ -130,10 +131,15 @@ def normalize_task(value: DownloadTask | dict[str, Any] | Any, sequence: int) ->
         direct = bool(getattr(value, 'direct', False)) or has_direct_attachment(formats)
         task_id = str(getattr(value, 'id', '') or uuid.uuid4().hex)
         metadata = dict(getattr(value, 'metadata', {}) or {})
+        expected_files = getattr(value, 'file_count', getattr(value, 'expected_files', metadata.get('file_count', 0)))
+    try:
+        expected_files = max(0, int(expected_files or 0))
+    except (TypeError, ValueError):
+        expected_files = 0
     return DownloadTask(
         id=task_id, title=title, url=url, thumbnail=thumbnail,
         formats=formats, sequence=int(sequence), direct=direct,
-        priority=int(sequence), metadata=metadata)
+        priority=int(sequence), files_total=expected_files, metadata=metadata)
 
 
 class DownloadScheduler(QObject):
