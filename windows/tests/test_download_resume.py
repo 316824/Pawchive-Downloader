@@ -305,5 +305,35 @@ class DownloadResumeTests(unittest.TestCase):
         self.assertEqual(worker.success,[1]); self.assertFalse(worker.errors)
         self.assertEqual(self.journal.load(worker.job_id)['status'],'completed')
 
+    def test_recovery_profile_scan_rebuilds_selected_count_and_skips_other_posts(self):
+        second=PROFILE+'/post/two'
+        class ScanSession:
+            def __init__(self):
+                self.headers={}; self.calls=[]
+            def get(self,url,**kwargs):
+                self.calls.append(url)
+                if url==PROFILE:
+                    html=''.join(
+                        '<article class="post-card"><a href="{0}">post</a>'
+                        '<time class="timestamp" datetime="2026-11-01"></time>'
+                        '<div class="post-card__header">{1}</div></article>'.format(post,title)
+                        for post,title in ((POST,'Keep'),(second,'Skip')))
+                    return Response(html.encode())
+                if url==POST:
+                    html='<div class="post__files">' + ''.join(
+                        '<a class="fileThumb" href="{0}/data/{1}">image</a>'.format('https://file.pawchive.pw','a'*64+suffix)
+                        for suffix in ('.png','.jpg','.webp')) + '</div>'
+                    return Response(html.encode())
+                raise AssertionError('unselected post should not be fetched: '+url)
+            def close(self): pass
+        session=ScanSession(); result=[]
+        worker=app.ProfileScanWorker(PROFILE,self.root/'covers',selected_urls=[POST+'/'])
+        worker.result.connect(result.append)
+        with patch('download_pawchive_images.requests.Session',return_value=session):
+            worker.run()
+        self.assertEqual([item['url'] for item in result[0]],[POST])
+        self.assertEqual(result[0][0]['file_count'],3)
+        self.assertNotIn(second,session.calls)
+
 
 if __name__=='__main__': unittest.main()

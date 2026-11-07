@@ -711,13 +711,18 @@ class ScanAnimation(QDialog):
 
 class ProfileScanWorker(QThread):
     counts=Signal(int,int); result=Signal(object); failed=Signal(str)
-    def __init__(self,profile,cache_dir):
+    def __init__(self,profile,cache_dir,selected_urls=None):
         super().__init__(); self.profile=profile.rstrip('/'); self.cache_dir=Path(cache_dir); self.paused=False; self.finish_requested=False
+        # Recovery scans can be limited to the albums that still have a
+        # durable checkpoint.  The profile is still paged in order, but
+        # unrelated cards do not trigger detail/cover requests or enter the
+        # rebuilt queue.
+        self.selected_urls={str(value).rstrip('/') for value in (selected_urls or ()) if str(value).strip()}
     def run(self):
         session=requests.Session()
         session.headers['User-Agent']=USER_AGENT
         try:
-            titles=[]; offset=0; seen=set()
+            titles=[]; offset=0; seen=set(); previous_signature=None
             while True:
                 while self.paused and not self.finish_requested and not self.isInterruptionRequested(): time.sleep(.08)
                 if self.finish_requested or self.isInterruptionRequested(): break
@@ -726,6 +731,10 @@ class ProfileScanWorker(QThread):
                 if self.isInterruptionRequested(): break
                 if not cards: break
                 page_post_count=len(titles)
+                page_signature=tuple(
+                    absolute_post_url(card.select_one('a[href*="/post/"]').get('href'))
+                    if card.select_one('a[href*="/post/"]') else ''
+                    for card in cards)
                 self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                 for card in cards:
                     while self.paused and not self.finish_requested and not self.isInterruptionRequested(): time.sleep(.08)
@@ -734,7 +743,9 @@ class ProfileScanWorker(QThread):
                     if not link or not title: continue
                     post_url=absolute_post_url(link.get('href'))
                     if not post_url: continue
-                    if post_url in seen: continue
+                    post_key=post_url.rstrip('/')
+                    if self.selected_urls and post_key not in self.selected_urls: continue
+                    if post_key in seen: continue
                     image_path=None
                     if img:
                         src=img.get('data-src') or img.get('src')
@@ -753,9 +764,13 @@ class ProfileScanWorker(QThread):
                             if ext and ext not in formats: formats.append(ext)
                     except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    seen.add(post_url); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'formats':formats,'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
+                    seen.add(post_key); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'formats':formats,'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                     if self.finish_requested: break
-                if self.finish_requested or len(cards)<PAGE_SIZE or len(titles)==page_post_count: break
+                repeated_page=page_signature and page_signature==previous_signature
+                if (self.finish_requested or len(cards)<PAGE_SIZE
+                        or (not self.selected_urls and len(titles)==page_post_count)
+                        or (self.selected_urls and (self.selected_urls.issubset(seen) or repeated_page))): break
+                previous_signature=page_signature
                 offset+=PAGE_SIZE
             self.result.emit(titles)
         except Exception as exc: self.failed.emit(str(exc))
@@ -1428,6 +1443,36 @@ class App(QWidget):
         self.download_queue.set_items(scheduler.tasks)
         self.queue_count.setText(self.ui_text()['queue_count'].format(count=len(scheduler.tasks)))
 
+    def _initialize_queue_task_progress(self, task):
+        """Seed a restored row from its durable journal before it starts.
+
+        A resumed checkpoint can already contain verified files while the
+        freshly scanned queue entry supplies the complete attachment count.
+        Keeping both values on the task makes the overview bar represent the
+        remaining queue as a whole and keeps the row's cover/metadata intact.
+        """
+        records=[]
+        job_id=(task.metadata or {}).get('job_id')
+        if self.services and job_id:
+            try:
+                job=self.services.journal.load(str(job_id))
+                records=[dict(record) for record in job.get('files',())
+                         if isinstance(record,dict)]
+                task.metadata['completed_records']=[dict(record) for record in records
+                                                    if record.get('status') in ('complete','ready')]
+            except (KeyError, OSError, TypeError, ValueError):
+                records=[]
+        known_total=max(int(getattr(task,'files_total',0) or 0),len(records))
+        if not known_total:
+            return
+        completed=sum(1 for record in records if record.get('status') in ('complete','ready'))
+        task.files_total=known_total
+        task.completed_files=min(known_total,completed)
+        task.files_current=task.completed_files
+        task.progress=min(1.0,task.completed_files/known_total)
+        task.current=0
+        task.total=0
+
     def _update_queue_aggregate_progress(self):
         scheduler=self.queue_scheduler
         if scheduler is None:
@@ -1699,6 +1744,7 @@ class App(QWidget):
             job_id=(task.metadata or {}).get('job_id')
             if job_id:
                 self._queue_job_ids[task.id]=job_id
+            self._initialize_queue_task_progress(task)
         self._queue_view()
         self.set_busy_state(True)
         self.set_workflow('download')
