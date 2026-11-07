@@ -91,13 +91,26 @@ class ResumeChoice(QDialog):
     def __init__(self,parent,job):
         super().__init__(parent)
         self.choice='later'; lang=parent.lang
+        self.jobs=list(job) if isinstance(job,(list,tuple)) else [job]
         install_background_host(self,getattr(parent,'background_store',None),'resume_choice')
         self.setWindowTitle(tr(lang,'resume_title'))
         self.setMinimumWidth(480)
         layout=QVBoxLayout(self); layout.setContentsMargins(28,26,28,24); layout.setSpacing(16)
         title=label(tr(lang,'resume_title')); title.setStyleSheet('font-size:21px;font-weight:600')
         layout.addWidget(title); layout.addWidget(label(tr(lang,'resume_detail'),True))
-        config=job.get('config',{})
+        config=self.jobs[0].get('config',{}) if self.jobs else {}
+        if len(self.jobs)>1:
+            layout.addWidget(label(tr(lang,'resume_job_count',count=len(self.jobs))))
+            layout.addWidget(label(tr(lang,'resume_jobs')))
+            listing=QListWidget()
+            listing.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+            listing.setMaximumHeight(190)
+            for item in self.jobs:
+                item_config=item.get('config',{})
+                title=item_config.get('task_title') or item_config.get('task_post_url') or item_config.get('profile','')
+                status=item.get('status','paused')
+                listing.addItem(f'{title} · {status}')
+            layout.addWidget(listing)
         layout.addWidget(label(str(config.get('profile',''))))
         layout.addWidget(label(str(config.get('folder','')),True))
         layout.addWidget(label(tr(lang,'discard_detail'),True))

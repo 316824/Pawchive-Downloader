@@ -29,6 +29,10 @@ class FakeWorker(QObject):
         self.interrupted = True
 
 
+class ThreadLikeWorker(FakeWorker):
+    finished = Signal()
+
+
 class DownloadSchedulerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -82,6 +86,29 @@ class DownloadSchedulerTests(unittest.TestCase):
         self.assertEqual(self.scheduler.ordered_tasks()[0].id, first.id)
         self.workers[tasks[1].id].finished_ok.emit(1)
         self.assertEqual(self.scheduler.task(first.id).state, 'running')
+
+    def test_qthread_wrapper_is_kept_until_finished_signal(self):
+        self.scheduler.MAX_IMAGE_WORKERS = 1
+        self.workers = {}
+
+        def factory(task):
+            worker = ThreadLikeWorker()
+            self.workers[task.id] = worker
+            return worker
+
+        self.scheduler.worker_factory = factory
+        tasks = self.scheduler.add_tasks([
+            dict(title='first', url='post-1', formats=['.png']),
+            dict(title='second', url='post-2', formats=['.png']),
+        ])
+        self.scheduler.start()
+        self.workers[tasks[0].id].finished_ok.emit(1)
+        self.assertEqual(self.scheduler.task(tasks[0].id).state, 'completed')
+        self.assertEqual(self.scheduler.task(tasks[1].id).state, 'queued')
+        self.assertIn(tasks[0].id, self.scheduler._workers)
+        self.workers[tasks[0].id].finished.emit()
+        self.assertNotIn(tasks[0].id, self.scheduler._workers)
+        self.assertEqual(self.scheduler.task(tasks[1].id).state, 'running')
 
     def test_cancelled_queued_task_is_recycled_and_selection_order_survives_reorder(self):
         self.scheduler.MAX_IMAGE_WORKERS = 1

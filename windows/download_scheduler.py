@@ -166,6 +166,12 @@ class DownloadScheduler(QObject):
         self.worker_factory = worker_factory
         self._tasks: dict[str, DownloadTask] = {}
         self._workers: dict[str, Any] = {}
+        # A QThread emits the worker's terminal signal just before its
+        # ``run`` method returns. Keep the Python wrapper alive until Qt emits
+        # ``finished``; dropping the last reference in the terminal callback
+        # can destroy a running QThread and crash during download teardown.
+        self._terminal_tasks: set[str] = set()
+        self._finished_signals: set[str] = set()
         self._started = False
         self._closing = False
 
@@ -448,6 +454,10 @@ class DownloadScheduler(QObject):
             worker = self.worker_factory(task.public_copy())
             task.worker = worker
             self._workers[task.id] = worker
+            finished_signal = getattr(worker, 'finished', None)
+            if finished_signal is not None and hasattr(finished_signal, 'connect'):
+                self._finished_signals.add(task.id)
+                finished_signal.connect(lambda task_id=task.id: self._worker_finished(task_id))
             progress = getattr(worker, 'progress', None)
             if progress is not None:
                 progress.connect(lambda label, current, total, task_id=task.id:
@@ -507,9 +517,10 @@ class DownloadScheduler(QObject):
 
     def _on_success(self, task_id: str, count: Any) -> None:
         task = self.task(task_id)
-        if task is None or task_id not in self._workers:
+        if task is None or task_id not in self._workers or task_id in self._terminal_tasks:
             return
-        worker = self._workers.pop(task_id, None)
+        worker = self._workers.get(task_id)
+        self._terminal_tasks.add(task_id)
         completed_records = getattr(worker, 'completed_records', None)
         # The production Worker keeps its durable records in DownloadJournal
         # rather than duplicating them on the QThread object.  Read the
@@ -553,13 +564,14 @@ class DownloadScheduler(QObject):
             self._emit(task)
             self.task_finished.emit(task.public_copy())
         self.queue_changed.emit()
-        self._schedule_or_idle()
+        self._release_after_finished(task_id)
 
     def _on_failure(self, task_id: str, error: Any) -> None:
         task = self.task(task_id)
-        if task is None or task_id not in self._workers:
+        if task is None or task_id not in self._workers or task_id in self._terminal_tasks:
             return
-        worker=self._workers.pop(task_id, None)
+        worker=self._workers.get(task_id)
+        self._terminal_tasks.add(task_id)
         completed_records=getattr(worker,'completed_records',None)
         if completed_records is not None:
             try:
@@ -586,6 +598,24 @@ class DownloadScheduler(QObject):
             self._emit(task)
             self.task_finished.emit(task.public_copy())
         self.queue_changed.emit()
+        self._release_after_finished(task_id)
+
+    def _worker_finished(self, task_id: str) -> None:
+        """Release a QThread wrapper only after its native thread stopped."""
+        self._finished_signals.discard(task_id)
+        self._release_after_finished(task_id)
+
+    def _release_after_finished(self, task_id: str) -> None:
+        if task_id not in self._terminal_tasks:
+            return
+        if task_id in self._finished_signals:
+            # A real QThread has not necessarily stopped when finished_ok or
+            # failed is delivered. Wait for its finished signal.
+            if self.task(task_id) is not None and task_id in self._workers:
+                return
+        self._terminal_tasks.discard(task_id)
+        self._finished_signals.discard(task_id)
+        self._workers.pop(task_id, None)
         self._schedule_or_idle()
 
     def _schedule_or_idle(self) -> None:

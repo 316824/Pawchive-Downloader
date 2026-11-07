@@ -1398,6 +1398,8 @@ class App(QWidget):
         if self.services:
             extra=dict(journal=self.services.journal, resume_job_id=resume_id)
         order='newest' if self.order_combo.currentIndex()==0 else 'oldest'
+        # Queue tasks are numbered once, after every album settles. Running a
+        # per-album renamer here would make priority changes affect filenames.
         worker=Worker(self.path.text(), self._queue_profile or self.profile.text().strip(),
                       order, self.title_check.isChecked(), selected,
                       False, 1, self.lang, **extra)
@@ -1572,7 +1574,15 @@ class App(QWidget):
         return Path(path).suffix
 
     def _queue_rename_completed(self):
-        if self.title_check.isChecked() or not self.rename_check.isChecked() or self.queue_scheduler is None:
+        if self.queue_scheduler is None:
+            return
+        tasks=self.queue_scheduler.tasks
+        if any(task.state in {'queued','running','paused','pausing','cancelling','failed'} for task in tasks):
+            return
+        first_metadata=next((task.metadata for task in tasks if isinstance(task.metadata,dict)),{})
+        rename_enabled=bool(first_metadata.get('queue_rename_order',
+                                                 not self.title_check.isChecked() and self.rename_check.isChecked()))
+        if not rename_enabled:
             return
         root=Path(self.path.text()).resolve() if self.path.text().strip() else None
         if root is None or not root.is_dir():
@@ -1591,15 +1601,19 @@ class App(QWidget):
                         continue
                 except (OSError,ValueError):
                     continue
-                seen.add(target); targets.append(target)
+                date=str(record.get('date','')) if isinstance(record,dict) else ''
+                sequence=int(record.get('sequence',record_index)) if isinstance(record,dict) else record_index
+                seen.add(target); targets.append((date,int(task.sequence),sequence,target))
         if not targets:
             return
+        targets.sort(key=lambda item:(item[0],item[1],item[2],str(item[3])))
+        targets=[item[3] for item in targets]
         staged=[]
         try:
             for target in targets:
                 temporary=target.with_name(f'.pawchive-rename-{uuid.uuid4().hex}{self._file_extension(target)}')
                 target.rename(temporary); staged.append((temporary,self._file_extension(target)))
-            number=int(self.start_number.value())
+            number=int(first_metadata.get('queue_start_number',self.start_number.value()))
             for temporary,extension in staged:
                 destination=root/f'{number}{extension}'
                 while destination.exists():
@@ -1625,6 +1639,7 @@ class App(QWidget):
         self._queue_job_ids={}
         self._queue_rewarded_ids=set()
         self._queue_selected_ids=[]
+        self._queue_closing=False
         self.reset_dashboard(len(entries))
         self.queue_scheduler=DownloadScheduler(self._queue_worker_factory,self)
         self.queue_scheduler.task_updated.connect(self._queue_task_updated)
@@ -1633,15 +1648,57 @@ class App(QWidget):
         self.queue_scheduler.queue_changed.connect(self._queue_view)
         self.queue_scheduler.became_idle.connect(self._queue_worker_idle)
         tasks=[]
-        for sequence,entry in enumerate(entries):
-            item=dict(entry)
-            item.setdefault('metadata',{})
-            item['metadata']=dict(item['metadata'])
-            item['metadata'].update({'profile_url':self._queue_profile,
-                                     'ordinal':sequence,
-                                     'by_title':self.title_check.isChecked()})
-            tasks.append(item)
-        self.queue_scheduler.add_tasks(tasks)
+        queue_rename_order=bool(not self.title_check.isChecked() and self.rename_check.isChecked())
+        queue_start_number=int(self.start_number.value())
+        created_job_ids=[]
+        try:
+            for sequence,entry in enumerate(entries):
+                item=dict(entry)
+                item.setdefault('metadata',{})
+                item['metadata']=dict(item['metadata'])
+                item['metadata'].update({'profile_url':self._queue_profile,
+                                         'ordinal':sequence,
+                                         'by_title':self.title_check.isChecked(),
+                                         'queue_rename_order':queue_rename_order,
+                                         'queue_start_number':queue_start_number})
+                if self.services and not item['metadata'].get('job_id'):
+                    # Create one durable checkpoint for every selected album
+                    # before starting the pool. Queued albums therefore remain
+                    # visible and recoverable after an application restart.
+                    post_url=str(item.get('url','')).rstrip('/')
+                    job_config=dict(
+                        folder=str(Path(self.path.text()).expanduser().resolve()),
+                        profile=self._queue_profile,
+                        order='newest' if self.order_combo.currentIndex()==0 else 'oldest',
+                        by_title=bool(self.title_check.isChecked()),
+                        selected_post_urls=[post_url],
+                        rename_order=False,
+                        start_number=1,
+                        lang=self.lang,
+                        queue_task=True,
+                        task_title=str(item.get('title') or '未命名图集'),
+                        task_thumbnail=str(item.get('image') or item.get('thumbnail') or ''),
+                        task_post_url=post_url,
+                        queue_rename_order=queue_rename_order,
+                        queue_start_number=queue_start_number)
+                    job_id=self.services.journal.create(job_config)
+                    job=self.services.journal.load(job_id)
+                    job['status']='paused'
+                    self.services.journal.save(job,dirty_records=[])
+                    item['metadata']['job_id']=job_id
+                    created_job_ids.append(job_id)
+                tasks.append(item)
+        except Exception:
+            if self.services:
+                for job_id in created_job_ids:
+                    try:self.services.journal.discard(job_id)
+                    except (KeyError,OSError,ValueError,RuntimeError):pass
+            raise
+        task_objects=self.queue_scheduler.add_tasks(tasks)
+        for task in task_objects:
+            job_id=(task.metadata or {}).get('job_id')
+            if job_id:
+                self._queue_job_ids[task.id]=job_id
         self._queue_view()
         self.set_busy_state(True)
         self.set_workflow('download')

@@ -416,8 +416,8 @@ class DesktopRuntime(QObject):
         jobs=self.journal.list_recoverable()
         if not jobs:return
         from feature_dialogs import ResumeChoice
-        job=max(jobs,key=lambda value:value.get('updated',0))
-        dialog=ResumeChoice(self.window,job)
+        jobs=sorted(jobs,key=lambda value:value.get('updated',0),reverse=True)
+        dialog=ResumeChoice(self.window,jobs)
         try:dialog.exec(); choice=dialog.choice
         finally:
             dialog.deleteLater()
@@ -426,13 +426,18 @@ class DesktopRuntime(QObject):
         if self.window.busy or self.active_schedule is not None or self.exit_requested:return
         if choice=='resume':
             try:
-                schedule=self.store.get_setting('schedule_for_journal:'+job['id'])
-                plan=self.store.get_schedule(schedule) if schedule else None
-                # Cancelled reservations stay cancelled. Their checkpoint can
-                # still be resumed manually without occupying a new plan slot.
-                if plan and plan.status=='paused':
-                    self.store.set_schedule_status(schedule,'running'); self.active_schedule=schedule
-                self.run_snapshot(job['config'],job['id'])
+                queue_jobs=[job for job in jobs if self._is_queue_checkpoint(job)]
+                if queue_jobs and len(queue_jobs)==len(jobs):
+                    self._resume_queue_jobs(queue_jobs)
+                else:
+                    job=jobs[0]
+                    schedule=self.store.get_setting('schedule_for_journal:'+job['id'])
+                    plan=self.store.get_schedule(schedule) if schedule else None
+                    # Cancelled reservations stay cancelled. Their checkpoint can
+                    # still be resumed manually without occupying a new plan slot.
+                    if plan and plan.status=='paused':
+                        self.store.set_schedule_status(schedule,'running'); self.active_schedule=schedule
+                    self.run_snapshot(job['config'],job['id'])
             except Exception as error:
                 identifier=self.active_schedule; self.active_schedule=None
                 if identifier:
@@ -441,9 +446,47 @@ class DesktopRuntime(QObject):
                 self.restore_controls()
                 QMessageBox.warning(self.window,'Pawchive',str(error))
         elif choice=='discard':
-            self.journal.discard(job['id'])
-            schedule=self.store.get_setting('schedule_for_journal:'+job['id'])
-            if schedule and self.store.get_schedule(schedule):self.store.set_schedule_status(schedule,'cancelled')
+            for job in jobs:
+                self.journal.discard(job['id'])
+                schedule=self.store.get_setting('schedule_for_journal:'+job['id'])
+                if schedule and self.store.get_schedule(schedule):self.store.set_schedule_status(schedule,'cancelled')
+
+    @staticmethod
+    def _is_queue_checkpoint(job):
+        config=job.get('config',{}) if isinstance(job,dict) else {}
+        selected=config.get('selected_post_urls')
+        return bool(config.get('queue_task')) and isinstance(selected,list) and len(selected)==1
+
+    def _resume_queue_jobs(self,jobs):
+        """Rebuild the visible queue from every durable album checkpoint."""
+        if not jobs or self.window is None:
+            return
+        first=jobs[0].get('config',{})
+        self.window.profile.setText(str(first.get('profile','')))
+        self.window.path.setText(str(first.get('folder','')))
+        self.window.order_combo.setCurrentIndex(0 if first.get('order','newest')=='newest' else 1)
+        self.window.title_check.setChecked(bool(first.get('by_title',True)))
+        self.window.rename_check.setChecked(bool(first.get('queue_rename_order',False)))
+        self.window.start_number.setValue(int(first.get('queue_start_number',first.get('start_number',1))))
+        entries=[]
+        for job in jobs:
+            config=job.get('config',{})
+            selected=config.get('selected_post_urls') or []
+            if not selected: continue
+            post_url=str(selected[0]).rstrip('/')
+            entries.append({
+                'title':str(config.get('task_title') or post_url),
+                'url':post_url,
+                'image':str(config.get('task_thumbnail') or ''),
+                'metadata':{
+                    'job_id':job['id'],
+                    'queue_rename_order':bool(config.get('queue_rename_order',False)),
+                    'queue_start_number':int(config.get('queue_start_number',1)),
+                    'by_title':bool(config.get('by_title',True)),
+                },
+            })
+        if not entries or not self.window._start_queue(entries,str(first.get('profile',''))):
+            raise RuntimeError('无法恢复未完成的图集队列。')
 
     def close(self):
         if self.closed:return

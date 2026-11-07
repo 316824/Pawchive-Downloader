@@ -23,6 +23,8 @@ TEXT={
  'tray_message':('已留在后台，可从系统托盘重新打开。','已留在背景，可從系統匣重新開啟。','Running in the background. Open the workspace from the system tray.','バックグラウンドで動作中です。通知領域から開けます。'),
  'saved_progress':('下载进度已保存。下次打开时可以继续。','下載進度已儲存。下次開啟時可以繼續。','Progress saved. You can resume the next time you open the app.','進捗を保存しました。次回の起動時に再開できます。'),
  'resume_title':('继续上次的旅程？','繼續上次的旅程？','Pick up where you left off?','前回の続きを再開しますか？'),
+ 'resume_jobs':('待恢复图集','待恢復圖集','Posts to recover','再開する投稿'),
+ 'resume_job_count':('{count} 个未完成图集将在继续后恢复','{count} 個未完成圖集將在繼續後恢復','{count} unfinished posts will be restored','{count} 件の未完了投稿を再開します'),
  'resume_detail':('发现未完成的下载。已经保存的文件会保留，未完成的文件会尽可能续传。','找到未完成的下載。已儲存檔案會保留，未完成檔案將盡可能續傳。','An unfinished download is available. Saved files are kept; partial files resume when supported.','未完了のダウンロードがあります。保存済みファイルを保持し、対応する場合は途中から再開します。'),
  'resume':('继续下载','繼續下載','Resume download','ダウンロードを再開'),
  'later':('稍后再说','稍後再說','Not now','後で'),
