@@ -406,7 +406,11 @@ class DesktopRuntime(QObject):
             try:self.task_scheduler.remove(identifier)
             except Exception as exception:self.window.log.append(str(exception))
         self.restore_controls()
-        if self.tray and not self.window.isVisible():
+        # A minimized window remains visible to Qt, but the user cannot see
+        # the workspace. Treat both minimized and tray-hidden states as
+        # background completion so the balloon notification is delivered.
+        minimized = bool(getattr(self.window, 'isMinimized', lambda: False)())
+        if self.tray and (minimized or not self.window.isVisible()):
             message='download_complete' if success else 'paused' if paused else 'failed'
             self.tray.showMessage('Pawchive',tr(self.language,message),QSystemTrayIcon.MessageIcon.Information,3500)
         if not self.exit_requested:QTimer.singleShot(0,self.poll)

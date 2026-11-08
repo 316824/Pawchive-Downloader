@@ -19,9 +19,11 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
     QMessageBox)
 from background_store import BackgroundStore
 from background_ui import BackgroundLayer, BackgroundSettingsDialog, load_preview
+from desktop_visuals import rounded_icon
 from link_utils import LinkInfo, extract_link
 from download_scheduler import DownloadScheduler
 from recycle_bin import RecycleBin
+from windows_taskbar import TaskbarProgress
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
@@ -800,7 +802,8 @@ class App(QWidget):
         self._normal_minimum_size=QSize(self.minimumWidth(),self.minimumHeight())
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
-        self.setWindowIcon(QIcon(str(icon_path)))
+        self.setWindowIcon(rounded_icon(icon_path))
+        self.taskbar_progress=TaskbarProgress(self)
         self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_'))
         self.busy=False; self._close_when_worker_stops=False; self._link_prompt_active=False; self._handling_link_input=False
         self.queue_scheduler=None; self._queue_scan_entries=[]; self._queue_profile=''
@@ -1489,6 +1492,7 @@ class App(QWidget):
         self.progress.setValue(value)
         self.percent_label.setText(str(value))
         self.percent_unit.show()
+        self.taskbar_progress.set_value(value)
 
     def _queue_task_updated(self, task):
         scheduler=self.queue_scheduler
@@ -2139,6 +2143,9 @@ class App(QWidget):
                 self.progress.setValue(int(i*100/total))
         else:
             self.progress.setIndeterminate()
+        if not self.progress.indeterminate:
+            value = self.progress.value() if callable(getattr(self.progress, 'value', None)) else self.progress.value
+            self.taskbar_progress.set_value(value)
         match=re.search(r'\((\d+/\d+)\)',name); count=f' {match.group(0)}' if match else ''
         message='file_progress' if total else 'unknown_progress'
         self.status.setToolTip(name)
@@ -2156,12 +2163,14 @@ class App(QWidget):
         if self._file_total:
             value=max(0,min(100,int(round(self._file_current * 100 / self._file_total))))
             self.progress.setValue(value); self.percent_label.setText(str(value)); self.percent_unit.show()
+            self.taskbar_progress.set_value(value)
     def done(self,n):
         worker=getattr(self,'worker',None)
         if worker and worker.isRunning(): worker.wait()
         self.set_busy_state(False); self.status.setText(f"{TEXT[self.lang]['done']} · {n}"); folder=Path(self.path.text()) if self.path.text().strip() else None; self.completed_path=str(folder) if n>0 and folder and folder.is_dir() else None; self.open_folder_button.setVisible(bool(self.completed_path))
         self.set_workflow('complete'); self.stop_requested=False; self.files_saved=n; self.files_value.setText(str(n)); self.speed_value.setText('—')
         self.progress.setValue(100 if n else 0); self.percent_label.setText('100' if n else '0'); self.percent_unit.show()
+        self.taskbar_progress.set_value(100 if n else 0)
         self.file_name.set_full_text(self.ui_text()['settled'])
         if self.services:
             try:
@@ -2180,6 +2189,7 @@ class App(QWidget):
         if worker and worker.isRunning(): worker.wait()
         self.set_busy_state(False); self.completed_path=None; self.open_folder_button.hide(); self.status.setText(TEXT[self.lang]['error']); self.log.append(TEXT[self.lang]['empty'] if e=='EMPTY' else AUX_TEXT[self.lang]['no_selected'] if e=='NO_SELECTED_POSTS' else e)
         self.set_workflow('stopped' if self.stop_requested else 'error'); self.speed_value.setText('—')
+        self.taskbar_progress.clear()
         if self.stop_requested: self.status.setText(AUX_TEXT[self.lang]['cancelled'])
         if self.services:
             paused=bool(getattr(getattr(self,'worker',None),'preserve_on_interrupt',False))
@@ -2209,6 +2219,8 @@ class App(QWidget):
                 resume_scan.requestInterruption()
             return
         QApplication.instance().removeEventFilter(self)
+        self.taskbar_progress.clear()
+        self.taskbar_progress.close()
         self.credit.animation_timer.stop(); self.fx.stop()
         if hasattr(self,'background_layer'):
             self.background_layer.clear_background()

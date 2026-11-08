@@ -7,6 +7,26 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+
+def rounded_icon(path, size=128, radius=None):
+    """Return the bundled icon clipped to a soft rounded-square shape."""
+    size = max(32, int(size))
+    radius = float(radius if radius is not None else size * .22)
+    source = QIcon(str(path)).pixmap(size, size)
+    image = QPixmap(size, size)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+        painter.setClipPath(clip)
+        painter.drawPixmap(0, 0, source)
+    finally:
+        painter.end()
+    return QIcon(image)
+
 def _palette(dark):
     return dict(text='#edf1fa' if dark else '#20283b',
                 muted='#8e9bb0' if dark else '#6c778d',

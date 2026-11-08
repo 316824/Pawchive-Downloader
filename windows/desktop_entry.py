@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from activation import is_activated
 from app_state import AppState
 from desktop_runtime import DesktopRuntime, SingleInstance
+from desktop_visuals import rounded_icon
 from feature_dialogs import ActivationDialog
 from feature_text import tr
 
@@ -23,7 +24,7 @@ def run(window_class,argv=None):
     app=QApplication(sys.argv[:1]); app.setApplicationName('PawchiveDownloader')
     app.setOrganizationName('PawchiveTools'); app.setQuitOnLastWindowClosed(False)
     icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
-    app.setWindowIcon(QIcon(str(icon_path)))
+    app.setWindowIcon(rounded_icon(icon_path))
     store=None; instance=None; runtime=None; window=None; language='简体中文'
     try:
         store=AppState(); language=store.get_setting('language','简体中文')
