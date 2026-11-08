@@ -746,10 +746,11 @@ class ProfileScanWorker(QThread):
                     post_key=post_url.rstrip('/')
                     if self.selected_urls and post_key not in self.selected_urls: continue
                     if post_key in seen: continue
-                    image_path=None
+                    image_path=None; image_url=''
                     if img:
                         src=img.get('data-src') or img.get('src')
                         if src:
+                            image_url=str(src)
                             try:
                                 ir=session.get(src,timeout=8); ir.raise_for_status(); suffix=Path(unquote(urlparse(src).path)).suffix.lower(); suffix=suffix if re.fullmatch(r'\.[a-z0-9]{1,8}',suffix) else '.img'; image_path=self.cache_dir/f'{len(titles):06}{suffix}'; image_path.write_bytes(ir.content)
                             except requests.RequestException: pass
@@ -764,7 +765,7 @@ class ProfileScanWorker(QThread):
                             if ext and ext not in formats: formats.append(ext)
                     except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    seen.add(post_key); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'formats':formats,'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
+                    seen.add(post_key); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'image_url':image_url,'formats':formats,'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                     if self.finish_requested: break
                 repeated_page=page_signature and page_signature==previous_signature
                 if (self.finish_requested or len(cards)<PAGE_SIZE
@@ -1470,6 +1471,7 @@ class App(QWidget):
         task.completed_files=min(known_total,completed)
         task.files_current=task.completed_files
         task.progress=min(1.0,task.completed_files/known_total)
+        task.metadata['_counted_completed_files']=task.completed_files
         task.current=0
         task.total=0
 
@@ -1503,7 +1505,14 @@ class App(QWidget):
 
     def _queue_task_finished(self, task):
         if task.state=='completed':
-            self._queue_completed_files += max(0,int(task.completed_files or 0))
+            metadata=task.metadata if isinstance(task.metadata,dict) else {}
+            try:
+                counted=max(0,int(metadata.get('_counted_completed_files',0) or 0))
+            except (TypeError,ValueError):
+                counted=0
+            current=max(0,int(task.completed_files or 0))
+            self._queue_completed_files += max(0,current-counted)
+            metadata['_counted_completed_files']=max(counted,current)
         self._queue_view()
         self._update_queue_aggregate_progress()
 
@@ -1723,6 +1732,9 @@ class App(QWidget):
                         queue_task=True,
                         task_title=str(item.get('title') or '未命名图集'),
                         task_thumbnail=str(item.get('image') or item.get('thumbnail') or ''),
+                        task_thumbnail_url=str(item.get('image_url') or item.get('thumbnail_url') or ''),
+                        task_formats=list(item.get('formats') or []),
+                        task_file_count=max(0, int(item.get('file_count') or 0)),
                         task_post_url=post_url,
                         queue_rename_order=queue_rename_order,
                         queue_start_number=queue_start_number)
@@ -1745,6 +1757,12 @@ class App(QWidget):
             if job_id:
                 self._queue_job_ids[task.id]=job_id
             self._initialize_queue_task_progress(task)
+        self._queue_completed_files=sum(
+            max(0,int((task.metadata or {}).get('_counted_completed_files',0) or 0))
+            for task in task_objects)
+        self.files_saved=self._queue_completed_files
+        self.files_value.setText(str(self.files_saved))
+        self._update_queue_aggregate_progress()
         self._queue_view()
         self.set_busy_state(True)
         self.set_workflow('download')
@@ -1752,6 +1770,127 @@ class App(QWidget):
         self.status.setText(TEXT[self.lang]['working'])
         self.queue_scheduler.start()
         return True
+
+    def resume_recoverable_jobs(self, jobs):
+        """Re-scan recoverable queue posts before rebuilding the visible queue.
+
+        Checkpoints intentionally keep only small metadata and durable file
+        records.  Their old cover paths point into a previous temporary cache,
+        so a restart must fetch fresh cards and attachment counts before the
+        queue is shown again.  The scan runs off the GUI thread and only
+        examines the post URLs represented by the recoverable jobs.
+        """
+        if self.busy or not jobs:
+            return False
+        first = jobs[0].get('config', {}) if isinstance(jobs[0], dict) else {}
+        profile = str(first.get('profile', '')).strip().rstrip('/')
+        selected = []
+        for job in jobs:
+            config = job.get('config', {}) if isinstance(job, dict) else {}
+            urls = config.get('selected_post_urls') or []
+            if urls:
+                selected.append(str(urls[0]).rstrip('/'))
+        if not profile or not selected:
+            return False
+        self.profile.setText(profile)
+        self.path.setText(str(first.get('folder', '')))
+        self.order_combo.setCurrentIndex(0 if first.get('order', 'newest') == 'newest' else 1)
+        self.title_check.setChecked(bool(first.get('by_title', True)))
+        self.rename_check.setChecked(bool(first.get('queue_rename_order', False)))
+        self.start_number.setValue(int(first.get('queue_start_number', first.get('start_number', 1))))
+        self._resume_jobs = list(jobs)
+        self._resume_profile = profile
+        self._resume_scan_worker = ProfileScanWorker(profile, self.cache_dir, selected_urls=selected)
+        self.reset_dashboard(len(jobs))
+        self.set_busy_state(True)
+        self.set_workflow('scan')
+        self.status.setText(AUX_TEXT[self.lang]['scan_status'])
+        self._resume_scan_worker.result.connect(self._finish_resume_recoverable_jobs)
+        self._resume_scan_worker.failed.connect(self._fail_resume_recoverable_jobs)
+        self._resume_scan_worker.start()
+        return True
+
+    @staticmethod
+    def _resume_url_key(value):
+        return str(value or '').strip().rstrip('/')
+
+    def _finish_resume_recoverable_jobs(self, scanned):
+        worker = getattr(self, '_resume_scan_worker', None)
+        if worker is not None and worker.isRunning():
+            worker.wait()
+        self._resume_scan_worker = None
+        jobs = list(getattr(self, '_resume_jobs', []) or [])
+        profile = str(getattr(self, '_resume_profile', '') or '').rstrip('/')
+        by_url = {self._resume_url_key(item.get('url')): dict(item)
+                  for item in (scanned or []) if isinstance(item, dict) and item.get('url')}
+        entries = []
+        for job in jobs:
+            config = job.get('config', {}) if isinstance(job, dict) else {}
+            selected = config.get('selected_post_urls') or []
+            if not selected:
+                continue
+            post_url = self._resume_url_key(selected[0])
+            found = by_url.get(post_url, {})
+            image = str(found.get('image') or '')
+            if not image or not Path(image).is_file():
+                old_image = str(config.get('task_thumbnail') or '')
+                image = old_image if old_image and Path(old_image).is_file() else ''
+            title = str(found.get('title') or config.get('task_title') or post_url)
+            formats = list(found.get('formats') or config.get('task_formats') or [])
+            try:
+                file_count = max(0, int(found.get('file_count') or config.get('task_file_count') or 0))
+            except (TypeError, ValueError):
+                file_count = 0
+            metadata = {
+                'job_id': job.get('id'),
+                'queue_rename_order': bool(config.get('queue_rename_order', False)),
+                'queue_start_number': int(config.get('queue_start_number', 1)),
+                'by_title': bool(config.get('by_title', True)),
+            }
+            entries.append({'title': title, 'url': post_url, 'image': image,
+                            'formats': formats, 'file_count': file_count,
+                            'metadata': metadata})
+            # Keep the durable checkpoint useful if another restart occurs;
+            # the image itself remains in this run's bounded cache directory.
+            try:
+                job['config']['task_title'] = title
+                job['config']['task_thumbnail'] = image
+                job['config']['task_thumbnail_url'] = str(found.get('image_url') or config.get('task_thumbnail_url') or '')
+                job['config']['task_formats'] = formats
+                job['config']['task_file_count'] = file_count
+                if self.services:
+                    self.services.journal.save(job, dirty_records=[])
+            except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+                pass
+        self._resume_jobs = None
+        self._resume_profile = ''
+        if self._close_when_worker_stops:
+            self.set_busy_state(False)
+            QTimer.singleShot(0, self.close)
+            return
+        self.set_busy_state(False)
+        if not entries or not self._start_queue(entries, profile):
+            self.set_workflow('error')
+            self.status.setText(AUX_TEXT[self.lang]['scan_failed'])
+            return
+
+    def _fail_resume_recoverable_jobs(self, message):
+        worker = getattr(self, '_resume_scan_worker', None)
+        if worker is not None and worker.isRunning():
+            worker.wait()
+        self._resume_scan_worker = None
+        # Keep the checkpoint recoverable and surface the network error. The
+        # user can retry from the normal resume prompt after connectivity is
+        # restored; no queue is started with an unknown progress denominator.
+        self._resume_jobs = None
+        self._resume_profile = ''
+        self.set_busy_state(False)
+        if self._close_when_worker_stops:
+            QTimer.singleShot(0, self.close)
+            return
+        self.set_workflow('error')
+        self.status.setText(AUX_TEXT[self.lang]['scan_failed'])
+        self.log.append(str(message))
 
     def handle_queue_action(self, item_id, action):
         scheduler=self.queue_scheduler
@@ -2065,6 +2204,9 @@ class App(QWidget):
             if hasattr(self,'scanner') and self.scanner.isRunning():
                 self.scanner.requestInterruption()
                 if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.hide()
+            resume_scan=getattr(self,'_resume_scan_worker',None)
+            if resume_scan is not None and resume_scan.isRunning():
+                resume_scan.requestInterruption()
             return
         QApplication.instance().removeEventFilter(self)
         self.credit.animation_timer.stop(); self.fx.stop()

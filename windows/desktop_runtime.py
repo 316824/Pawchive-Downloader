@@ -458,8 +458,11 @@ class DesktopRuntime(QObject):
         return bool(config.get('queue_task')) and isinstance(selected,list) and len(selected)==1
 
     def _resume_queue_jobs(self,jobs):
-        """Rebuild the visible queue from every durable album checkpoint."""
+        """Rescan and rebuild the visible queue from durable checkpoints."""
         if not jobs or self.window is None:
+            return
+        resume_scan=getattr(self.window,'resume_recoverable_jobs',None)
+        if callable(resume_scan) and resume_scan(jobs):
             return
         first=jobs[0].get('config',{})
         self.window.profile.setText(str(first.get('profile','')))

@@ -310,6 +310,35 @@ class DesktopUiTests(unittest.TestCase):
         self.assertRegex(window.album_value.text(), r'3\s*/\s*8')
         self.assertEqual(re.findall(r'\d+', window.files_value.text()), ['2'])
 
+    def test_resume_queue_rebuild_uses_fresh_cover_and_file_count(self):
+        window = self.window
+        cover = self.directory / 'fresh-cover.png'
+        cover.write_bytes(b'fixture cover')
+        job = {
+            'id': 'a' * 32,
+            'config': {
+                'profile': 'https://pawchive.pw/fanbox/user/offline-artist',
+                'folder': str(self.directory),
+                'selected_post_urls': ['https://pawchive.pw/fanbox/user/offline-artist/post/1'],
+                'task_title': 'old title', 'task_thumbnail': '',
+                'queue_rename_order': False, 'queue_start_number': 1,
+                'by_title': True,
+            },
+        }
+        window._resume_jobs = [job]
+        window._resume_profile = job['config']['profile']
+        with patch.object(window, '_start_queue', return_value=True) as start:
+            window._finish_resume_recoverable_jobs([{
+                'title': 'fresh title', 'url': job['config']['selected_post_urls'][0],
+                'image': str(cover), 'formats': ['.png', '.jpg'], 'file_count': 2,
+            }])
+        entries, profile = start.call_args.args
+        self.assertEqual(profile, job['config']['profile'])
+        self.assertEqual(entries[0]['title'], 'fresh title')
+        self.assertEqual(entries[0]['image'], str(cover))
+        self.assertEqual(entries[0]['file_count'], 2)
+        self.assertEqual(entries[0]['formats'], ['.png', '.jpg'])
+
     def test_compact_window_does_not_grow_and_wrapped_inputs_remain_reachable(self):
         window = self.window
         requested = window.minimumSize()
