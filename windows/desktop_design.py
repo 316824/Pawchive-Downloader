@@ -1241,6 +1241,8 @@ def apply_style(w, dark, skin='default'):
     else:
         p['hover']='#2b243b' if dark else '#f1ecfa'
     p.setdefault('glow', DARK_GLOW if dark else LIGHT_GLOW)
+    custom_card = 'rgba(17,24,34,178)' if dark else 'rgba(255,255,255,194)'
+    custom_field = 'rgba(17,24,34,158)' if dark else 'rgba(255,255,255,172)'
     w.setStyleSheet(f'''
         QWidget {{background:transparent;color:{p['text']};font-family:"Segoe UI","Microsoft YaHei UI";font-size:14px;}}
         QWidget#appRoot,QDialog {{background:{p['bg']};}}
@@ -1261,6 +1263,11 @@ def apply_style(w, dark, skin='default'):
         QFrame#mainCard,QFrame#taskCard,QFrame#logCard,QFrame#queueCard {{background:{p['card']};border:1px solid {p['line']};border-radius:19px;}}
         QFrame#logCard {{background:{p['panel']};}}
         QFrame#queueItem {{background:{p['field']};border:1px solid {p['line']};border-radius:12px;}}
+        QWidget#appRoot[customBackground="true"] QFrame#mainCard,
+        QWidget#appRoot[customBackground="true"] QFrame#taskCard,
+        QWidget#appRoot[customBackground="true"] QFrame#logCard,
+        QWidget#appRoot[customBackground="true"] QFrame#queueCard {{background:{custom_card};}}
+        QWidget#appRoot[customBackground="true"] QFrame#queueItem {{background:{custom_field};}}
         QFrame#queueItem[selected="true"] {{background:{p['hover']};border-color:{p['glow']};}}
         QLabel#queueThumbnail {{background:{p['hover']};color:{p['muted']};border:1px solid {p['line']};border-radius:9px;font-size:22px;}}
         QLabel#queueTitle {{font-size:13px;font-weight:600;}}

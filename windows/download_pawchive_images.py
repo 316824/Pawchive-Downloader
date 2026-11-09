@@ -24,6 +24,7 @@ from link_utils import LinkInfo, extract_link
 from download_scheduler import DownloadScheduler
 from recycle_bin import RecycleBin
 from windows_taskbar import TaskbarProgress
+from window_chrome import install_window_chrome
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
@@ -1020,6 +1021,7 @@ class App(QWidget):
         build_interface(self,ThemeSwitch=ThemeSwitch,SoftComboBox=SoftComboBox,
             GlowButton=GlowButton,GlowCheckBox=GlowCheckBox,RainbowProgress=RainbowProgress,
             RainbowCredit=RainbowCredit,languages=TEXT,icon_path=icon_path)
+        install_window_chrome(self, title=TEXT[self.lang]['title'])
         self.background_layer=BackgroundLayer(self)
         self.background_layer.setGeometry(self.rect())
         self.background_layer.show(); self.background_layer.lower()
@@ -1095,6 +1097,9 @@ class App(QWidget):
         if self.language.currentText()!=l:
             blocked=self.language.blockSignals(True); self.language.setCurrentText(l); self.language.blockSignals(blocked)
         t=TEXT[l]; self.setWindowTitle(t['title']); self.heading.setText('Pawchive'); self.browse.setText(t['browse']); self.start.setText(t['start'])
+        chrome=getattr(self,'_pawchive_window_chrome',None)
+        if chrome is not None:
+            chrome.set_title(t['title'])
         self.open_folder_button.setText(t['open_folder'])
         en=l=='English'; ja=l=='日本語'
         self.profile_label.setText('请输入完整的 pawchive.pw 画师主页链接' if l=='简体中文' else '請輸入完整的 pawchive.pw 畫師首頁連結' if l=='繁體中文' else 'Enter the full Pawchive creator profile URL' if en else 'PawchiveのクリエイターページURLを入力')
@@ -1201,6 +1206,7 @@ class App(QWidget):
     def refresh_background(self):
         store=self.background_store
         if store is None:
+            self._set_custom_background_surface(False)
             self.background_layer.clear_background()
             self.refresh_background_controls()
             return
@@ -1209,13 +1215,31 @@ class App(QWidget):
         store.activate_page(self.background_page)
         pixmap=store.cached_preview(self.background_page,load_preview) if config else None
         if pixmap is None or config is None:
+            self._set_custom_background_surface(False)
             self.background_layer.clear_background()
         else:
+            self._set_custom_background_surface(True)
             store.release_except(self.background_page)
             self.background_layer.set_background(
                 pixmap,config.get('overlay',56),config.get('aspect',1.0))
         self._apply_background_orientation(config)
         self.refresh_background_controls()
+
+    def _set_custom_background_surface(self, active):
+        """Toggle translucent work cards only while a custom image is active."""
+        active=bool(active)
+        if bool(self.property('customBackground'))==active:
+            return
+        self.setProperty('customBackground',active)
+        style=self.style()
+        if style is None:
+            return
+        style.unpolish(self); style.polish(self)
+        # The selector is inherited from appRoot; repolish direct cards so a
+        # mode switch is visible immediately without rebuilding the layout.
+        for widget in self.findChildren(QWidget):
+            if widget.objectName() in {'mainCard','taskCard','logCard','queueCard','queueItem'}:
+                style.unpolish(widget); style.polish(widget); widget.update()
 
     def _apply_background_orientation(self, config):
         tall=bool(config and float(config.get('aspect',1.0)) < .82)
@@ -2428,6 +2452,15 @@ class App(QWidget):
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
         if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
+        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj is not self:
+            # Modal dialogs are created by several feature modules. Applying
+            # the shared chrome here keeps their caption, border, and buttons
+            # visually consistent without duplicating layout code in each one.
+            install_window_chrome(obj, title=obj.windowTitle())
+            # Changing window flags during a Show event briefly hides the
+            # native widget. Re-show it on the next event turn so child
+            # controls keep reporting their real visibility to Qt and tests.
+            QTimer.singleShot(0, obj.show)
         if isinstance(obj,QWidget) and (obj is self or self.isAncestorOf(obj)):
             if event.type() in (QEvent.Type.DragEnter,QEvent.Type.DragMove):
                 if extract_link(self._mime_link_text(event.mimeData())) is not None:
