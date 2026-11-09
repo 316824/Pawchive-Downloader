@@ -652,27 +652,172 @@ class RainbowCredit(QLabel):
         finally:
             painter.end()
 
+class SnakeGameWidget(QWidget):
+    """A tiny keyboard-playable Snake easter egg for the scan wait window.
+
+    The game is deliberately self-contained and has no effect on scanning.  It
+    keeps the waiting window useful while the worker is paging through a
+    profile, and the surrounding dialog continues to show the live page/post
+    counters and pause/finish controls.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(220, 120)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.columns, self.rows = 22, 10
+        self._rng = random.Random(7)
+        self._timer = QTimer(self)
+        self._timer.setInterval(125)
+        self._timer.timeout.connect(self.step)
+        self._paused = False
+        self._score = 0
+        self._best = 0
+        self._game_over = False
+        self._reset()
+        self._timer.start()
+
+    def _reset(self):
+        center = (self.columns // 2, self.rows // 2)
+        self.body = [center, (center[0] - 1, center[1]), (center[0] - 2, center[1])]
+        self.direction = (1, 0)
+        self.next_direction = self.direction
+        self.food = self._new_food()
+        self._score = 0
+        self._game_over = False
+        self.update()
+
+    def _new_food(self):
+        free = [(x, y) for y in range(self.rows) for x in range(self.columns)
+                if (x, y) not in getattr(self, 'body', ())]
+        return self._rng.choice(free) if free else None
+
+    def set_paused(self, paused):
+        self._paused = bool(paused)
+        if self._paused:
+            self._timer.stop()
+        elif not self._game_over:
+            self._timer.start()
+        self.update()
+
+    def stop(self):
+        self._timer.stop()
+
+    def start(self):
+        if not self._paused and not self._game_over:
+            self._timer.start()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _set_direction(self, direction):
+        # Do not allow a 180-degree turn into the snake's neck.
+        if direction[0] + self.direction[0] == 0 and direction[1] + self.direction[1] == 0:
+            return
+        self.next_direction = direction
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        directions = {
+            Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_A: (-1, 0),
+            Qt.Key.Key_Right: (1, 0), Qt.Key.Key_D: (1, 0),
+            Qt.Key.Key_Up: (0, -1), Qt.Key.Key_W: (0, -1),
+            Qt.Key.Key_Down: (0, 1), Qt.Key.Key_S: (0, 1),
+        }
+        if key in directions:
+            self._set_direction(directions[key])
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._game_over:
+            self._reset()
+            self.start()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self._game_over:
+            self._reset()
+            self.start()
+        event.accept()
+
+    def step(self):
+        if self._paused or self._game_over:
+            return
+        self.direction = self.next_direction
+        head = self.body[0]
+        new_head = ((head[0] + self.direction[0]) % self.columns,
+                    (head[1] + self.direction[1]) % self.rows)
+        if new_head in self.body[:-1]:
+            self._game_over = True
+            self._timer.stop()
+            self.update()
+            return
+        self.body.insert(0, new_head)
+        if new_head == self.food:
+            self._score += 1
+            self._best = max(self._best, self._score)
+            self.food = self._new_food()
+        else:
+            self.body.pop()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor('#101a30'))
+        cell_w, cell_h = self.width() / self.columns, self.height() / self.rows
+        painter.setPen(QPen(QColor(120, 145, 190, 24), 1))
+        for x in range(self.columns + 1):
+            painter.drawLine(QPointF(x * cell_w, 0), QPointF(x * cell_w, self.height()))
+        for y in range(self.rows + 1):
+            painter.drawLine(QPointF(0, y * cell_h), QPointF(self.width(), y * cell_h))
+        if self.food is not None:
+            fx, fy = self.food
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor('#ff7795'))
+            painter.drawEllipse(QRectF(fx * cell_w + 2, fy * cell_h + 2, cell_w - 4, cell_h - 4))
+        for index, (x, y) in enumerate(self.body):
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor('#8de0c0' if index else '#d7f7d1'))
+            painter.drawRoundedRect(QRectF(x * cell_w + 1.5, y * cell_h + 1.5,
+                                           cell_w - 3, cell_h - 3), 3, 3)
+        painter.setPen(QColor('#d7e7ff'))
+        painter.setFont(QFont('Segoe UI', 8, QFont.Weight.DemiBold))
+        painter.drawText(QRectF(7, 4, self.width() - 14, 15),
+                         Qt.AlignmentFlag.AlignLeft,
+                         f'SNAKE  {self._score}  /  BEST {self._best}')
+        if self._paused or self._game_over:
+            painter.fillRect(self.rect(), QColor(5, 10, 23, 170))
+            painter.setPen(QColor('#f4c6d1'))
+            painter.setFont(QFont('Segoe UI', 10, QFont.Weight.DemiBold))
+            text = '扫描暂停' if self._paused else '游戏结束 · 点击或按空格重来'
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+
+
 class ScanAnimation(QDialog):
-    """A small animated orbit shown while profile pages and covers are scanned."""
+    """A small playable Snake easter egg shown while profile pages are scanned."""
     def __init__(self,parent):
-        super().__init__(parent); self.setFixedSize(390,250); self.setModal(False); self._allow_close=False
+        super().__init__(parent); self.setFixedSize(420,330); self.setModal(False); self._allow_close=False
         from background_ui import install_background_host
         install_background_host(self,getattr(parent,'background_store',None),'scan')
         self.phase=0; self.pages=0; self.posts=0; self.paused=False; self.finish_requested=False; self.lang='简体中文'; self.scanner=None
-        layout=QVBoxLayout(self); layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.art=QLabel(); self.art.setFixedSize(220,120); self.art.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.art,0,Qt.AlignmentFlag.AlignCenter)
+        layout=QVBoxLayout(self); layout.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.setSpacing(7)
+        self.game=SnakeGameWidget(self); layout.addWidget(self.game,0,Qt.AlignmentFlag.AlignCenter)
+        self.game_hint=QLabel('方向键 / WASD 控制 · 点击游戏区域获取焦点'); self.game_hint.setAlignment(Qt.AlignmentFlag.AlignCenter); self.game_hint.setStyleSheet('color:#91a7be;font-size:11px'); layout.addWidget(self.game_hint)
         self.message=QLabel(); self.message.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.message)
         self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); self.counter.setStyleSheet('color:#91a7be'); layout.addWidget(self.counter)
         actions=QHBoxLayout(); self.pause_button=QPushButton(); self.resume_button=QPushButton(); self.finish_button=QPushButton(); actions.addWidget(self.pause_button); actions.addWidget(self.resume_button); actions.addWidget(self.finish_button); layout.addLayout(actions)
         self.pause_button.clicked.connect(self.pause_scan); self.resume_button.clicked.connect(self.resume_scan); self.finish_button.clicked.connect(self.finish_scan); self.resume_button.setEnabled(False)
-        self.timer=QTimer(self); self.timer.timeout.connect(self.animate); self.timer.start(35); self.animate()
     def pause_scan(self):
         self.paused=True
         if self.scanner: self.scanner.paused=True
+        self.game.set_paused(True)
         self.pause_button.setEnabled(False); self.resume_button.setEnabled(True); self.message.setText(AUX_TEXT[self.lang]['scan_paused'])
     def resume_scan(self):
         self.paused=False
         if self.scanner: self.scanner.paused=False
+        self.game.set_paused(False)
         self.pause_button.setEnabled(True); self.resume_button.setEnabled(False); self.message.setText(AUX_TEXT[self.lang]['scan_searching'])
     def finish_scan(self):
         self.finish_requested=True; self.paused=False
@@ -686,29 +831,18 @@ class ScanAnimation(QDialog):
         self.message.setText(message); self.update_counts(self.pages,self.posts)
     def update_counts(self,pages,posts):
         self.pages=pages; self.posts=posts; self.counter.setText(AUX_TEXT[self.lang]['scan_count'].format(pages=pages,posts=posts))
-    def animate(self):
-        self.phase=(self.phase+5)%360; pix=QPixmap(220,120); pix.fill(Qt.GlobalColor.transparent); painter=QPainter(pix); painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(95,135,175,90),2)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawEllipse(54,9,112,102)
-        palette=['#ff647c','#ffae52','#f3db59','#53d695','#43c8df','#668bff','#bf70eb']
-        for i,color in enumerate(palette):
-            angle=math.radians(self.phase+i*360/len(palette)); x=110+53*math.cos(angle); y=60+47*math.sin(angle); radius=5 if i%2 else 7
-            painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor(color)); painter.drawEllipse(QPointF(x,y),radius,radius)
-        painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor('#a7bcff' if getattr(self.parent(),'_dark',True) else '#536fd1'))
-        star=QPainterPath(); star.moveTo(110,43); star.quadTo(113,57,127,60); star.quadTo(113,63,110,77)
-        star.quadTo(107,63,93,60); star.quadTo(107,57,110,43); painter.drawPath(star)
-        painter.end(); self.art.setPixmap(pix)
     def closeEvent(self,event):
         if self.scanner and self.scanner.isRunning() and not self._allow_close:
             self.finish_scan()
             self.hide()
             event.ignore()
             return
-        self.timer.stop()
+        self.game.stop()
         super().closeEvent(event)
         refresh=getattr(self.parent(),'refresh_background',None)
         if callable(refresh):QTimer.singleShot(0,refresh)
     def hideEvent(self,event):
-        self.timer.stop()
+        self.game.stop()
         super().hideEvent(event)
 
 class ProfileScanWorker(QThread):
