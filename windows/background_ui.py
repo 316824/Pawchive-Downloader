@@ -10,13 +10,13 @@ from pathlib import Path
 
 from PySide6.QtCore import (QBuffer, QEvent, QObject, QPoint, QPointF, QRectF, Qt,
                             Signal)
-from PySide6.QtGui import (QBrush, QColor, QImage, QImageReader, QPainter, QPen,
-                           QPixmap)
+from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QImageReader, QPainter,
+                           QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QFormLayout,
                                QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
                                QMessageBox, QPushButton, QSlider, QVBoxLayout,
-                               QWidget, QFrame, QApplication)
+                               QWidget, QFrame, QApplication, QSizePolicy)
 
 from background_store import (ALLOWED_IMAGE_SUFFIXES, DEFAULT_OVERLAY,
                                MAX_PREVIEW_BYTES, MAX_PREVIEW_DIMENSION,
@@ -261,6 +261,74 @@ class CropView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
 
+class CropWindowPreview(QWidget):
+    """Render the crop as it will appear inside the target window.
+
+    The editor keeps the original image in memory while it is open, so this
+    preview can repaint from the normalized crop on every drag/resize without
+    writing temporary files or reloading the source image.
+    """
+
+    def __init__(self, target_aspect=1.25, parent=None):
+        super().__init__(parent)
+        self.target_aspect = max(.2, min(5.0, float(target_aspect or 1.25)))
+        self.source_image = QImage()
+        self.crop_rect = QRectF()
+        self.setMinimumSize(250, 220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_source(self, image):
+        self.source_image = image if isinstance(image, QImage) else QImage()
+        self.update()
+
+    def set_crop(self, rect):
+        self.crop_rect = QRectF(rect) if rect is not None else QRectF()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.fillRect(self.rect(), QColor('#080b12'))
+            outer = QRectF(self.rect()).adjusted(10, 10, -10, -10)
+            painter.setPen(QPen(QColor(184, 154, 244, 180), 1.5))
+            painter.setBrush(QBrush(QColor('#121a2a')))
+            painter.drawRoundedRect(outer, 14, 14)
+            window = outer.adjusted(10, 30, -10, -10)
+            if window.width() / max(1.0, window.height()) > self.target_aspect:
+                width = window.height() * self.target_aspect
+                window = QRectF(window.center().x() - width / 2, window.top(), width, window.height())
+            else:
+                height = window.width() / self.target_aspect
+                window = QRectF(window.left(), window.center().y() - height / 2, window.width(), height)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor('#070a10')))
+            painter.drawRoundedRect(window, 9, 9)
+            if not self.source_image.isNull() and self.crop_rect.width() > 1 and self.crop_rect.height() > 1:
+                source = self.crop_rect.intersected(QRectF(self.source_image.rect()))
+                painter.save()
+                clip = QPainterPath()
+                clip.addRoundedRect(window, 9, 9)
+                painter.setClipPath(clip)
+                painter.drawImage(window, self.source_image, source)
+                # Match the runtime's dark readability mask in the preview.
+                painter.fillRect(window, QColor(5, 8, 14, 92))
+                painter.restore()
+            painter.setPen(QColor('#eaf0ff'))
+            painter.setFont(QFont('Segoe UI', 9, QFont.Weight.DemiBold))
+            painter.drawText(QRectF(outer.left() + 12, outer.top() + 7, outer.width() - 24, 18),
+                             Qt.AlignmentFlag.AlignLeft, '窗口实际预览')
+            painter.setPen(QColor(181, 194, 221))
+            painter.setFont(QFont('Segoe UI', 8))
+            painter.drawText(QRectF(window.left() + 12, window.top() + 12, window.width() - 24, 18),
+                             Qt.AlignmentFlag.AlignLeft, 'Pawchive  ·  当前界面')
+            painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
+            painter.drawRoundedRect(window, 9, 9)
+        finally:
+            painter.end()
+
+
 class BackgroundLayer(QWidget):
     """A transparent child that paints one cached preview and its mask."""
 
@@ -303,6 +371,81 @@ class BackgroundLayer(QWidget):
             painter.drawPixmap(QPointF(x, y), scaled)
             alpha = int(255 * self.overlay / 100)
             painter.fillRect(self.rect(), QColor(5, 8, 14, alpha))
+        finally:
+            painter.end()
+
+
+class BackgroundWindowPreview(QWidget):
+    """Small live mock of the application surface used by the crop editor.
+
+    The preview intentionally uses the same keep-aspect-ratio rendering and
+    dark readability mask as :class:`BackgroundLayer`, then draws a few
+    translucent cards to make the effect of the real window controls clear.
+    It never retains the source image after the editor closes.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(260, 190)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self._image = QImage()
+        self._overlay = DEFAULT_OVERLAY
+
+    def set_preview(self, image, overlay=DEFAULT_OVERLAY):
+        self._image = image if isinstance(image, QImage) else QImage()
+        self._overlay = normalize_overlay(overlay)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            painter.setPen(QPen(QColor('#52617a'), 1))
+            painter.setBrush(QColor('#070a10'))
+            painter.drawRoundedRect(bounds, 12, 12)
+            if self._image.isNull():
+                painter.setPen(QColor('#9aa8bd'))
+                painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, '裁剪后的窗口效果')
+                return
+            path = QPainterPath()
+            path.addRoundedRect(bounds, 12, 12)
+            painter.save()
+            painter.setClipPath(path)
+            target = bounds
+            scaled = QPixmap.fromImage(self._image).scaled(
+                target.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            x = target.left() + (target.width() - scaled.width()) / 2
+            y = target.top() + (target.height() - scaled.height()) / 2
+            painter.drawPixmap(QPointF(x, y), scaled)
+            alpha = int(255 * self._overlay / 100)
+            painter.fillRect(bounds, QColor(5, 8, 14, alpha))
+
+            # Representative translucent UI modules. Their rounded shapes make
+            # it immediately obvious which parts of the image remain visible.
+            header = QRectF(bounds.left() + 12, bounds.top() + 10,
+                            max(40.0, bounds.width() - 24), 22)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(18, 25, 38, 190))
+            painter.drawRoundedRect(header, 7, 7)
+            card_y = bounds.top() + 48
+            card_h = max(26.0, (bounds.height() - 62) * .52)
+            left = QRectF(bounds.left() + 12, card_y, bounds.width() * .55, card_h)
+            right = QRectF(bounds.left() + bounds.width() * .60, card_y,
+                           max(30.0, bounds.width() * .28), card_h)
+            painter.setBrush(QColor(20, 29, 43, 176))
+            painter.drawRoundedRect(left, 9, 9)
+            painter.drawRoundedRect(right, 9, 9)
+            painter.setPen(QPen(QColor(194, 210, 239, 105), 1))
+            painter.drawLine(left.left() + 12, left.bottom() - 16,
+                             left.right() - 12, left.bottom() - 16)
+            painter.restore()
+            painter.setPen(QPen(QColor('#7583a0'), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(bounds, 12, 12)
         finally:
             painter.end()
 
@@ -414,15 +557,19 @@ class BackgroundEditorDialog(QDialog):
         self.source_image = QImage()
         self.result_config = None
         self.setWindowTitle('编辑背景图')
-        self.resize(900, 720)
-        self.setMinimumSize(640, 520)
+        self.resize(1040, 720)
+        self.setMinimumSize(760, 540)
         layout = QVBoxLayout(self)
         self.path_label = QLabel('请选择 JPG、PNG、JPEG 或 WEBP 图片（最大 20 MB）')
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
+        editor_row = QHBoxLayout()
         self.view = CropView(self)
-        self.view.setMinimumSize(560, 390)
-        layout.addWidget(self.view, 1)
+        self.view.setMinimumSize(500, 390)
+        editor_row.addWidget(self.view, 2)
+        self.preview = CropWindowPreview(self.target_aspect, self)
+        editor_row.addWidget(self.preview, 1)
+        layout.addLayout(editor_row, 1)
         self.coordinates = QLabel('拖动裁剪框，右下角手柄可调整大小；滚轮缩放，空白处拖动平移。')
         self.coordinates.setWordWrap(True)
         layout.addWidget(self.coordinates)
@@ -442,6 +589,7 @@ class BackgroundEditorDialog(QDialog):
         self.cancel_button.clicked.connect(self.reject)
         self.save_button.clicked.connect(self.save_selection)
         self.view.cropChanged.connect(self.update_coordinates)
+        self.view.cropChanged.connect(self.update_preview)
         self.save_button.setEnabled(False)
         if initial_source:
             try:
@@ -467,12 +615,20 @@ class BackgroundEditorDialog(QDialog):
         initial_crop = self.initial_crop
         self.initial_crop = None
         self.view.set_image(image, self.target_aspect, initial_crop=initial_crop)
+        self.preview.set_source(image)
         self.save_button.setEnabled(True)
         self.update_coordinates()
+        self.update_preview()
 
     def reset_view(self):
         if not self.source_image.isNull():
             self.view.set_image(self.source_image, self.target_aspect)
+
+    def update_preview(self):
+        """Refresh the target-window mock immediately after crop changes."""
+        crop_item = getattr(self.view, 'crop_item', None)
+        self.preview.set_source(self.source_image)
+        self.preview.set_crop(crop_item.rect() if crop_item is not None else None)
 
     def update_coordinates(self):
         crop = self.view.normalized_crop()
