@@ -34,6 +34,26 @@ PROFILE_URL_RE = re.compile(
 )
 INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
+IMAGE_EXTENSIONS = frozenset({
+    '.avif', '.bmp', '.gif', '.heic', '.jpeg', '.jpg', '.png', '.tif',
+    '.tiff', '.webp',
+})
+VIDEO_EXTENSIONS = frozenset({
+    '.avi', '.flv', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg',
+    '.webm', '.wmv',
+})
+IMAGE_FOLDER = '图片文件'
+VIDEO_FOLDER = '视频文件'
+OTHER_FOLDER = '其它文件'
+
+
+def attachment_category(name):
+    suffix = Path(str(name or '')).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return 'image'
+    if suffix in VIDEO_EXTENSIONS:
+        return 'video'
+    return 'other'
 
 
 def cleanup_stale_cache_dirs(current=None, *, max_age=STALE_CACHE_AGE_SECONDS, now=None):
@@ -224,9 +244,9 @@ class _LegacyWorker(QThread):
                 title_el=soup.select_one('h1.post__title span')
                 if title_el: title=title_el.get_text(' ',strip=True)
                 safe=safe_path_component(title, limit=100)
-                dest=self.folder/safe if self.by_title else self.folder
-                self.created_album=self.by_title and not dest.exists(); self.current_album=dest if self.by_title else None
-                dest.mkdir(parents=True,exist_ok=True)
+                album_dest=self.folder/safe if self.by_title else self.folder
+                self.created_album=self.by_title and not album_dest.exists(); self.current_album=album_dest if self.by_title else None
+                album_dest.mkdir(parents=True,exist_ok=True)
                 links=[]; link_urls=set()
                 for a in soup.select('.post__files a.fileThumb[href], a.post__attachment-link[href]'):
                     u=a.get('href','').strip()
@@ -242,6 +262,15 @@ class _LegacyWorker(QThread):
                     if j == 1:
                         self.file_progress.emit(0, len(links))
                     name=safe_path_component(unquote(name or Path(urlparse(url).path).name), fallback=f'image_{j}.bin')
+                    category=attachment_category(name)
+                    if self.by_title:
+                        dest=album_dest
+                    elif category == 'image':
+                        dest=self.folder/IMAGE_FOLDER
+                    else:
+                        group=VIDEO_FOLDER if category == 'video' else OTHER_FOLDER
+                        dest=self.folder/group/safe
+                    dest.mkdir(parents=True,exist_ok=True)
                     target=dest/name
                     if not self.by_title and name in duplicate_names:
                         target=unique_path(dest,safe_path_component(f'({safe}) - {name}',fallback=name,limit=240))
@@ -265,7 +294,7 @@ class _LegacyWorker(QThread):
                     ext=Path(urlparse(url).path).suffix.lower()
                     # Large/non-image direct attachments are more likely to be rate limited.
                     # Keep them serial and add a modest randomized cooldown between attempts.
-                    direct_file=ext in {'.zip','.rar','.7z','.tar','.gz','.psd','.clip','.mp4','.mov','.webm','.mkv','.pdf'}
+                    direct_file=category != 'image'
                     if direct_file and saved:
                         self.wait_interruptibly(random.uniform(1.8,3.8))
                     last_error=None; content_type=''
@@ -303,13 +332,29 @@ class _LegacyWorker(QThread):
                     saved+=1; downloaded.append((dt,target,post_url,safe,name)); self.completed_records=list(downloaded); owners[target.name]=post_url; current_temp=None; self.progress.emit(f'✓  ({post_index}/{total}) {safe} / {target.name}',1,1); self.file_progress.emit(j, len(links))
                 self.current_album=None; self.created_album=False
             if self.rename_order:
-                for index,(_,path,_,_,_) in enumerate(sorted(downloaded,key=lambda item:item[0]),self.start_number):
-                    extension=''.join(path.suffixes)
-                    renamed=path.with_name(f'{index}{extension}')
-                    bump=1
-                    while renamed.exists() and renamed!=path:
-                        renamed=path.with_name(f'{index}_{bump}{extension}'); bump+=1
-                    if renamed!=path: path.rename(renamed)
+                # Number images only.  In title-folder mode each album gets
+                # its own sequence; in categorized flat mode all images share
+                # 图片文件 and therefore one global date order.
+                groups={}
+                for item in downloaded:
+                    path=item[1]
+                    if attachment_category(path.name) != 'image':
+                        continue
+                    directory=path.parent if self.by_title else self.folder/IMAGE_FOLDER
+                    groups.setdefault(directory,[]).append(item)
+                for directory,items in groups.items():
+                    directory.mkdir(parents=True,exist_ok=True)
+                    staged=[]
+                    for _,path,_,_,_ in sorted(items,key=lambda item:(item[0],str(item[1]))):
+                        extension=path.suffix
+                        temporary=path.with_name(f'.pawchive-rename-{uuid.uuid4().hex}{extension}')
+                        path.rename(temporary); staged.append((temporary,extension))
+                    for index,(temporary,extension) in enumerate(staged,self.start_number):
+                        renamed=directory/f'{index}{extension}'
+                        bump=1
+                        while renamed.exists():
+                            renamed=directory/f'{index}_{bump}{extension}'; bump+=1
+                        temporary.rename(renamed)
             self.completed_records=list(downloaded)
             self.finished_ok.emit(saved)
         except Exception as e:
@@ -328,7 +373,7 @@ class Worker(_LegacyWorker):
     # Python integers keep multi-gigabyte ZIP/video progress out of Qt's int32 range.
     progress = Signal(str,object,object)
     def __init__(self,folder,profile,order,by_title,selected_post_urls=None,rename_order=False,
-                 start_number=1,lang='简体中文',journal=None,resume_job_id=None):
+                 start_number=1,lang='简体中文',journal=None,resume_job_id=None,layout_version=0):
         self.journal=journal
         self.preserve_on_interrupt=False
         self.resume_saved_count=0
@@ -345,7 +390,8 @@ class Worker(_LegacyWorker):
         if journal is not None:
             self.job_id=resume_job_id or journal.create(dict(folder=str(self.folder),profile=self.profile,
                 order=order,by_title=bool(by_title),selected_post_urls=sorted(self.selected_post_urls),
-                rename_order=bool(rename_order),start_number=start_number,lang=lang))
+                rename_order=bool(rename_order),start_number=start_number,lang=lang,
+                layout_version=int(layout_version or 0)))
     def run(self):
         if self.journal is None:
             return super().run()
@@ -1773,14 +1819,19 @@ class App(QWidget):
             return
         first_metadata=next((task.metadata for task in tasks if isinstance(task.metadata,dict)),{})
         rename_enabled=bool(first_metadata.get('queue_rename_order',
-                                                 not self.title_check.isChecked() and self.rename_check.isChecked()))
+                                                 self.rename_check.isChecked()))
         if not rename_enabled:
             return
         root=Path(self.path.text()).resolve() if self.path.text().strip() else None
         if root is None or not root.is_dir():
             return
-        targets=[]
+        # Only image records participate in numbering. Archives, videos,
+        # PSD/CLIP files and other attachments keep their descriptive names.
+        image_suffixes={'.avif','.bmp','.gif','.heic','.jpeg','.jpg','.png',
+                        '.tif','.tiff','.webp'}
+        records_by_directory={}
         seen=set()
+        by_title=bool(first_metadata.get('by_title',self.title_check.isChecked()))
         for task in self.queue_scheduler.selection_order():
             records=(task.metadata or {}).get('completed_records',())
             for record_index,record in enumerate(records):
@@ -1793,24 +1844,29 @@ class App(QWidget):
                         continue
                 except (OSError,ValueError):
                     continue
+                if target.suffix.lower() not in image_suffixes:
+                    continue
                 date=str(record.get('date','')) if isinstance(record,dict) else ''
                 sequence=int(record.get('sequence',record_index)) if isinstance(record,dict) else record_index
-                seen.add(target); targets.append((date,int(task.sequence),sequence,target))
-        if not targets:
+                seen.add(target)
+                directory=target.parent if by_title else root/'图片文件'
+                records_by_directory.setdefault(directory,[]).append((date,int(task.sequence),sequence,target))
+        if not records_by_directory:
             return
-        targets.sort(key=lambda item:(item[0],item[1],item[2],str(item[3])))
-        targets=[item[3] for item in targets]
-        staged=[]
         try:
-            for target in targets:
-                temporary=target.with_name(f'.pawchive-rename-{uuid.uuid4().hex}{self._file_extension(target)}')
-                target.rename(temporary); staged.append((temporary,self._file_extension(target)))
-            number=int(first_metadata.get('queue_start_number',self.start_number.value()))
-            for temporary,extension in staged:
-                destination=root/f'{number}{extension}'
-                while destination.exists():
-                    number+=1; destination=root/f'{number}{extension}'
-                temporary.rename(destination); number+=1
+            for directory,items in records_by_directory.items():
+                directory.mkdir(parents=True,exist_ok=True)
+                items.sort(key=lambda item:(item[0],item[1],item[2],str(item[3])))
+                staged=[]
+                for _,_,_,target in items:
+                    temporary=target.with_name(f'.pawchive-rename-{uuid.uuid4().hex}{self._file_extension(target)}')
+                    target.rename(temporary); staged.append((temporary,self._file_extension(target)))
+                number=1
+                for temporary,extension in staged:
+                    destination=directory/f'{number}{extension}'
+                    while destination.exists():
+                        number+=1; destination=directory/f'{number}{extension}'
+                    temporary.rename(destination); number+=1
         except (OSError,ValueError) as exc:
             self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
 
@@ -1840,8 +1896,11 @@ class App(QWidget):
         self.queue_scheduler.queue_changed.connect(self._queue_view)
         self.queue_scheduler.became_idle.connect(self._queue_worker_idle)
         tasks=[]
-        queue_rename_order=bool(not self.title_check.isChecked() and self.rename_check.isChecked())
-        queue_start_number=int(self.start_number.value())
+        # Numbering is available for both layouts and always starts at one.
+        # The spin box remains in the legacy state model for compatibility,
+        # but queue downloads intentionally ignore custom start values.
+        queue_rename_order=bool(self.rename_check.isChecked())
+        queue_start_number=1
         created_job_ids=[]
         try:
             for sequence,entry in enumerate(entries):
@@ -1875,7 +1934,8 @@ class App(QWidget):
                         task_file_count=max(0, int(item.get('file_count') or 0)),
                         task_post_url=post_url,
                         queue_rename_order=queue_rename_order,
-                        queue_start_number=queue_start_number)
+                        queue_start_number=queue_start_number,
+                        layout_version=2)
                     job_id=self.services.journal.create(job_config)
                     job=self.services.journal.load(job_id)
                     job['status']='paused'
@@ -2238,11 +2298,12 @@ class App(QWidget):
         order='newest' if self.order_combo.currentIndex()==0 else 'oldest'
         extra={}
         if self.services:
-            extra=dict(journal=self.services.journal,resume_job_id=self.services.resume_job_id)
+            extra=dict(journal=self.services.journal,resume_job_id=self.services.resume_job_id,
+                       layout_version=2)
         self.worker=None
         try:
             self.worker=Worker(self.path.text(),profile,order,self.title_check.isChecked(),selected,
-                not self.title_check.isChecked() and self.rename_check.isChecked(),self.start_number.value(),self.lang,**extra)
+                self.rename_check.isChecked(),1,self.lang,**extra)
             self.files_saved=getattr(self.worker,'resume_saved_count',0)
             self.files_value.setText(str(self.files_saved))
             self.worker.progress.connect(self.update_progress); self.worker.finished_ok.connect(self.done)

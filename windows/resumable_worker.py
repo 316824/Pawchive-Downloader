@@ -15,6 +15,32 @@ from bs4 import BeautifulSoup
 from download_journal import fingerprint, inside, matches, original_url
 
 
+# The queue layout deliberately keeps images easy to browse while isolating
+# large or editable attachments.  Unknown suffixes are treated as "other" so
+# a newly introduced attachment type never lands beside the image stream.
+IMAGE_EXTENSIONS = frozenset({
+    '.avif', '.bmp', '.gif', '.heic', '.jpeg', '.jpg', '.png', '.tif',
+    '.tiff', '.webp',
+})
+VIDEO_EXTENSIONS = frozenset({
+    '.avi', '.flv', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg',
+    '.webm', '.wmv',
+})
+IMAGE_FOLDER = '图片文件'
+VIDEO_FOLDER = '视频文件'
+OTHER_FOLDER = '其它文件'
+
+
+def file_category(name):
+    """Return the stable queue category for a downloaded filename."""
+    suffix = Path(str(name or '')).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return 'image'
+    if suffix in VIDEO_EXTENSIONS:
+        return 'video'
+    return 'other'
+
+
 def move_exclusive(source,target):
     """Move on the same filesystem without replacing an unrelated existing file."""
     source,target=Path(source),Path(target)
@@ -29,6 +55,62 @@ class DownloadEngine:
         self.w=worker; self.h=helpers; self.journal=worker.journal
         self.job=self.journal.load(worker.job_id)
         self.session=None; self.current=None
+        # Queue downloads use the current stable folder policy. Older direct
+        # workers and existing checkpoints retain their original flat layout
+        # so upgrading the app never moves a user's files unexpectedly.
+        config=self.job.get('config',{})
+        try:
+            layout_version=int(config.get('layout_version',0) or 0)
+        except (TypeError,ValueError):
+            layout_version=0
+        self.queue_layout=bool(config.get('queue_task') or layout_version>=2)
+
+    def destination_for(self, title, name, album_folder):
+        """Resolve the destination directory for one queue attachment."""
+        if not self.queue_layout or self.w.by_title:
+            return album_folder
+        category=file_category(name)
+        if category == 'image':
+            return self.w.folder / IMAGE_FOLDER
+        root=self.w.folder / (VIDEO_FOLDER if category == 'video' else OTHER_FOLDER)
+        return root / self.h['safe_path_component'](title, limit=100)
+
+    @staticmethod
+    def _record_is_image(record):
+        return file_category(Path(str(record.get('target',''))).name) == 'image'
+
+    def _rename_records(self, records, directory, start=1):
+        """Safely renumber image records inside one directory.
+
+        Staging each source first avoids collisions such as ``1.jpg`` being
+        renamed over the old ``2.jpg``. ``move_record`` validates the journal
+        hash before every move and keeps recovery atomic.
+        """
+        directory=inside(self.w.folder, directory)
+        staged=[]
+        try:
+            for record in records:
+                source=inside(self.w.folder,record['target'])
+                if not source.is_file() or not self._record_is_image(record):
+                    continue
+                extension=source.suffix
+                temporary=directory / f'.pawchive-rename-{os.urandom(8).hex()}{extension}'
+                self.move_record(record,temporary)
+                staged.append((record,temporary,extension))
+            number=int(start)
+            for record,temporary,extension in staged:
+                destination=directory / f'{number}{extension}'
+                while destination.exists():
+                    number+=1
+                    destination=directory / f'{number}{extension}'
+                self.move_record(record,destination)
+                record['number']=number
+                self.save(record)
+                number+=1
+        except Exception:
+            # A staged record remains journaled at its temporary path and can
+            # be resumed safely.  Do not remove user files while recovering.
+            raise
 
     def save(self,record=None,full=False):
         if full: self.job['saved_count']=sum(r.get('status')=='complete' for r in self.job['files'])
@@ -259,12 +341,14 @@ class DownloadEngine:
                 heading=soup.select_one('h1.post__title span')
                 if heading: title=heading.get_text(' ',strip=True)
                 title=self.h['safe_path_component'](title,limit=100)
-                dest=self.w.folder/title if self.w.by_title else self.w.folder
+                album_dest=self.w.folder/title if self.w.by_title else self.w.folder
                 previous=self.job.get('album')
-                created=(previous['created'] if previous and previous['post_url']==post_url else self.w.by_title and not dest.exists())
-                dest=inside(self.w.folder,dest,child=self.w.by_title); dest.mkdir(parents=True,exist_ok=True)
-                self.w.current_album=dest if self.w.by_title else None; self.w.created_album=created
-                self.job['album']=dict(path=str(dest),created=created,post_url=post_url) if self.w.by_title else None
+                created=(previous['created'] if previous and previous['post_url']==post_url
+                         else self.w.by_title and not album_dest.exists())
+                album_dest=inside(self.w.folder,album_dest,child=self.w.by_title)
+                album_dest.mkdir(parents=True,exist_ok=True)
+                self.w.current_album=album_dest if self.w.by_title else None; self.w.created_album=created
+                self.job['album']=dict(path=str(album_dest),created=created,post_url=post_url) if self.w.by_title else None
                 self.save(); seen=set()
                 anchors=soup.select('.post__files a.fileThumb[href],a.post__attachment-link[href]')
                 unique_anchors=[]; anchor_urls=set()
@@ -283,6 +367,9 @@ class DownloadEngine:
                     name=anchor.get('download','').strip() or (parse_qs(urlparse(url).query).get('f') or [''])[0]
                     name=name or re.sub(r'^Download\s+','',anchor.get_text(' ',strip=True),flags=re.I)
                     name=self.h['safe_path_component'](unquote(name or Path(urlparse(url).path).name),fallback=f'image_{number}.bin')
+                    dest=self.destination_for(title,name,album_dest)
+                    dest=inside(self.w.folder,dest,child=bool(self.w.by_title or self.queue_layout))
+                    dest.mkdir(parents=True,exist_ok=True)
                     record=self.record(date,post_url,title,url,name,direct,dest)
                     if record['status']=='complete':
                         file_done+=1
@@ -300,7 +387,9 @@ class DownloadEngine:
                     if hasattr(self.w,'file_progress'): self.w.file_progress.emit(file_done,file_total)
                 done.append(post_url); self.journal.mark_post_done(self.job['id'],post_url)
                 self.job['album']=None; self.w.current_album=None; self.w.created_album=False; self.save()
-            if self.w.rename_order:
+            if self.w.rename_order and not self.queue_layout:
+                # Legacy single-worker mode keeps its historical configurable
+                # start number and flat destination for existing checkpoints.
                 for number,record in enumerate(sorted(self.job['files'],key=lambda r:r['date']),self.w.start_number):
                     self.interrupted()
                     if record.get('number')==number: continue
@@ -309,6 +398,23 @@ class DownloadEngine:
                                     if filename.lower().endswith(suffix)),Path(filename).suffix)
                     target=Path(record['target']).with_name(f'{number}{extension}')
                     self.move_record(record,target); record['number']=number; self.save(record)
+            elif self.w.rename_order:
+                # Queue numbering is image-only and starts at one.  With
+                # title folders each album receives its own sequence; with
+                # the flat layout all images share the 图片文件 directory.
+                images=[record for record in self.job['files']
+                        if record.get('status') in ('complete','ready') and self._record_is_image(record)]
+                if self.w.by_title:
+                    groups={}
+                    for record in images:
+                        groups.setdefault(str(Path(record['target']).parent),[]).append(record)
+                    for directory,records in groups.items():
+                        self.interrupted()
+                        records.sort(key=lambda record:(str(record.get('date','')),int(record.get('sequence',0)),str(record.get('target',''))))
+                        self._rename_records(records,Path(directory),1)
+                else:
+                    images.sort(key=lambda record:(str(record.get('date','')),int(record.get('sequence',0)),str(record.get('target',''))))
+                    self._rename_records(images,self.w.folder/IMAGE_FOLDER,1)
             self.w.completed_records=[dict(record) for record in self.job.get('files',[])
                                       if record.get('status') in ('complete','ready')]
             count=sum(r['status']=='complete' for r in self.job['files'])

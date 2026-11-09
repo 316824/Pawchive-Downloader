@@ -160,6 +160,10 @@ class DownloadScheduler(QObject):
     became_idle = Signal()
 
     MAX_IMAGE_WORKERS = 5
+    # A failed album remains visible at the head of the queue while the
+    # remaining albums continue. Once the rest of the queue is drained we
+    # give it a few automatic recovery attempts before requiring user input.
+    AUTO_RETRY_LIMIT = 3
 
     def __init__(self, worker_factory: Callable[[DownloadTask], Any], parent: QObject | None = None):
         super().__init__(parent)
@@ -282,6 +286,10 @@ class DownloadScheduler(QObject):
         task.state = 'queued'
         task.intent = ''
         task.error = ''
+        if isinstance(task.metadata, dict):
+            # A deliberate retry is a fresh recovery cycle. It should get the
+            # same automatic retry allowance as a newly failed task.
+            task.metadata['auto_retry_count'] = 0
         task.attempts += 1
         self.move_to_top((task.id,))
         if self._started:
@@ -446,6 +454,7 @@ class DownloadScheduler(QObject):
         task.state = 'running'
         task.intent = ''
         task.error = ''
+        task.label = ''
         self._emit(task)
         # Reserve the slot before constructing the worker so a factory error
         # follows the same failed-task path and still advances the queue.
@@ -579,7 +588,12 @@ class DownloadScheduler(QObject):
             except TypeError:
                 task.metadata['completed_records']=completed_records
         task.worker = None
-        task.error = str(error or '下载失败')
+        # The worker emits a file-specific failure line immediately before its
+        # terminal signal. Keep that line in the queue row so the failed
+        # filename remains visible when the item is promoted to the top.
+        detail = str(task.label or '')
+        failure_markers = ('下载失败', '下載失敗', 'Download failed', 'ダウンロード失敗')
+        task.error = detail if any(marker in detail for marker in failure_markers) else str(error or '下载失败')
         intent = task.intent
         if intent == 'cancel':
             task.state = 'cancelled'
@@ -593,8 +607,11 @@ class DownloadScheduler(QObject):
             self.task_finished.emit(task.public_copy())
         else:
             # A failed album is deliberately left in a retryable state.  The
-            # scheduler immediately advances to the next priority task.
+            # scheduler immediately advances to the next priority task. Keep
+            # the failed item at the visible top of the queue so its cover and
+            # error text cannot be lost below a long list of pending albums.
             task.state = 'failed'
+            self._move_failed_to_top(task.id)
             self._emit(task)
             self.task_finished.emit(task.public_copy())
         self.queue_changed.emit()
@@ -618,10 +635,58 @@ class DownloadScheduler(QObject):
         self._workers.pop(task_id, None)
         self._schedule_or_idle()
 
+    def _move_failed_to_top(self, task_id: str) -> None:
+        """Promote a failed item without making it runnable immediately."""
+        ordered = [task.id for task in self.ordered_tasks()]
+        task_id = str(task_id)
+        if task_id not in ordered:
+            return
+        if ordered[0] == task_id:
+            return
+        ordered.remove(task_id)
+        ordered.insert(0, task_id)
+        self._reindex(ordered)
+
+    def _auto_retry_failed(self) -> bool:
+        """Queue one failed task for a deferred automatic retry.
+
+        This is intentionally called only after no active or queued work is
+        left. Failed tasks therefore remain visible and do not starve the
+        user's other selected albums. ``attempts`` is kept for diagnostics;
+        the separate counter limits only automatic retries and is persisted
+        in the task metadata used by the queue UI.
+        """
+        candidates = [task for task in self.ordered_tasks() if task.state == 'failed']
+        for task in candidates:
+            metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            try:
+                count = max(0, int(metadata.get('auto_retry_count', 0) or 0))
+            except (TypeError, ValueError):
+                count = 0
+            if count >= self.AUTO_RETRY_LIMIT:
+                continue
+            metadata['auto_retry_count'] = count + 1
+            task.metadata = metadata
+            task.state = 'queued'
+            task.intent = ''
+            task.error = ''
+            task.progress = 0.0
+            task.current = task.total = 0
+            task.files_current = 0
+            task.attempts += 1
+            self._move_failed_to_top(task.id)
+            self._emit(task)
+            self.queue_changed.emit()
+            return True
+        return False
+
     def _schedule_or_idle(self) -> None:
         self._schedule()
         if self._started and not any(task.is_active or task.state == 'queued'
                                      for task in self._tasks.values()):
+            if self._auto_retry_failed():
+                self._schedule()
+                return
             self.became_idle.emit()
 
 

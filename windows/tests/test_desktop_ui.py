@@ -224,13 +224,15 @@ class DesktopUiTests(unittest.TestCase):
 
     def test_renaming_options_and_default_path_survive_layout_changes(self):
         window = self.window
-        self.assertFalse(window.rename_container.isVisible())
+        # Numbering is now an explicit choice for both title-folder and
+        # categorized flat layouts, so the option remains visible by default.
+        self.assertTrue(window.rename_container.isVisible())
         window.title_check.setChecked(False)
         self.app.processEvents()
         self.assertTrue(window.rename_container.isVisible())
         self.assertEqual(window.start_number.value(), 1)
         window.title_check.setChecked(True)
-        self.assertFalse(window.rename_container.isVisible())
+        self.assertTrue(window.rename_container.isVisible())
         window.path.setText(str(self.directory))
         window.default_path_check.setChecked(True)
         window.settings.sync()

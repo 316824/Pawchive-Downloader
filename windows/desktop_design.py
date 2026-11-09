@@ -940,15 +940,20 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.start_number_label = text_label('', 'muted')
     number_row.addWidget(w.start_number_label)
     w.start_number = QSpinBox()
-    w.start_number.setRange(0, 999999999)
+    # v1.2.3 numbering is intentionally deterministic: image numbering starts
+    # at 1 in both title-folder and categorized flat layouts.
+    w.start_number.setRange(1, 1)
     w.start_number.setValue(1)
+    w.start_number.setEnabled(False)
     w.start_number.setMinimumWidth(120)
     number_row.addWidget(w.start_number)
     number_row.addStretch(1)
     w.rename_row.addLayout(number_row)
     box.addWidget(w.rename_container)
-    w.rename_container.hide()
-    w.title_check.toggled.connect(lambda checked: w.rename_container.setVisible(not checked))
+    # The rename choice applies equally to both storage layouts.  Keep the
+    # control visible when title folders are enabled so users can explicitly
+    # opt in to per-album image numbering.
+    w.rename_container.show()
     w.title_check.toggled.connect(w.update_note)
     w.title_check.toggled.connect(w.update_plan)
     w.select_posts_check.toggled.connect(w.update_plan)

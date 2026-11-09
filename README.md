@@ -1,15 +1,24 @@
-# Pawchive Downloader · v1.2.2
+# Pawchive Downloader · v1.2.3
 
 Pawchive Downloader 是一款面向 Windows 用户的 Pawchive 图集下载工具。它可以扫描画师主页、预览图集、选择需要保存的内容，并把图片和帖子附件整理到本地文件夹。
 
 Windows 版适合长时间下载和后台运行，也提供签到奖励、主题皮肤、自定义背景、画师档案卡和可恢复的下载队列。
 
-v1.2.2 重点改善后台下载体验：
+v1.2.3 重点改善后台下载、失败恢复和文件整理体验：
 
 - 窗口最小化或隐藏到托盘时，下载完成仍会弹出托盘通知。
 - Windows 任务栏图标显示实时下载进度，主窗口和托盘使用统一的圆角图标。
 - 软件重启后会重新扫描未完成图集，恢复封面、附件数量和剩余文件总数，任务概览进度条按剩余文件总量计算。
 - 图片最多五路并发；ZIP、视频和其它非图片附件保持单路下载。
+- 失败图集会置顶显示，剩余队列完成后自动重试最多三轮；失败项保留封面和错误信息。
+- 标题文件夹模式下，每个图集的图片可从 1 开始按日期递增编号；关闭标题文件夹后，图片统一进入“图片文件”，视频和其它附件按标题进入对应子文件夹。
+- 编号只作用于图片，视频、压缩包、PSD、CLIP 等文件保留原始文件名。
+
+项目同时提供 Android 版。Windows 版适合长时间后台下载，Android 版适合移动端的便捷使用；两端的下载目录、权限和后台行为不同，请按设备阅读对应说明：
+
+- [Windows 使用说明](windows/README.md)
+- [Android 使用说明与 APK 下载方法](android/README.md)
+- [Android 构建工作流](https://github.com/316824/Pawchive-Downloader/actions/workflows/build-android.yml)
 
 ## 下载与安装
 
@@ -212,6 +221,7 @@ JPG、JPEG、PNG、WEBP
 
 - [项目主页](https://github.com/316824/Pawchive-Downloader)
 - [Windows 使用说明](windows/README.md)
+- [Android 使用说明与 APK 下载方法](android/README.md)
 - [版本发布页](https://github.com/316824/Pawchive-Downloader/releases)
 
 项目采用 MIT License。第三方组件许可信息见 [windows/THIRD_PARTY_NOTICES.md](windows/THIRD_PARTY_NOTICES.md)。

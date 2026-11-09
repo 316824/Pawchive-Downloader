@@ -243,10 +243,8 @@ class ScheduleDialog(QDialog):
         self.by_title=type(parent.title_check)(parent.title_check.text()); self.by_title.setProperty('lightTheme',not parent._dark); self.by_title.setChecked(parent.title_check.isChecked())
         layout.addWidget(self.by_title)
         numbering=QHBoxLayout(); self.rename=type(parent.rename_check)(parent.rename_check.text()); self.rename.setProperty('lightTheme',not parent._dark); self.rename.setChecked(parent.rename_check.isChecked())
-        self.start_number=QSpinBox(); self.start_number.setRange(0,999999999); self.start_number.setValue(parent.start_number.value())
+        self.start_number=QSpinBox(); self.start_number.setRange(1,1); self.start_number.setValue(1); self.start_number.setEnabled(False)
         numbering.addWidget(self.rename,1); numbering.addWidget(self.start_number); layout.addLayout(numbering)
-        self.rename.setEnabled(not self.by_title.isChecked()); self.start_number.setEnabled(not self.by_title.isChecked())
-        self.by_title.toggled.connect(lambda state:(self.rename.setEnabled(not state),self.start_number.setEnabled(not state)))
         add=QPushButton(tr(self.lang,'add')); add.clicked.connect(self.add_schedule); layout.addWidget(add)
         self.notice=label('',True); layout.addWidget(self.notice)
         self.items=QListWidget(); self.items.setMinimumHeight(120); layout.addWidget(self.items,1)
@@ -266,7 +264,7 @@ class ScheduleDialog(QDialog):
             self.notice.setText(tr(self.lang,'schedule_invalid')); return
         snapshot=dict(profile=self.profile.text().strip(),folder=str(Path(self.folder.text()).resolve()),
             order='newest' if self.order.currentIndex()==0 else 'oldest',by_title=self.by_title.isChecked(),
-            rename_order=not self.by_title.isChecked() and self.rename.isChecked(),start_number=self.start_number.value())
+            rename_order=self.rename.isChecked(),start_number=1)
         try:self.runtime.add_schedule(normalize_snapshot(snapshot),due)
         except Exception as error:
             self.notice.setText(tr(self.lang,'schedule_error',error=str(error))); return

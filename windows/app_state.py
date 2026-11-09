@@ -108,8 +108,12 @@ def normalize_snapshot(value):
     start = value.get('start_number', 1)
     if isinstance(start, bool) or not isinstance(start, int) or not 0 <= start <= 999999999:
         raise ValueError('Invalid starting number.')
+    # The current UI uses deterministic image numbering: when enabled it
+    # always starts at 1 in either storage layout. Keep validating the legacy
+    # field so old schedule data is rejected when malformed, then normalize it
+    # to the fixed starting number used by the desktop workflow.
     result = dict(profile=profile.strip().rstrip('/'), folder=str(Path(folder)), order=order,
-                  by_title=by_title, rename_order=rename_order and not by_title, start_number=start)
+                  by_title=by_title, rename_order=rename_order, start_number=1)
     if 'lang' in value:
         if value['lang'] not in ('简体中文', '繁體中文', 'English', '日本語'):
             raise ValueError('Unknown interface language.')
