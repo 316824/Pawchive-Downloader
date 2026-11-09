@@ -20,16 +20,31 @@ class TaskbarProgress:
     def __init__(self, widget=None):
         self._object = None
         self._hwnd = 0
+        self._widget = widget
+        self._com_initialized = False
         if os.name != "nt" or widget is None:
             return
         try:
-            self._hwnd = int(widget.winId())
+            # Qt may not have created the native window before the first
+            # paint/show event.  Calling winId() here usually creates it,
+            # but keep the widget around and refresh the handle lazily too.
+            self._hwnd = int(widget.winId() or 0)
             self._create()
-        except (OSError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError, AttributeError):
             self.close()
 
     def _create(self):
         ole32 = ctypes.windll.ole32
+        # A Qt GUI thread is not guaranteed to have initialized COM.  Without
+        # this call CoCreateInstance commonly returns CO_E_NOTINITIALIZED and
+        # the taskbar bridge silently becomes a no-op.
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        com_result = int(ole32.CoInitializeEx(None, 0x2))
+        if com_result in (0, 1):
+            self._com_initialized = True
+        elif com_result not in (0x80010106, -2147417850):  # RPC_E_CHANGED_MODE
+            return
         ole32.CLSIDFromString.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(_GUID)]
         ole32.CLSIDFromString.restype = ctypes.c_long
         ole32.CoCreateInstance.argtypes = [ctypes.POINTER(_GUID), ctypes.c_void_p,
@@ -51,7 +66,14 @@ class TaskbarProgress:
             self.close()
 
     def _call(self, index, signature, *args):
-        if self._object is None or not self._hwnd:
+        if self._object is None:
+            return
+        if not self._hwnd and self._widget is not None:
+            try:
+                self._hwnd = int(self._widget.winId() or 0)
+            except (OSError, TypeError, ValueError, AttributeError):
+                self._hwnd = 0
+        if not self._hwnd:
             return
         vtable = ctypes.cast(self._object, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
         signature(vtable[index])(self._object, *args)
@@ -83,6 +105,12 @@ class TaskbarProgress:
             except (OSError, TypeError, ValueError):
                 pass
         self._object = None
+        if self._com_initialized and os.name == "nt":
+            try:
+                ctypes.windll.ole32.CoUninitialize()
+            except (OSError, AttributeError):
+                pass
+            self._com_initialized = False
 
     def __del__(self):
         self.close()
