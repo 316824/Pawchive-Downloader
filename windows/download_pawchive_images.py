@@ -93,17 +93,14 @@ def attachment_info(anchor, index=1):
     """Normalize one HTML attachment into name, category and direct flag."""
     href = str(anchor.get('href') or '').strip() if anchor is not None else ''
     direct = bool(anchor is not None and 'post__attachment-link' in (anchor.get('class') or []))
-    name = attachment_name(anchor, fallback=f'image_{index}.bin')
-    # ``fileThumb`` is an image stream when the site omits its extension;
-    # direct attachment links remain conservative and are classified as
-    # ``other`` until a filename proves they are a video/archive/etc.
-    category = attachment_category(name)
+    name = attachment_name(anchor)
+    # ``fileThumb`` is the site's image stream even when its URL is an
+    # opaque hash or the filename is absent.  ``post__attachment-link`` is
+    # the separate direct-file stream and stays serial/downloadable as an
+    # attachment even when somebody names it with an image suffix.
+    category = 'image' if not direct else attachment_category(name)
     if direct and category == 'image':
         category = 'other'
-    if not direct and category == 'other':
-        suffix = Path(unquote(urlparse(href).path)).suffix.lower()
-        if suffix in IMAGE_EXTENSIONS:
-            category = 'image'
     suffix = Path(name).suffix.lower()
     if not suffix:
         suffix = Path(unquote(urlparse(href).path)).suffix.lower()
@@ -320,11 +317,10 @@ class _LegacyWorker(QThread):
                     if j == 1:
                         self.file_progress.emit(0, len(links))
                     name=safe_path_component(unquote(name or Path(urlparse(url).path).name), fallback=f'image_{j}.bin')
-                    category=attachment_category(name)
-                    # ``fileThumb`` image URLs may be opaque hashes without a
-                    # suffix; the link class is still authoritative here.
-                    if not Path(name).suffix and not direct:
-                        category='image'
+                    # The fileThumb class is authoritative for image
+                    # attachments even when the generated fallback name has
+                    # a ``.bin`` suffix; direct links remain non-image files.
+                    category='image' if not direct else attachment_category(name)
                     if self.by_title:
                         dest=album_dest
                     elif category == 'image':
