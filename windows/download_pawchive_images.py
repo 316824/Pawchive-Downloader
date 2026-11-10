@@ -722,11 +722,15 @@ class SnakeGameWidget(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self.step)
+        self._dissolve_timer = QTimer(self)
+        self._dissolve_timer.setInterval(30)
+        self._dissolve_timer.timeout.connect(self._advance_dissolve)
         self._paused = False
         self._stopped = False
         self._finishing = False
         self._finish_until = 0.0
         self._finish_count = 0
+        self._dissolve_particles = []
         self._rebuild_until = 0.0
         self._invincible_until = 0.0
         self._collision_flash = 0.0
@@ -802,6 +806,7 @@ class SnakeGameWidget(QWidget):
     def stop(self):
         self._stopped = True
         self._timer.stop()
+        self._dissolve_timer.stop()
 
     def start(self):
         self._stopped = False
@@ -817,6 +822,31 @@ class SnakeGameWidget(QWidget):
         self._finish_count = max(0, int(count or 0))
         self._finish_until = time.monotonic() + .85
         self._collision_flash = 0.0
+        self._dissolve_particles = []
+        for x, y in list(self.body) + list(self.fragments):
+            angle = self._rng.random() * math.tau
+            speed = .8 + self._rng.random() * 1.8
+            self._dissolve_particles.append([
+                float(x), float(y), math.cos(angle) * speed,
+                math.sin(angle) * speed, 1.0])
+        self._dissolve_timer.start()
+        self.update()
+
+    def _advance_dissolve(self):
+        if not self._finishing:
+            self._dissolve_timer.stop()
+            return
+        for particle in self._dissolve_particles:
+            particle[0] += particle[2] * .08
+            particle[1] += particle[3] * .08
+            particle[4] = max(0.0, particle[4] - .035)
+        now = time.monotonic()
+        if now >= self._finish_until:
+            self._finishing = False
+            self._stopped = True
+            self._dissolve_timer.stop()
+            self._dissolve_particles.clear()
+            self.completionFinished.emit()
         self.update()
 
     def _set_direction(self, direction):
@@ -1072,6 +1102,12 @@ class SnakeGameWidget(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '扫描暂停')
         elif self._finishing:
             progress = min(1.0, max(0.0, (self._finish_until - now) / .85))
+            for px, py, _, _, life in self._dissolve_particles:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(126, 226, 255, int(210 * life)))
+                painter.drawEllipse(QPointF(px * cell_w + cell_w / 2,
+                                            py * cell_h + cell_h / 2),
+                                    2.0 + 3.0 * life, 2.0 + 3.0 * life)
             painter.fillRect(self.rect(), QColor(24, 39, 72, int(190 * progress)))
             painter.setPen(QColor('#d8ecff'))
             painter.setFont(QFont('Segoe UI', 10, QFont.Weight.DemiBold))
