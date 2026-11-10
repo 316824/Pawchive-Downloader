@@ -164,7 +164,11 @@ def install_window_chrome(window: QWidget, *, title: str | None = None) -> Windo
     # Frameless windows remove the bright OS border while retaining normal
     # maximize/minimize semantics through the custom controls.
     window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
-    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    # Let the top-level stylesheet paint the themed surface.  A translucent
+    # top-level window leaves the area below the cards black on light themes;
+    # the rounded native mask below still clips all four corners without
+    # requiring a transparent window surface.
+    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
     window.setProperty('pawchiveChromeSurface', True)
     bar = WindowChrome(window, title)
     layout = window.layout()
