@@ -307,14 +307,26 @@ class CropWindowPreview(QWidget):
             painter.drawRoundedRect(window, 9, 9)
             if not self.source_image.isNull() and self.crop_rect.width() > 1 and self.crop_rect.height() > 1:
                 source = self.crop_rect.intersected(QRectF(self.source_image.rect()))
-                painter.save()
-                clip = QPainterPath()
-                clip.addRoundedRect(window, 9, 9)
-                painter.setClipPath(clip)
-                painter.drawImage(window, self.source_image, source)
-                # Match the runtime's dark readability mask in the preview.
-                painter.fillRect(window, QColor(5, 8, 14, 92))
-                painter.restore()
+                # Render an explicit cropped/scaled image instead of relying
+                # on the QRectF/QImage overload.  The latter differs between
+                # Qt 6 builds and could leave the preview blank while the
+                # editor itself continued to work.  Keeping the crop in a
+                # bounded QImage also makes the preview deterministic and
+                # avoids retaining a second full-size source pixmap.
+                cropped = self.source_image.copy(source.toAlignedRect())
+                if not cropped.isNull():
+                    scaled = cropped.scaled(
+                        max(1, int(window.width())), max(1, int(window.height())),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                    painter.save()
+                    clip = QPainterPath()
+                    clip.addRoundedRect(window, 9, 9)
+                    painter.setClipPath(clip)
+                    painter.drawImage(window.topLeft(), scaled)
+                    # Match the runtime's dark readability mask in the preview.
+                    painter.fillRect(window, QColor(5, 8, 14, 92))
+                    painter.restore()
             painter.setPen(QColor('#eaf0ff'))
             painter.setFont(QFont('Segoe UI', 9, QFont.Weight.DemiBold))
             painter.drawText(QRectF(outer.left() + 12, outer.top() + 7, outer.width() - 24, 18),

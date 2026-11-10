@@ -1235,6 +1235,21 @@ class ScanAnimation(QDialog):
         self._allow_close = True
         self.close()
         callback()
+
+    def showEvent(self, event):
+        """Resume the game whenever the scan dialog becomes visible.
+
+        Qt may deliver a transient hide event while applying native window
+        state.  The hide handler intentionally stops the game, so without
+        restarting it here the scanner keeps reporting progress while the
+        canvas appears frozen.  Restarting is idempotent and still respects
+        an explicit pause or completion transition.
+        """
+        super().showEvent(event)
+        if not self.paused and not self.finish_requested:
+            self.game.start()
+        self.game.update()
+
     def set_language(self,lang):
         self.lang=lang; t=AUX_TEXT[lang]
         self.setWindowTitle(t['scan_window']); self.pause_button.setText(t['pause']); self.resume_button.setText(t['resume']); self.finish_button.setText(t['finish'])
