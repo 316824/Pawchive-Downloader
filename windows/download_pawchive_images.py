@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
     QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QFrame,
     QAbstractButton, QCheckBox, QDialog, QDialogButtonBox,
     QScrollArea, QGridLayout, QSpinBox, QSizePolicy, QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QListWidget, QListWidgetItem,
     QMessageBox)
 from background_store import BackgroundStore
@@ -700,146 +701,316 @@ class RainbowCredit(QLabel):
             painter.end()
 
 class SnakeGameWidget(QWidget):
-    """A tiny keyboard-playable Snake easter egg for the scan wait window.
+    """A quiet 20×20 scan-wait Snake with fragments and network glitches.
 
-    The game is deliberately self-contained and has no effect on scanning.  It
-    keeps the waiting window useful while the worker is paging through a
-    profile, and the surrounding dialog continues to show the live page/post
-    counters and pause/finish controls.
+    The widget is deliberately independent from the scanner.  Its timer only
+    advances this small canvas, while the parent dialog continues to expose
+    scan counters and pause/finish controls.  Collisions are soft feedback:
+    the snake loses two segments and a little score instead of entering a
+    blocking game-over screen.
     """
+    completionFinished = Signal()
+
+    GRID = 20
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(220, 120)
+        self.setFixedSize(300, 220)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.columns, self.rows = 22, 10
         self._rng = random.Random(7)
         self._timer = QTimer(self)
-        self._timer.setInterval(125)
+        self._timer.setInterval(100)
         self._timer.timeout.connect(self.step)
         self._paused = False
-        self._score = 0
-        self._best = 0
-        self._game_over = False
+        self._stopped = False
+        self._finishing = False
+        self._finish_until = 0.0
+        self._finish_count = 0
+        self._rebuild_until = 0.0
+        self._invincible_until = 0.0
+        self._collision_flash = 0.0
+        self._fragment_clock = 0.0
+        self._obstacle_clock = 0.0
+        self._snake_clock = 0.0
+        self._last_tick = time.monotonic()
+        self._idle_since = time.monotonic()
+        self._idle = False
+        self._idle_turn = 0
+        self._score = 10
+        self._best = 10
         self._reset()
         self._timer.start()
 
     def _reset(self):
-        center = (self.columns // 2, self.rows // 2)
+        center = (self.GRID // 2, self.GRID // 2)
         self.body = [center, (center[0] - 1, center[1]), (center[0] - 2, center[1])]
         self.direction = (1, 0)
         self.next_direction = self.direction
-        self.food = self._new_food()
-        self._score = 0
-        self._game_over = False
+        self.fragments = set()
+        self.obstacles = []
+        self._score = 10
+        self._rebuild_until = 0.0
+        self._invincible_until = time.monotonic() + 3.0
+        self._spawn_fragment()
+        self._idle_since = time.monotonic()
+        self._idle = False
         self.update()
 
-    def _new_food(self):
-        free = [(x, y) for y in range(self.rows) for x in range(self.columns)
-                if (x, y) not in getattr(self, 'body', ())]
-        return self._rng.choice(free) if free else None
+    def _occupied(self):
+        occupied = set(self.body)
+        occupied.update((round(item[0]), item[1]) for item in self.obstacles)
+        return occupied
+
+    def _spawn_fragment(self):
+        free = [(x, y) for y in range(self.GRID) for x in range(self.GRID)
+                if (x, y) not in self._occupied() and (x, y) not in self.fragments]
+        if free:
+            self.fragments.add(self._rng.choice(free))
+
+    def _spawn_obstacle(self):
+        rows = [y for y in range(self.GRID)
+                if (self.GRID - 1, y) not in self._occupied()]
+        if rows:
+            self.obstacles.append([float(self.GRID - 1), self._rng.choice(rows)])
 
     def set_paused(self, paused):
         self._paused = bool(paused)
         if self._paused:
             self._timer.stop()
-        elif not self._game_over:
+        elif not self._stopped:
+            self._last_tick = time.monotonic()
             self._timer.start()
         self.update()
 
     def stop(self):
+        self._stopped = True
         self._timer.stop()
 
     def start(self):
-        if not self._paused and not self._game_over:
+        self._stopped = False
+        if not self._paused:
+            self._last_tick = time.monotonic()
             self._timer.start()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    def begin_scan_complete(self, count):
+        """Start the soft completion dissolve used before the picker opens."""
+        self._finishing = True
+        self._finish_count = max(0, int(count or 0))
+        self._finish_until = time.monotonic() + .85
+        self._collision_flash = 0.0
+        self.update()
+
     def _set_direction(self, direction):
-        # Do not allow a 180-degree turn into the snake's neck.
         if direction[0] + self.direction[0] == 0 and direction[1] + self.direction[1] == 0:
             return
         self.next_direction = direction
+        self._idle_since = time.monotonic()
+        self._idle = False
 
     def keyPressEvent(self, event):
-        key = event.key()
         directions = {
             Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_A: (-1, 0),
             Qt.Key.Key_Right: (1, 0), Qt.Key.Key_D: (1, 0),
             Qt.Key.Key_Up: (0, -1), Qt.Key.Key_W: (0, -1),
             Qt.Key.Key_Down: (0, 1), Qt.Key.Key_S: (0, 1),
         }
-        if key in directions:
-            self._set_direction(directions[key])
+        direction = directions.get(event.key())
+        if direction is not None:
+            self._set_direction(direction)
             event.accept()
             return
-        if key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._game_over:
-            self._reset()
-            self.start()
-            event.accept()
-            return
-        super().keyPressEvent(event)
+        # Any key wakes the gentle idle state; it never opens a result dialog.
+        self._idle_since = time.monotonic()
+        self._idle = False
+        event.accept()
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
-        if self._game_over:
-            self._reset()
-            self.start()
+        self._idle_since = time.monotonic()
+        self._idle = False
+        if self._finishing:
+            self.completionFinished.emit()
         event.accept()
 
-    def step(self):
-        if self._paused or self._game_over:
+    def _soft_collision(self):
+        now = time.monotonic()
+        if now < self._invincible_until:
             return
+        self.body = self.body[:max(1, len(self.body) - 2)]
+        self._score -= 2
+        self._collision_flash = .45
+        if len(self.body) <= 1:
+            center = (self.GRID // 2, self.GRID // 2)
+            self.body = [center, (center[0] - 1, center[1]), (center[0] - 2, center[1])]
+            self._score -= 5
+        if self._score <= 0:
+            self._rebuild_until = now + 2.0
+            self._score = 0
+
+    def _move_snake(self):
         self.direction = self.next_direction
         head = self.body[0]
-        new_head = ((head[0] + self.direction[0]) % self.columns,
-                    (head[1] + self.direction[1]) % self.rows)
-        if new_head in self.body[:-1]:
-            self._game_over = True
-            self._timer.stop()
-            self.update()
-            return
+        new_head = ((head[0] + self.direction[0]) % self.GRID,
+                    (head[1] + self.direction[1]) % self.GRID)
+        body_hit = new_head in self.body[:-1]
+        obstacle_hit = any(abs(item[0] - new_head[0]) < .65 and item[1] == new_head[1]
+                           for item in self.obstacles)
         self.body.insert(0, new_head)
-        if new_head == self.food:
+        fragment_hit = new_head in self.fragments
+        if fragment_hit:
+            self.fragments.discard(new_head)
             self._score += 1
             self._best = max(self._best, self._score)
-            self.food = self._new_food()
         else:
             self.body.pop()
+        if body_hit or obstacle_hit:
+            self._soft_collision()
+
+    def step(self):
+        if self._paused or self._stopped:
+            return
+        now = time.monotonic()
+        dt = max(.01, min(.25, now - self._last_tick))
+        self._last_tick = now
+        if self._finishing:
+            if now >= self._finish_until:
+                self._finishing = False
+                self.completionFinished.emit()
+            self.update()
+            return
+        if self._rebuild_until:
+            if now >= self._rebuild_until:
+                self._reset()
+                self._invincible_until = now + 3.0
+            self.update()
+            return
+        self._fragment_clock += dt
+        self._obstacle_clock += dt
+        self._snake_clock += dt
+        self._collision_flash = max(0.0, self._collision_flash - dt)
+        if self._fragment_clock >= 1.0:
+            self._fragment_clock = 0.0
+            self._spawn_fragment()
+        if self._obstacle_clock >= 2.0:
+            self._obstacle_clock = 0.0
+            self._spawn_obstacle()
+        for item in self.obstacles:
+            item[0] -= 2.0 * dt
+        self.obstacles = [item for item in self.obstacles if item[0] > -.8]
+        if now - self._idle_since > 2.0:
+            self._idle = True
+            if self._idle_turn % 8 == 0:
+                self.next_direction = ((0, 1), (-1, 0), (0, -1), (1, 0))[(self._idle_turn // 8) % 4]
+            self._idle_turn += 1
+        if self._snake_clock >= .14:
+            self._snake_clock = 0.0
+            self._move_snake()
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor('#101a30'))
-        cell_w, cell_h = self.width() / self.columns, self.height() / self.rows
-        painter.setPen(QPen(QColor(120, 145, 190, 24), 1))
-        for x in range(self.columns + 1):
-            painter.drawLine(QPointF(x * cell_w, 0), QPointF(x * cell_w, self.height()))
-        for y in range(self.rows + 1):
-            painter.drawLine(QPointF(0, y * cell_h), QPointF(self.width(), y * cell_h))
-        if self.food is not None:
-            fx, fy = self.food
+        painter.fillRect(self.rect(), QColor('#091326'))
+        cell_w, cell_h = self.width() / self.GRID, self.height() / self.GRID
+        painter.setPen(QPen(QColor(120, 145, 190, 20), 1))
+        for index in range(self.GRID + 1):
+            painter.drawLine(QPointF(index * cell_w, 0), QPointF(index * cell_w, self.height()))
+            painter.drawLine(QPointF(0, index * cell_h), QPointF(self.width(), index * cell_h))
+        now = time.monotonic()
+        pulse = .65 + .35 * math.sin(now * 4.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for fx, fy in self.fragments:
+            rect = QRectF(fx * cell_w + 3, fy * cell_h + 3, cell_w - 6, cell_h - 6)
+            glow = QRadialGradient(rect.center(), max(rect.width(), rect.height()) * .8)
+            glow.setColorAt(0, QColor(96, 224, 255, int(235 * pulse)))
+            glow.setColorAt(1, QColor(72, 128, 255, 0))
+            painter.setBrush(glow)
+            painter.drawEllipse(rect.adjusted(-5, -5, 5, 5))
+            painter.setBrush(QColor('#7ce9ff'))
+            painter.drawRoundedRect(rect, 3, 3)
+        for ox, oy in self.obstacles:
+            rect = QRectF(ox * cell_w + 1, oy * cell_h + 1, cell_w - 2, cell_h - 2)
+            painter.setBrush(QColor(188, 74, 112, 190))
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QColor(255, 184, 203, 160))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, '≋')
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor('#ff7795'))
-            painter.drawEllipse(QRectF(fx * cell_w + 2, fy * cell_h + 2, cell_w - 4, cell_h - 4))
+        opacity = .34 if self._idle else 1.0
+        if now < self._invincible_until:
+            opacity = min(1.0, opacity + .25 * (1 + math.sin(now * 9.0)))
+        painter.setOpacity(max(0.15, opacity))
         for index, (x, y) in enumerate(self.body):
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor('#8de0c0' if index else '#d7f7d1'))
+            painter.setBrush(QColor('#c9fff0' if index == 0 else '#65d8bc'))
             painter.drawRoundedRect(QRectF(x * cell_w + 1.5, y * cell_h + 1.5,
-                                           cell_w - 3, cell_h - 3), 3, 3)
+                                           cell_w - 3, cell_h - 3), 4, 4)
+        painter.setOpacity(1.0)
         painter.setPen(QColor('#d7e7ff'))
         painter.setFont(QFont('Segoe UI', 8, QFont.Weight.DemiBold))
-        painter.drawText(QRectF(7, 4, self.width() - 14, 15),
-                         Qt.AlignmentFlag.AlignLeft,
-                         f'SNAKE  {self._score}  /  BEST {self._best}')
-        if self._paused or self._game_over:
-            painter.fillRect(self.rect(), QColor(5, 10, 23, 170))
-            painter.setPen(QColor('#f4c6d1'))
+        painter.drawText(QRectF(7, 4, self.width() - 14, 15), Qt.AlignmentFlag.AlignLeft,
+                         f'DATA {self._score}  /  BEST {self._best}')
+        if self._rebuild_until:
+            painter.fillRect(self.rect(), QColor(24, 140, 255, 58))
+            painter.setPen(QColor('#a8e8ff'))
             painter.setFont(QFont('Segoe UI', 10, QFont.Weight.DemiBold))
-            text = '扫描暂停' if self._paused else '游戏结束 · 点击或按空格重来'
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '核心受损，正在重组数据流...')
+            painter.setBrush(QColor(122, 228, 255, 220))
+            center = QPointF(self.width() / 2, self.height() / 2)
+            painter.drawEllipse(center, 8 + 3 * math.sin(now * 6), 8 + 3 * math.sin(now * 6))
+        elif self._paused:
+            painter.fillRect(self.rect(), QColor(5, 10, 23, 150))
+            painter.setPen(QColor('#b8c9e8'))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '扫描暂停')
+        elif self._finishing:
+            progress = min(1.0, max(0.0, (self._finish_until - now) / .85))
+            painter.fillRect(self.rect(), QColor(24, 39, 72, int(190 * progress)))
+            painter.setPen(QColor('#d8ecff'))
+            painter.setFont(QFont('Segoe UI', 10, QFont.Weight.DemiBold))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                             f'扫描已完成，共获取 {self._finish_count} 个图集\n（点击窗口任意一处位置查看图集）')
+        if self._collision_flash:
+            painter.fillRect(self.rect(), QColor(255, 107, 153, int(80 * self._collision_flash / .45)))
         painter.end()
+
+
+class ScanCompletionOverlay(QWidget):
+    """Click-through completion card that dissolves the waiting game."""
+    clicked = Signal()
+
+    def __init__(self, count, parent=None):
+        super().__init__(parent)
+        self.setObjectName('scanCompletionOverlay')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            '#scanCompletionOverlay { background: rgba(7, 12, 25, 218); }'
+            'QLabel { background: transparent; color: #edf3ff; }'
+            'QLabel#scanCompletionTitle { color: #cdbbff; font-size: 18px; font-weight: 700; }'
+            'QLabel#scanCompletionHint { color: #a9bad7; font-size: 12px; }')
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(9)
+        title = QLabel(f'扫描已完成，共获取 {int(count)} 个图集')
+        title.setObjectName('scanCompletionTitle')
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint = QLabel('（点击窗口任意一处位置查看图集）')
+        hint.setObjectName('scanCompletionHint')
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(hint)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        # Any key is an intentional equivalent of clicking the overlay.
+        self.clicked.emit()
+        event.accept()
 
 
 class ScanAnimation(QDialog):
@@ -849,6 +1020,7 @@ class ScanAnimation(QDialog):
         from background_ui import install_background_host
         install_background_host(self,getattr(parent,'background_store',None),'scan')
         self.phase=0; self.pages=0; self.posts=0; self.paused=False; self.finish_requested=False; self.lang='简体中文'; self.scanner=None
+        self._completion_overlay=None; self._completion_callback=None; self._completion_closing=False
         layout=QVBoxLayout(self); layout.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.setSpacing(7)
         self.game=SnakeGameWidget(self); layout.addWidget(self.game,0,Qt.AlignmentFlag.AlignCenter)
         self.game_hint=QLabel('方向键 / WASD 控制 · 点击游戏区域获取焦点'); self.game_hint.setAlignment(Qt.AlignmentFlag.AlignCenter); self.game_hint.setStyleSheet('color:#91a7be;font-size:11px'); layout.addWidget(self.game_hint)
@@ -871,6 +1043,54 @@ class ScanAnimation(QDialog):
         if self.scanner: self.scanner.finish_requested=True; self.scanner.paused=False
         self.pause_button.setEnabled(False); self.resume_button.setEnabled(False); self.finish_button.setEnabled(False)
         self.message.setText(AUX_TEXT[self.lang]['scan_finishing'])
+
+    def show_completion(self, count, callback):
+        """Freeze the game behind a soft overlay until the user continues."""
+        if self._completion_overlay is not None:
+            return
+        self.finish_requested = True
+        self.paused = False
+        if self.scanner:
+            self.scanner.finish_requested = True
+            self.scanner.paused = False
+        self.pause_button.setEnabled(False)
+        self.resume_button.setEnabled(False)
+        self.finish_button.setEnabled(False)
+        game_stop = getattr(self.game, 'dissolve', None)
+        if callable(game_stop):
+            game_stop()
+        else:
+            self.game.stop()
+        self._completion_callback = callback
+        overlay = ScanCompletionOverlay(count, self)
+        overlay.setGeometry(self.rect())
+        overlay.clicked.connect(self.finish_completion)
+        overlay.raise_()
+        effect = QGraphicsOpacityEffect(overlay)
+        effect.setOpacity(0.0)
+        overlay.setGraphicsEffect(effect)
+        self._completion_overlay = overlay
+        overlay.show()
+        animation = QPropertyAnimation(effect, b'opacity', overlay)
+        animation.setDuration(520)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        overlay._fade_animation = animation
+        animation.start()
+
+    def finish_completion(self):
+        callback = self._completion_callback
+        if callback is None or self._completion_closing:
+            return
+        self._completion_closing = True
+        self._completion_callback = None
+        if self._completion_overlay is not None:
+            self._completion_overlay.deleteLater()
+            self._completion_overlay = None
+        self._allow_close = True
+        self.close()
+        callback()
     def set_language(self,lang):
         self.lang=lang; t=AUX_TEXT[lang]
         self.setWindowTitle(t['scan_window']); self.pause_button.setText(t['pause']); self.resume_button.setText(t['resume']); self.finish_button.setText(t['finish'])
@@ -885,9 +1105,15 @@ class ScanAnimation(QDialog):
             event.ignore()
             return
         self.game.stop()
+        callback = self._completion_callback
+        self._completion_callback = None
+        self._completion_overlay = None
         super().closeEvent(event)
         refresh=getattr(self.parent(),'refresh_background',None)
         if callable(refresh):QTimer.singleShot(0,refresh)
+        if callback is not None and not self._completion_closing:
+            self._completion_closing = True
+            QTimer.singleShot(0, callback)
     def hideEvent(self,event):
         self.game.stop()
         super().hideEvent(event)
@@ -2290,26 +2516,34 @@ class App(QWidget):
         self.launch_worker(profile,selected)
     def scan_finished(self,titles):
         if hasattr(self,'scanner') and self.scanner.isRunning(): self.scanner.wait()
-        self.splash._allow_close=True
-        self.splash.close()
         if self._close_when_worker_stops:
+            self.splash._allow_close=True
+            self.splash.close()
             self.busy=False
             QTimer.singleShot(0,self.close)
             return
         if not titles:
+            self.splash._allow_close=True
+            self.splash.close()
             self.scan_failed(AUX_TEXT[self.lang]['empty_scan']); return
-        self.set_workflow('choose')
-        selected=self.choose_titles(titles)
-        if self._close_when_worker_stops:
-            self.busy=False
-            QTimer.singleShot(0,self.close)
-            return
-        if selected is None or not selected:
-            self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready']); return
-        selected_entries=[dict(entry) for entry in titles if str(entry.get('url','')) in selected]
-        self.set_busy_state(False)
-        if not self._start_queue(selected_entries,self.profile.text().strip()):
-            self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready'])
+        def continue_to_picker():
+            self.set_workflow('choose')
+            selected=self.choose_titles(titles)
+            if self._close_when_worker_stops:
+                self.busy=False
+                QTimer.singleShot(0,self.close)
+                return
+            if selected is None or not selected:
+                self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready']); return
+            selected_entries=[dict(entry) for entry in titles if str(entry.get('url','')) in selected]
+            self.set_busy_state(False)
+            if not self._start_queue(selected_entries,self.profile.text().strip()):
+                self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready'])
+        splash=getattr(self,'splash',None)
+        if splash is not None and hasattr(splash,'show_completion'):
+            splash.show_completion(len(titles),continue_to_picker)
+        else:
+            continue_to_picker()
     def scan_failed(self,message):
         if hasattr(self,'scanner') and self.scanner.isRunning(): self.scanner.wait()
         if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.close()
