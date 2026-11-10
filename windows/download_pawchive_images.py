@@ -737,6 +737,10 @@ class SnakeGameWidget(QWidget):
         self._idle_since = time.monotonic()
         self._idle = False
         self._idle_turn = 0
+        self._ghost_until = 0.0
+        self._magnet_until = 0.0
+        self._overclock_until = 0.0
+        self._buff_label = ''
         self._score = 10
         self._best = 10
         self._reset()
@@ -748,10 +752,15 @@ class SnakeGameWidget(QWidget):
         self.direction = (1, 0)
         self.next_direction = self.direction
         self.fragments = set()
+        self.fragment_buffs = {}
         self.obstacles = []
         self._score = 10
         self._rebuild_until = 0.0
         self._invincible_until = time.monotonic() + 3.0
+        self._ghost_until = 0.0
+        self._magnet_until = 0.0
+        self._overclock_until = 0.0
+        self._buff_label = ''
         self._spawn_fragment()
         self._idle_since = time.monotonic()
         self._idle = False
@@ -766,7 +775,14 @@ class SnakeGameWidget(QWidget):
         free = [(x, y) for y in range(self.GRID) for x in range(self.GRID)
                 if (x, y) not in self._occupied() and (x, y) not in self.fragments]
         if free:
-            self.fragments.add(self._rng.choice(free))
+            coordinate = self._rng.choice(free)
+            self.fragments.add(coordinate)
+            # Most fragments are ordinary score shards; a small subset carries
+            # a short-lived protocol buff so the game remains readable while
+            # still rewarding exploration.
+            if self._rng.random() < .22:
+                self.fragment_buffs[coordinate] = self._rng.choice(
+                    ('ghost', 'magnet', 'overclock', 'pulse'))
 
     def _spawn_obstacle(self):
         rows = [y for y in range(self.GRID)
@@ -796,6 +812,7 @@ class SnakeGameWidget(QWidget):
 
     def begin_scan_complete(self, count):
         """Start the soft completion dissolve used before the picker opens."""
+        self._timer.stop()
         self._finishing = True
         self._finish_count = max(0, int(count or 0))
         self._finish_until = time.monotonic() + .85
@@ -808,6 +825,73 @@ class SnakeGameWidget(QWidget):
         self.next_direction = direction
         self._idle_since = time.monotonic()
         self._idle = False
+
+    def _activate_buff(self, kind):
+        now = time.monotonic()
+        if kind == 'ghost':
+            self._ghost_until = max(self._ghost_until, now + 5.0)
+            self._buff_label = '幽灵协议 · 5s'
+        elif kind == 'magnet':
+            self._magnet_until = max(self._magnet_until, now + 4.0)
+            self._buff_label = '赛博磁铁 · 4s'
+        elif kind == 'overclock':
+            self._overclock_until = max(self._overclock_until, now + 6.0)
+            self._buff_label = '超频引擎 · 6s'
+        elif kind == 'pulse':
+            self.obstacles.clear()
+            self._collect_all_fragments()
+            self._buff_label = '反制脉冲 · 清障完成'
+
+    def _collect_fragment(self, coordinate):
+        if coordinate not in self.fragments:
+            return False
+        self.fragments.discard(coordinate)
+        kind = self.fragment_buffs.pop(coordinate, None)
+        self._score += 1
+        self._best = max(self._best, self._score)
+        if kind:
+            self._activate_buff(kind)
+        return True
+
+    def _collect_all_fragments(self):
+        for coordinate in list(self.fragments):
+            self._collect_fragment(coordinate)
+
+    def _apply_magnet(self, head):
+        if time.monotonic() >= self._magnet_until:
+            return
+        # Every existing shard moves one grid step toward the snake head on
+        # each tick for the duration of the magnet. Preserve the buff carried
+        # by a shard while it travels; collection happens on arrival so the
+        # effect remains visible instead of becoming an instant score jump.
+        occupied = set(self.body)
+        occupied.update((round(item[0]), item[1]) for item in self.obstacles)
+        moved = set()
+        moved_buffs = {}
+        pickups = []
+        for coordinate in list(self.fragments):
+            kind = self.fragment_buffs.get(coordinate)
+            x, y = coordinate
+            dx = 0 if x == head[0] else (1 if head[0] > x else -1)
+            dy = 0 if y == head[1] else (1 if head[1] > y else -1)
+            candidate = (x + dx, y + dy)
+            if candidate == head:
+                pickups.append(kind)
+                continue
+            if not (0 <= candidate[0] < self.GRID and 0 <= candidate[1] < self.GRID):
+                candidate = coordinate
+            if candidate in occupied or candidate in moved:
+                candidate = coordinate
+            moved.add(candidate)
+            if kind:
+                moved_buffs[candidate] = kind
+        self.fragments = moved
+        self.fragment_buffs = moved_buffs
+        for kind in pickups:
+            self._score += 1
+            self._best = max(self._best, self._score)
+            if kind:
+                self._activate_buff(kind)
 
     def keyPressEvent(self, event):
         directions = {
@@ -836,7 +920,10 @@ class SnakeGameWidget(QWidget):
 
     def _soft_collision(self):
         now = time.monotonic()
-        if now < self._invincible_until:
+        if now < self._invincible_until or now < self._ghost_until:
+            return
+        if now < self._overclock_until:
+            self._collision_flash = .45
             return
         self.body = self.body[:max(1, len(self.body) - 2)]
         self._score -= 2
@@ -855,18 +942,18 @@ class SnakeGameWidget(QWidget):
         new_head = ((head[0] + self.direction[0]) % self.GRID,
                     (head[1] + self.direction[1]) % self.GRID)
         body_hit = new_head in self.body[:-1]
-        obstacle_hit = any(abs(item[0] - new_head[0]) < .65 and item[1] == new_head[1]
-                           for item in self.obstacles)
+        obstacle_hit = (now := time.monotonic()) >= self._ghost_until and any(
+            abs(item[0] - new_head[0]) < .65 and item[1] == new_head[1]
+            for item in self.obstacles)
         self.body.insert(0, new_head)
         fragment_hit = new_head in self.fragments
         if fragment_hit:
-            self.fragments.discard(new_head)
-            self._score += 1
-            self._best = max(self._best, self._score)
+            self._collect_fragment(new_head)
         else:
             self.body.pop()
         if body_hit or obstacle_hit:
             self._soft_collision()
+        self._apply_magnet(new_head)
 
     def step(self):
         if self._paused or self._stopped:
@@ -890,6 +977,9 @@ class SnakeGameWidget(QWidget):
         self._obstacle_clock += dt
         self._snake_clock += dt
         self._collision_flash = max(0.0, self._collision_flash - dt)
+        now = time.monotonic()
+        if now >= self._ghost_until and now >= self._magnet_until and now >= self._overclock_until:
+            self._buff_label = ''
         if self._fragment_clock >= 1.0:
             self._fragment_clock = 0.0
             self._spawn_fragment()
@@ -904,7 +994,8 @@ class SnakeGameWidget(QWidget):
             if self._idle_turn % 8 == 0:
                 self.next_direction = ((0, 1), (-1, 0), (0, -1), (1, 0))[(self._idle_turn // 8) % 4]
             self._idle_turn += 1
-        if self._snake_clock >= .14:
+        move_interval = .07 if now < self._overclock_until else .14
+        if self._snake_clock >= move_interval:
             self._snake_clock = 0.0
             self._move_snake()
         self.update()
@@ -921,15 +1012,27 @@ class SnakeGameWidget(QWidget):
         now = time.monotonic()
         pulse = .65 + .35 * math.sin(now * 4.0)
         painter.setPen(Qt.PenStyle.NoPen)
+        fragment_colors = {
+            'ghost': QColor('#c3a5ff'), 'magnet': QColor('#ffe58a'),
+            'overclock': QColor('#ffad6e'), 'pulse': QColor('#ff8fb3'),
+        }
+        fragment_marks = {'ghost': '幽', 'magnet': '磁', 'overclock': '速', 'pulse': '脉'}
         for fx, fy in self.fragments:
             rect = QRectF(fx * cell_w + 3, fy * cell_h + 3, cell_w - 6, cell_h - 6)
             glow = QRadialGradient(rect.center(), max(rect.width(), rect.height()) * .8)
-            glow.setColorAt(0, QColor(96, 224, 255, int(235 * pulse)))
+            kind = self.fragment_buffs.get((fx, fy))
+            core = fragment_colors.get(kind, QColor('#7ce9ff'))
+            glow.setColorAt(0, QColor(core.red(), core.green(), core.blue(), int(235 * pulse)))
             glow.setColorAt(1, QColor(72, 128, 255, 0))
             painter.setBrush(glow)
             painter.drawEllipse(rect.adjusted(-5, -5, 5, 5))
-            painter.setBrush(QColor('#7ce9ff'))
+            painter.setBrush(core)
             painter.drawRoundedRect(rect, 3, 3)
+            if kind:
+                painter.setPen(QColor('#20304d'))
+                painter.setFont(QFont('Segoe UI', 7, QFont.Weight.Bold))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, fragment_marks[kind])
+                painter.setPen(Qt.PenStyle.NoPen)
         for ox, oy in self.obstacles:
             rect = QRectF(ox * cell_w + 1, oy * cell_h + 1, cell_w - 2, cell_h - 2)
             painter.setBrush(QColor(188, 74, 112, 190))
@@ -950,6 +1053,11 @@ class SnakeGameWidget(QWidget):
         painter.setFont(QFont('Segoe UI', 8, QFont.Weight.DemiBold))
         painter.drawText(QRectF(7, 4, self.width() - 14, 15), Qt.AlignmentFlag.AlignLeft,
                          f'DATA {self._score}  /  BEST {self._best}')
+        if self._buff_label:
+            painter.setPen(QColor('#bfeaff'))
+            painter.setFont(QFont('Segoe UI', 7, QFont.Weight.DemiBold))
+            painter.drawText(QRectF(7, 20, self.width() - 14, 13),
+                             Qt.AlignmentFlag.AlignLeft, self._buff_label)
         if self._rebuild_until:
             painter.fillRect(self.rect(), QColor(24, 140, 255, 58))
             painter.setPen(QColor('#a8e8ff'))
@@ -1016,7 +1124,7 @@ class ScanCompletionOverlay(QWidget):
 class ScanAnimation(QDialog):
     """A small playable Snake easter egg shown while profile pages are scanned."""
     def __init__(self,parent):
-        super().__init__(parent); self.setFixedSize(420,330); self.setModal(False); self._allow_close=False
+        super().__init__(parent); self.setFixedSize(520,430); self.setModal(False); self._allow_close=False
         from background_ui import install_background_host
         install_background_host(self,getattr(parent,'background_store',None),'scan')
         self.phase=0; self.pages=0; self.posts=0; self.paused=False; self.finish_requested=False; self.lang='简体中文'; self.scanner=None
@@ -1056,9 +1164,9 @@ class ScanAnimation(QDialog):
         self.pause_button.setEnabled(False)
         self.resume_button.setEnabled(False)
         self.finish_button.setEnabled(False)
-        game_stop = getattr(self.game, 'dissolve', None)
-        if callable(game_stop):
-            game_stop()
+        begin_dissolve = getattr(self.game, 'begin_scan_complete', None)
+        if callable(begin_dissolve):
+            begin_dissolve(count)
         else:
             self.game.stop()
         self._completion_callback = callback
