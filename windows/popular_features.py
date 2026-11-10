@@ -226,7 +226,9 @@ class ImageBytesWorker(QThread):
                 raise ValueError("invalid_image_url")
             response = requests.get(self.url, headers={"User-Agent": USER_AGENT}, timeout=(8, 30))
             response.raise_for_status()
-            if len(response.content) > 20 * 1024 * 1024:
+            # Covers and on-demand previews are bounded so a page with ten
+            # very large originals cannot consume hundreds of megabytes.
+            if len(response.content) > 8 * 1024 * 1024:
                 raise ValueError("image_too_large")
             self.finished.emit(self.url, bytes(response.content), "")
         except Exception as error:
