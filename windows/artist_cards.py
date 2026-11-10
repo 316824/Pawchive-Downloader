@@ -26,6 +26,7 @@ ACHIEVEMENTS = (
     ("master", 25),
 )
 MAX_AVATAR_BYTES = 4 * 1024 * 1024
+ARTIST_ID_RE = re.compile(r"/user/([^/?#]+)", re.IGNORECASE)
 
 
 def normalize_profile(value: str) -> str:
@@ -44,6 +45,19 @@ def avatar_url(profile: str) -> str:
     return f"https://pawchive.pw/icons/{source}/{artist_id}"
 
 
+def profile_id(profile: str) -> str:
+    match = ARTIST_ID_RE.search(normalize_profile(profile))
+    return match.group(1) if match else ''
+
+
+def artist_profile_url(value: str) -> str:
+    """Accept either a Pawchive creator URL or a numeric id."""
+    value = str(value or '').strip()
+    if value.isdigit():
+        return f'https://pawchive.pw/fanbox/user/{value}'
+    return normalize_profile(value)
+
+
 def _safe_cards(value):
     if not isinstance(value, dict):
         return {}
@@ -60,6 +74,8 @@ def _safe_cards(value):
         unlocked = [name for name, threshold in ACHIEVEMENTS if posts >= threshold]
         result[profile] = {
             'profile': profile,
+            'artist_id': str(card.get('artist_id') or profile_id(profile)),
+            'name': str(card.get('name') or 'Unknown Artist')[:160],
             'posts': posts,
             'files': files,
             'achievement': unlocked[-1] if unlocked else 'none',
@@ -81,7 +97,7 @@ def record_download(store, profile: str, *, posts=1, files=0):
         return None
     cards = _safe_cards(store.get_setting('artist_cards', {}))
     card = cards.setdefault(profile, {
-        'profile': profile, 'posts': 0, 'files': 0,
+        'profile': profile, 'artist_id': profile_id(profile), 'name': 'Unknown Artist', 'posts': 0, 'files': 0,
         'achievement': 'none', 'unlocked': [],
         'avatar_path': '', 'avatar_status': 'missing',
     })
@@ -104,6 +120,75 @@ def record_download(store, profile: str, *, posts=1, files=0):
     card['new_achievement'] = previous != card['achievement']
     card['new_master'] = previous != 'master' and card['achievement'] == 'master'
     return card
+
+
+def update_artist_metadata(store, profile: str, *, name=None, avatar_path=None, avatar_status=None):
+    """Merge display metadata into an existing deduplicated card.
+
+    Metadata is optional and bounded; a failed page parse therefore leaves a
+    usable card with ``Unknown Artist`` and the default icon fallback.
+    """
+    profile = normalize_profile(profile)
+    if not profile:
+        return None
+    cards = _safe_cards(store.get_setting('artist_cards', {}))
+    card = cards.setdefault(profile, {
+        'profile': profile, 'artist_id': profile_id(profile), 'name': 'Unknown Artist',
+        'posts': 0, 'files': 0, 'achievement': 'none', 'unlocked': [],
+        'avatar_path': '', 'avatar_status': 'missing',
+    })
+    card['artist_id'] = profile_id(profile)
+    if name:
+        card['name'] = str(name).strip()[:160] or 'Unknown Artist'
+    if avatar_path:
+        card['avatar_path'] = str(avatar_path)[:512]
+        card['avatar_status'] = 'ready'
+    elif avatar_status:
+        card['avatar_status'] = str(avatar_status)[:24]
+    cards[profile] = card
+    store.set_setting('artist_cards', cards)
+    return dict(card)
+
+
+def remove_card(store, profile: str):
+    profile = normalize_profile(profile)
+    cards = _safe_cards(store.get_setting('artist_cards', {}))
+    if profile in cards:
+        cards.pop(profile, None); store.set_setting('artist_cards', cards); return True
+    return False
+
+
+def paged_cards(store, page=0, page_size=20):
+    cards = sorted(list_cards(store), key=lambda item: (str(item.get('name') or '').lower(), item.get('artist_id', '')))
+    page_size = max(1, min(20, int(page_size))); page = max(0, int(page))
+    start = page * page_size
+    return cards[start:start + page_size], len(cards)
+
+
+class ArtistMetadataWorker(QThread):
+    """Fetch artist display name and avatar URL without touching UI."""
+    finished = Signal(str, str, str, str)  # profile, name, avatar_url, error
+
+    def __init__(self, profile, parent=None):
+        super().__init__(parent); self.profile = normalize_profile(profile)
+
+    def run(self):
+        if not self.profile:
+            self.finished.emit('', 'Unknown Artist', '', 'invalid_profile'); return
+        try:
+            response = requests.get(self.profile, headers={'User-Agent': 'PawchiveDownloader/1.3'}, timeout=(8, 20))
+            response.raise_for_status()
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            node = soup.select_one("a.user-header__profile [itemprop='name'], a.user-header__profile span[itemprop='name']")
+            name = node.get_text(' ', strip=True) if node else 'Unknown Artist'
+            image = soup.select_one('.user-header__profile-image img, img.fancy-image__image')
+            src = str(image.get('src') or '') if image else ''
+            if src.startswith('/'):
+                src = 'https://pawchive.pw' + src
+            self.finished.emit(self.profile, name[:160] or 'Unknown Artist', src, '')
+        except Exception as error:
+            self.finished.emit(self.profile, 'Unknown Artist', '', str(error)[:120])
 
 
 def list_cards(store):

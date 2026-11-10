@@ -318,6 +318,8 @@ class CheckInDialog(QDialog):
         self.calendar.currentPageChanged.connect(self.paint_month); layout.addWidget(self.calendar,1)
         self.message=label(''); layout.addWidget(self.message)
         self.button=QPushButton(tr(self.lang,'checkin')); self.button.clicked.connect(self.check_in); layout.addWidget(self.button)
+        self.popular_button=QPushButton('今日画师推荐' if self.lang=='简体中文' else "Today's creator picks")
+        self.popular_button.clicked.connect(self.show_popular_recommendations); layout.addWidget(self.popular_button)
         theme_row=QHBoxLayout()
         self.theme_label=label(''); theme_row.addWidget(self.theme_label)
         self.skin_combo=QComboBox(); self.skin_combo.currentIndexChanged.connect(self.change_skin); theme_row.addWidget(self.skin_combo,1)
@@ -430,6 +432,8 @@ class CheckInDialog(QDialog):
         self.button.setEnabled(not checked); self.button.setText(tr(self.lang,'checked' if checked else 'checkin'))
         milestone=total in (7,14,30,60,100,180,365) or (total>365 and total%100==0)
         self.message.setText(tr(self.lang,'milestone',total=total) if milestone else tr(self.lang,'affirmation'+str(total%3+1)))
+        if hasattr(self,'popular_button'):
+            self.popular_button.setText('今日画师推荐' if self.lang=='简体中文' else '今日畫師推薦' if self.lang=='繁體中文' else "Today's creator picks" if self.lang=='English' else '今日のおすすめ')
         self.refresh_rewards()
         self.paint_month(self.calendar.yearShown(),self.calendar.monthShown())
 
@@ -500,12 +504,36 @@ class CheckInDialog(QDialog):
         refresh_background=getattr(self.parent_window,'refresh_background_controls',None)
         if callable(refresh_background):refresh_background()
 
+    def show_popular_recommendations(self):
+        from popular_features import PopularRecommendationsDialog
+        parent=self.parent_window
+        dialog=PopularRecommendationsDialog(
+            self, language=self.lang,
+            on_post=lambda data:self._dispatch_recommendation(data,'post'),
+            on_profile=lambda data:self._dispatch_recommendation(data,'profile'))
+        dialog.exec(); dialog.deleteLater()
+
+    def _dispatch_recommendation(self,data,kind):
+        if kind=='post':
+            url=str(data.get('url') or '')
+        else:
+            artist_id=str(data.get('artist_id') or '')
+            url=f'https://pawchive.pw/fanbox/user/{artist_id}' if artist_id else ''
+        handler=getattr(self.parent_window,'handle_link_text',None)
+        if callable(handler) and url:
+            self.accept(); handler(url)
+
 
 class ArtistCardsDialog(QDialog):
-    """Small gallery of locally earned artist profile cards."""
+    """Paged, deduplicated artist profile cabinet.
+
+    Cards remain settings-backed and therefore survive restarts.  Clicking a
+    card sends its profile back to the main workspace so the normal scan and
+    selection flow is reused.
+    """
     def __init__(self, parent, store):
         super().__init__(parent)
-        from artist_cards import list_cards
+        from artist_cards import paged_cards, artist_profile_url, remove_card
         from feature_text import reward_tr
         self.parent_window = parent; self.store = store; self.lang = parent.lang
         install_background_host(self, getattr(parent, 'background_store', None), 'artist_cards')
@@ -514,22 +542,31 @@ class ArtistCardsDialog(QDialog):
         heading = label(reward_tr(self.lang, 'artist_cards')); heading.setStyleSheet('font-size:22px;font-weight:600')
         layout.addWidget(heading)
         self.cards = QListWidget(); self.cards.setIconSize(QPixmap(64, 64).size())
-        self.cards.setSpacing(8); layout.addWidget(self.cards, 1)
-        layout.addWidget(label(reward_tr(self.lang, 'artist_cards_empty'), True))
+        self.cards.setSpacing(8); self.cards.itemDoubleClicked.connect(self.open_card); layout.addWidget(self.cards, 1)
+        self.empty_hint=label(reward_tr(self.lang, 'artist_cards_empty'), True); layout.addWidget(self.empty_hint)
+        actions=QHBoxLayout(); self.add_button=QPushButton('添加画师'); self.remove_button=QPushButton('删除选中'); self.prev_button=QPushButton('上一页'); self.next_button=QPushButton('下一页'); self.page_label=label('')
+        self.add_button.clicked.connect(self.add_artist); self.remove_button.clicked.connect(self.remove_artist); self.prev_button.clicked.connect(self.previous_page); self.next_button.clicked.connect(self.next_page)
+        actions.addWidget(self.add_button); actions.addWidget(self.remove_button); actions.addStretch(1); actions.addWidget(self.prev_button); actions.addWidget(self.page_label); actions.addWidget(self.next_button); layout.addLayout(actions)
         close = QPushButton(tr(self.lang, 'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
-        self.refresh(list_cards(store))
+        self._page=0; self._page_size=20; self.refresh()
 
-    def refresh(self, cards):
+    def refresh(self, cards=None):
         from feature_text import reward_tr
         self.cards.clear()
-        for card in cards:
-            if card.get('achievement') != 'master':
-                continue
-            title = str(card.get('profile', '')).rsplit('/user/', 1)[-1]
-            status = reward_tr(self.lang, 'artist_card_master')
+        from artist_cards import paged_cards
+        page, total = paged_cards(self.store, self._page, self._page_size)
+        self.empty_hint.setVisible(not bool(total))
+        max_page=max(0,(total-1)//self._page_size)
+        self._page=min(self._page,max_page); self.page_label.setText(f'{self._page+1}/{max_page+1}' if total else '0/0')
+        self.prev_button.setEnabled(self._page>0); self.next_button.setEnabled(self._page<max_page); self.remove_button.setEnabled(bool(self.cards.currentItem()))
+        for card in page:
+            title = str(card.get('name') or 'Unknown Artist')
+            artist_id = str(card.get('artist_id') or str(card.get('profile','')).rsplit('/user/',1)[-1])
+            status = reward_tr(self.lang, 'artist_card_master') if card.get('achievement') == 'master' else '已记录'
             detail = reward_tr(self.lang, 'artist_card_progress', posts=card.get('posts', 0), files=card.get('files', 0))
             avatar_path = str(card.get('avatar_path') or '')
-            item = QListWidgetItem(f'✦ {title}\n{status}  ·  {detail}')
+            item = QListWidgetItem(f'✦ {title}  ·  ID {artist_id}\n{status}  ·  {detail}')
+            item.setData(Qt.ItemDataRole.UserRole, card.get('profile',''))
             item.setToolTip(str(card.get('profile', '')))
             if avatar_path:
                 pixmap = QPixmap(avatar_path)
@@ -539,4 +576,41 @@ class ArtistCardsDialog(QDialog):
                 item.setToolTip(reward_tr(self.lang, 'artist_card_avatar_pending'))
             else:
                 item.setToolTip(reward_tr(self.lang, 'artist_card_avatar_missing'))
+                fallback=self.parent_window.windowIcon() if self.parent_window is not None else QIcon()
+                if not fallback.isNull():
+                    item.setIcon(fallback)
             self.cards.addItem(item)
+
+    def open_card(self,item):
+        profile=str(item.data(Qt.ItemDataRole.UserRole) or '')
+        handler=getattr(self.parent_window,'handle_link_text',None)
+        if callable(handler) and profile:
+            handler(profile,prompt_post=False)
+            answer=QMessageBox.question(self,'下载画师图集','是否扫描该画师的全部图集并选择下载？',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)
+            if answer==QMessageBox.StandardButton.Yes:
+                self.accept(); start=getattr(self.parent_window,'download',None)
+                if callable(start): start()
+
+    def add_artist(self):
+        from artist_cards import artist_profile_url
+        value,ok=QInputDialog.getText(self,'添加画师','输入 Pawchive 画师主页或数字 ID')
+        if not ok:return
+        profile=artist_profile_url(value)
+        if not profile:return
+        try:
+            from artist_cards import record_download, update_artist_metadata
+            record_download(self.store,profile,posts=0,files=0); update_artist_metadata(self.store,profile)
+        except Exception:return
+        self._page=0; self.refresh()
+
+    def remove_artist(self):
+        item=self.cards.currentItem()
+        if not item:return
+        from artist_cards import remove_card
+        remove_card(self.store,str(item.data(Qt.ItemDataRole.UserRole) or '')); self.refresh()
+
+    def previous_page(self):
+        self._page=max(0,self._page-1); self.refresh()
+
+    def next_page(self):
+        self._page+=1; self.refresh()
