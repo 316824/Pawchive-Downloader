@@ -47,6 +47,7 @@ VIDEO_EXTENSIONS = frozenset({
 IMAGE_FOLDER = '图片文件'
 VIDEO_FOLDER = '视频文件'
 OTHER_FOLDER = '其它文件'
+ATTACHMENT_FOLDER = '附件文件'
 
 
 def attachment_category(name):
@@ -322,7 +323,12 @@ class _LegacyWorker(QThread):
                     # a ``.bin`` suffix; direct links remain non-image files.
                     category='image' if not direct else attachment_category(name)
                     if self.by_title:
-                        dest=album_dest
+                        # Keep images directly under the title folder while
+                        # placing explicit direct-link attachments in a
+                        # dedicated child folder. This preserves the familiar
+                        # title layout and makes attachment downloads easy to
+                        # distinguish from the image stream.
+                        dest=album_dest / ATTACHMENT_FOLDER if direct else album_dest
                     elif category == 'image':
                         dest=self.folder/IMAGE_FOLDER
                     else:
@@ -1444,6 +1450,13 @@ class App(QWidget):
         self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
         self._queue_view_pending=False
         self._artist_avatar_workers={}
+        self._artist_metadata_workers={}
+        self._subscription_worker=None
+        try:
+            from subscriptions import SubscriptionStore
+            self.subscription_store=SubscriptionStore(services.store) if services else None
+        except (ImportError, OSError, RuntimeError):
+            self.subscription_store=None
         self.settings=settings if settings is not None else QSettings('PawchiveTools','PawchiveDownloader')
         self.completed_path=None; self.workflow_state='setup'; self.logs_hidden=False
         self._dark=True; self.files_saved=0; self._album_current=0; self._album_total=0; self._file_current=0; self._file_total=0
@@ -1488,6 +1501,10 @@ class App(QWidget):
         self._last_particle=QPointF(-1000,-1000)
         self.profile.textChanged.connect(self._profile_text_changed)
         QApplication.instance().installEventFilter(self)
+        # Feed checks are deliberately delayed until the first window paint;
+        # startup and the first scan remain fully responsive.
+        if self.subscription_store is not None:
+            QTimer.singleShot(1800, self.start_subscription_check)
 
     def toggle_layout_mode(self):
         """Switch between the wide workspace and the stacked portrait view."""
@@ -1787,6 +1804,57 @@ class App(QWidget):
             dialog.deleteLater()
             self.refresh_background()
 
+    def refresh_subscription_badge(self):
+        """Update the tiny feed notification without touching worker UI."""
+        store=getattr(self,'subscription_store',None)
+        button=getattr(self,'artist_cards_button',None)
+        if store is None or button is None:
+            return
+        try:
+            unread=store.unread_count()
+        except Exception:
+            unread=0
+        try:
+            from artist_cards import list_cards
+            count=sum(1 for card in list_cards(self.services.store) if card.get('achievement')=='master')
+        except Exception:
+            count=0
+        button.setText(('● ' if unread else '') + ('✦' if count == 0 else f'✦ {count}'))
+        button.setToolTip('有画师更新' if unread and self.lang=='简体中文' else ('画师档案卡' if self.lang=='简体中文' else 'Artist updates' if unread else 'Artist cards'))
+
+    def show_subscriptions(self):
+        if not self.services:
+            return
+        from subscription_ui import SubscriptionDialog
+        dialog=SubscriptionDialog(self,self.services.store)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater(); self.refresh_subscription_badge()
+
+    def start_subscription_check(self):
+        store=getattr(self,'subscription_store',None)
+        if store is None or getattr(self,'_subscription_worker',None) is not None:
+            return
+        try:
+            if not store.list():
+                self.refresh_subscription_badge(); return
+            from subscriptions import SubscriptionCheckWorker
+            worker=SubscriptionCheckWorker(store,self)
+            self._subscription_worker=worker
+            worker.progress.connect(lambda *_: self.refresh_subscription_badge())
+            worker.finished_all.connect(lambda *_: self.refresh_subscription_badge())
+            worker.finished.connect(self._subscription_check_finished)
+            worker.start()
+        except Exception:
+            self._subscription_worker=None
+
+    def _subscription_check_finished(self):
+        worker=self._subscription_worker; self._subscription_worker=None
+        if worker is not None:
+            worker.deleteLater()
+        self.refresh_subscription_badge()
+
     def _maybe_artist_card(self, profile, posts=1, files=0):
         if not self.services:
             return
@@ -1820,7 +1888,12 @@ class App(QWidget):
         metadata.finished.connect(metadata_done)
         metadata.finished.connect(lambda *_: metadata.deleteLater())
         metadata.start()
-        self.refresh_reward_badge()
+        if getattr(self,'subscription_store',None) is not None:
+            try:
+                self.subscription_store.add(profile, name=card.get('name') or 'Unknown Artist')
+            except Exception:
+                pass
+        self.refresh_reward_badge(); self.refresh_subscription_badge()
 
     def _artist_avatar_finished(self, profile, path, error):
         worker=self._artist_avatar_workers.pop(profile, None)

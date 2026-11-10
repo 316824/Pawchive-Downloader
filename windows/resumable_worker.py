@@ -29,6 +29,7 @@ VIDEO_EXTENSIONS = frozenset({
 IMAGE_FOLDER = '图片文件'
 VIDEO_FOLDER = '视频文件'
 OTHER_FOLDER = '其它文件'
+ATTACHMENT_FOLDER = '附件文件'
 
 
 def file_category(name):
@@ -65,9 +66,11 @@ class DownloadEngine:
             layout_version=0
         self.queue_layout=bool(config.get('queue_task') or layout_version>=2)
 
-    def destination_for(self, title, name, album_folder):
+    def destination_for(self, title, name, album_folder, direct=False):
         """Resolve the destination directory for one queue attachment."""
-        if not self.queue_layout or self.w.by_title:
+        if self.w.by_title:
+            return album_folder / ATTACHMENT_FOLDER if direct else album_folder
+        if not self.queue_layout:
             return album_folder
         category=file_category(name)
         if category == 'image':
@@ -369,7 +372,7 @@ class DownloadEngine:
                         or re.sub(r'^Download\s+','',item.get_text(' ',strip=True),flags=re.I)
                     ))(anchor, f'image_{number}.bin')
                     name=self.h['safe_path_component'](unquote(name or Path(urlparse(url).path).name),fallback=f'image_{number}.bin')
-                    dest=self.destination_for(title,name,album_dest)
+                    dest=self.destination_for(title,name,album_dest,direct=direct)
                     dest=inside(self.w.folder,dest,child=bool(self.w.by_title or self.queue_layout))
                     dest.mkdir(parents=True,exist_ok=True)
                     record=self.record(date,post_url,title,url,name,direct,dest)
