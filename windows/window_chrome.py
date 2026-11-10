@@ -8,8 +8,8 @@ without changing its content layout.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QEvent
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtCore import Qt, QEvent, QRect
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QRegion
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QWidget, QSizePolicy
 
 
@@ -25,6 +25,10 @@ class ChromeBorder(QWidget):
         if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self.setGeometry(obj.rect())
             self.raise_()
+            chrome = getattr(obj, '_pawchive_window_chrome', None)
+            if chrome is not None:
+                chrome.setGeometry(0, 0, obj.width(), chrome.height())
+            _apply_round_mask(obj)
         return super().eventFilter(obj, event)
 
     def paintEvent(self, event):  # noqa: ARG002 - Qt signature
@@ -50,6 +54,8 @@ class WindowChrome(QFrame):
         self.window = window
         self.setObjectName('windowChrome')
         self.setFixedHeight(42)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFont(QFont('Microsoft YaHei UI', 9))
         self.setMouseTracking(True)
         self._drag_origin = None
         self._window_origin = None
@@ -163,18 +169,33 @@ def install_window_chrome(window: QWidget, *, title: str | None = None) -> Windo
     bar = WindowChrome(window, title)
     layout = window.layout()
     if layout is not None:
-        layout.insertWidget(0, bar)
+        # The content layouts intentionally keep their own horizontal margins,
+        # but the caption must span the complete window width.  Keep it as a
+        # top-level child and reserve exactly its height in the content area.
+        margins = layout.contentsMargins()
+        layout.setContentsMargins(margins.left(), margins.top() + bar.height(),
+                                   margins.right(), margins.bottom())
     else:
-        root = QHBoxLayout(window)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(bar)
+        bar.setGeometry(0, 0, window.width(), bar.height())
     border = ChromeBorder(window)
     border.setGeometry(window.rect())
     border.raise_()
+    bar.setGeometry(0, 0, window.width(), bar.height())
     window.installEventFilter(border)
+    _apply_round_mask(window)
     window._pawchive_window_chrome = bar
     window._pawchive_chrome_border = border
     return bar
+
+
+def _apply_round_mask(window: QWidget, radius=13):
+    """Clip the frameless surface so all four corners are actually rounded."""
+    if window.width() <= 0 or window.height() <= 0:
+        return
+    rect = QRect(0, 0, window.width(), window.height())
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    window.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
 
 __all__ = ['ChromeBorder', 'WindowChrome', 'install_window_chrome']
