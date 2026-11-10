@@ -1789,9 +1789,13 @@ class App(QWidget):
         cards_button=getattr(self,'artist_cards_button',None)
         if cards_button is not None:
             from artist_cards import list_cards
-            count=sum(1 for card in list_cards(self.services.store) if card.get('achievement')=='master')
+            count=len(list_cards(self.services.store))
             cards_button.setText('✦' if count == 0 else f'✦ {count}')
             cards_button.setToolTip(('画师档案卡' if self.lang=='简体中文' else '畫師檔案卡' if self.lang=='繁體中文' else 'Artist cards' if self.lang=='English' else 'アーティストカード') + (f' · {count}' if count else ''))
+        # Reward refreshes happen on theme/check-in changes too; reapply the
+        # subscription marker afterward so an unread update is never hidden.
+        if hasattr(self, 'subscription_store'):
+            self.refresh_subscription_badge()
 
     def show_artist_cards(self):
         if not self.services:
@@ -1816,7 +1820,7 @@ class App(QWidget):
             unread=0
         try:
             from artist_cards import list_cards
-            count=sum(1 for card in list_cards(self.services.store) if card.get('achievement')=='master')
+            count=len(list_cards(self.services.store))
         except Exception:
             count=0
         button.setText(('● ' if unread else '') + ('✦' if count == 0 else f'✦ {count}'))
@@ -1874,6 +1878,8 @@ class App(QWidget):
             self._artist_avatar_workers.pop('meta:' + profile_url, None)
             try:
                 update_artist_metadata(self.services.store, profile_url, name=name, avatar_status='missing' if error else 'ready')
+                if getattr(self, 'subscription_store', None) is not None and name:
+                    self.subscription_store.add(profile_url, name=name)
             except (OSError, ValueError, RuntimeError):
                 return
             if avatar:
