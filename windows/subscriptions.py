@@ -178,7 +178,14 @@ class SubscriptionStore:
             if record is None:
                 return None
             if latest_ts is not None:
-                record["latest_ts"] = max(0.0, float(latest_ts))
+                latest_value = max(0.0, float(latest_ts))
+                record["latest_ts"] = latest_value
+                # The first successful remote read establishes the real
+                # server-side baseline.  ``add`` uses a local timestamp only
+                # as a temporary placeholder while the network request is
+                # still pending.
+                if not record.get("initialized", False):
+                    record["baseline_ts"] = latest_value
                 record["initialized"] = True
             # A completed background fetch becomes the next comparison point;
             # preserving this marker lets a newly added subscription establish

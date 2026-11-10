@@ -78,7 +78,34 @@ class TaskbarProgress:
         vtable = ctypes.cast(self._object, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
         signature(vtable[index])(self._object, *args)
 
+    def ensure(self):
+        """Create the bridge after Qt has a visible native window handle.
+
+        On some Windows builds the handle returned while a frameless window is
+        being constructed is temporary.  The first progress update therefore
+        used to become a silent no-op.  Rechecking the handle lazily keeps the
+        bridge useful after show/reparent operations without affecting other
+        platforms.
+        """
+        if os.name != "nt" or self._widget is None:
+            return
+        try:
+            hwnd = int(self._widget.winId() or 0)
+        except (OSError, TypeError, ValueError, AttributeError):
+            hwnd = 0
+        if not hwnd:
+            return
+        if hwnd != self._hwnd and self._object is not None:
+            self.close()
+        self._hwnd = hwnd
+        if self._object is None:
+            try:
+                self._create()
+            except (OSError, TypeError, ValueError, AttributeError):
+                self.close()
+
     def set_value(self, value: int, total: int = 100):
+        self.ensure()
         if self._object is None:
             return
         value = max(0, int(value)); total = max(1, int(total))
@@ -89,10 +116,12 @@ class TaskbarProgress:
         self._call(9, set_value, self._hwnd, value, total)
 
     def set_paused(self):
+        self.ensure()
         state = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.HWND, wintypes.DWORD)
         self._call(10, state, self._hwnd, self.TBPF_PAUSED)
 
     def clear(self):
+        self.ensure()
         state = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.HWND, wintypes.DWORD)
         self._call(10, state, self._hwnd, self.TBPF_NOPROGRESS)
 

@@ -72,6 +72,12 @@ class DownloadEngine:
             return album_folder / ATTACHMENT_FOLDER if direct else album_folder
         if not self.queue_layout:
             return album_folder
+        # A fileThumb link is the site's image stream even when its URL uses
+        # an opaque path and omits the ``f=photo.jpg`` hint.  Keep it with the
+        # image stream instead of letting the fallback ``.bin`` name leak
+        # into the generic attachment folder.
+        if not direct:
+            return self.w.folder / IMAGE_FOLDER
         category=file_category(name)
         if category == 'image':
             return self.w.folder / IMAGE_FOLDER
@@ -80,7 +86,8 @@ class DownloadEngine:
 
     @staticmethod
     def _record_is_image(record):
-        return file_category(Path(str(record.get('target',''))).name) == 'image'
+        return (not bool(record.get('direct', False))
+                or file_category(Path(str(record.get('target',''))).name) == 'image')
 
     def _rename_records(self, records, directory, start=1):
         """Safely renumber image records inside one directory.

@@ -11,7 +11,10 @@ a = Analysis(
     pathex=[str(directory)],
     binaries=[],
     datas=[(str(directory / '1.ico'), '.'),(str(directory/'activation_public.json'),'.')],
-    hiddenimports=[],
+    # These modules are imported from menu/dialog callbacks, so keeping them
+    # explicit makes the frozen build independent of PyInstaller's optional
+    # function-scope import analysis.
+    hiddenimports=['artist_cards', 'popular_features', 'subscriptions', 'subscription_ui'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(directory / 'runtime_windows_icu.py')],

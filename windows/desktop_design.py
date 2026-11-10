@@ -770,7 +770,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.heading = text_label('Pawchive', 'brand')
     w.heading.setText('Pawchive')
     header.addWidget(w.heading,1)
-    w.edition = text_label('DESKTOP  /  1.1', 'edition')
+    w.edition = text_label('DESKTOP  /  1.3', 'edition')
     header.addWidget(w.edition)
     w.reward_badge = text_label('', 'rewardBadge')
     w.reward_badge.setMinimumWidth(120)
@@ -788,11 +788,13 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.tools_menu=QMenu(w)
     w.schedule_action=w.tools_menu.addAction('')
     w.calendar_action=w.tools_menu.addAction('')
+    w.subscription_action=w.tools_menu.addAction('')
     w.resume_action=w.tools_menu.addAction('')
     w.background_action=w.tools_menu.addAction('')
     w.background_settings_action=w.tools_menu.addAction('')
     w.schedule_action.triggered.connect(lambda: w.services.show_schedules() if w.services else None)
     w.calendar_action.triggered.connect(lambda: w.services.show_calendar() if w.services else None)
+    w.subscription_action.triggered.connect(lambda: getattr(w, 'show_subscriptions', lambda: None)())
     w.resume_action.triggered.connect(lambda: w.services.offer_resume() if w.services else None)
     w.background_action.triggered.connect(lambda: w.services.keep_background() if w.services else None)
     w.background_settings_action.triggered.connect(lambda: w.show_background_settings() if w.services else None)
@@ -940,7 +942,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.start_number_label = text_label('', 'muted')
     number_row.addWidget(w.start_number_label)
     w.start_number = QSpinBox()
-    # v1.2.3 numbering is intentionally deterministic: image numbering starts
+    # v1.3 numbering is intentionally deterministic: image numbering starts
     # at 1 in both title-folder and categorized flat layouts.
     w.start_number.setRange(1, 1)
     w.start_number.setValue(1)
@@ -1417,6 +1419,8 @@ def translate_interface(w, text, auxiliary):
     w.tools_button.setAccessibleName(tr(w.lang,'tools'))
     w.schedule_action.setText(tr(w.lang,'schedules'))
     w.calendar_action.setText(tr(w.lang,'calendar'))
+    if hasattr(w, 'subscription_action'):
+        w.subscription_action.setText(tr(w.lang,'subscriptions'))
     w.resume_action.setText(tr(w.lang,'resume'))
     w.background_action.setText(tr(w.lang,'background'))
     w.background_settings_action.setText(tr(w.lang,'background_settings'))

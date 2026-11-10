@@ -7,6 +7,7 @@ TEXT={
  'tools':('工具','工具','Tools','ツール'),
  'schedules':('下载日程','下載日程','Download schedules','ダウンロード予定'),
  'calendar':('签到日历','簽到日曆','Check-in calendar','チェックインカレンダー'),
+ 'subscriptions':('画师更新订阅','畫師更新訂閱','Artist update subscriptions','作家更新購読'),
  'show':('打开工作台','開啟工作台','Open workspace','ワークスペースを開く'),
  'background':('留在后台','留在背景','Keep in background','バックグラウンドへ'),
  'background_settings':('背景与界面主题','背景與介面主題','Backgrounds and interface themes','背景とインターフェーステーマ'),

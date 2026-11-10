@@ -134,10 +134,20 @@ class CoverCard(QFrame):
         self.formats.setStyleSheet('background:rgba(12,16,24,205);border:0;border-radius:6px;'
                                   'padding:4px 6px;font-size:11px;font-weight:600;')
         extensions = entry.get('formats') or []
-        self.formats.setText(' '.join(f'<span style="color:{COLORS[n % len(COLORS)]}">'
-                                     f'{escape(str(ext).lstrip(".").upper())}</span>'
-                                     for n, ext in enumerate(extensions)) if extensions else
-                             f'<span style="color:#d1d8e4">{escape(text["no_direct"])}</span>')
+        image_ext = entry.get('image_formats') or []
+        direct_ext = entry.get('attachment_formats') or []
+        if image_ext or direct_ext:
+            parts=[]
+            if image_ext:
+                parts.append('图片: ' + ' '.join(str(ext).lstrip('.').upper() for ext in image_ext))
+            if direct_ext:
+                parts.append('附件: ' + ' '.join(str(ext).lstrip('.').upper() for ext in direct_ext))
+            self.formats.setText(escape(' · '.join(parts)))
+        else:
+            self.formats.setText(' '.join(f'<span style="color:{COLORS[n % len(COLORS)]}">'
+                                         f'{escape(str(ext).lstrip(".").upper())}</span>'
+                                         for n, ext in enumerate(extensions)) if extensions else
+                                 f'<span style="color:#d1d8e4">{escape(text["no_direct"])}</span>')
         area.addWidget(self.formats, 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(area)
         display = title[:160] + ('…' if len(title) > 160 else '')

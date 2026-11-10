@@ -3073,6 +3073,10 @@ class App(QWidget):
         if hasattr(self,'overlay'): self.overlay.sync(); self.overlay.raise_()
     def showEvent(self,e):
         super().showEvent(e)
+        try:
+            self.taskbar_progress.ensure()
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
         if hasattr(self,'background_layer'):
             self.background_layer.setGeometry(self.rect()); self.background_layer.lower(); self.background_layer.update()
         if hasattr(self,'overlay'): self.overlay.sync(); self.overlay.raise_()
