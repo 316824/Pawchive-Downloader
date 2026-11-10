@@ -100,6 +100,7 @@ def _safe_record(value):
         "latest_ts": latest,
         "unread": bool(value.get("unread", False)),
         "enabled": bool(value.get("enabled", True)),
+        "initialized": bool(value.get("initialized", False)),
     }
 
 
@@ -146,6 +147,7 @@ class SubscriptionStore:
                     "baseline_ts": float(baseline_ts if baseline_ts is not None else now),
                     "latest_ts": float(baseline_ts if baseline_ts is not None else now),
                     "last_checked_ts": 0.0, "unread": False, "enabled": True,
+                    "initialized": baseline_ts is not None,
                 }
                 records.append(existing)
             else:
@@ -177,6 +179,7 @@ class SubscriptionStore:
                 return None
             if latest_ts is not None:
                 record["latest_ts"] = max(0.0, float(latest_ts))
+                record["initialized"] = True
             # A completed background fetch becomes the next comparison point;
             # preserving this marker lets a newly added subscription establish
             # its baseline without creating a false unread notification.
@@ -283,7 +286,7 @@ class SubscriptionCheckWorker(QThread):
                     result_record, result, error = future.result()
                     payload = result or {"profile": result_record["profile"], "latest_ts": result_record.get("latest_ts", 0.0)}
                     payload["error"] = error
-                    is_new = not result_record.get("last_checked_ts")
+                    is_new = not result_record.get("initialized", False) or not result_record.get("last_checked_ts")
                     payload["updated"] = bool(
                         result and not is_new
                         and result.get("latest_ts", 0.0) > result_record.get("baseline_ts", 0.0)
@@ -292,7 +295,7 @@ class SubscriptionCheckWorker(QThread):
                         self.subscription_store.set_baseline(
                             result_record["profile"], result.get("latest_ts", 0.0),
                             name=result.get("name") or "Unknown Artist",
-                            unread=payload["updated"],
+                            unread=False if not result_record.get("initialized", False) else payload["updated"],
                         )
                     self.progress.emit(result_record["profile"], payload)
                     results.append(payload)
