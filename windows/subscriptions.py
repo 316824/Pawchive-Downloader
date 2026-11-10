@@ -177,6 +177,10 @@ class SubscriptionStore:
                 return None
             if latest_ts is not None:
                 record["latest_ts"] = max(0.0, float(latest_ts))
+            # A completed background fetch becomes the next comparison point;
+            # preserving this marker lets a newly added subscription establish
+            # its baseline without creating a false unread notification.
+            record["last_checked_ts"] = time.time()
             if name:
                 record["name"] = str(name)[:160]
             if avatar_path:
