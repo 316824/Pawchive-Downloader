@@ -94,7 +94,8 @@ def attachment_info(anchor, index=1):
     """Normalize one HTML attachment into name, category and direct flag."""
     href = str(anchor.get('href') or '').strip() if anchor is not None else ''
     direct = bool(anchor is not None and 'post__attachment-link' in (anchor.get('class') or []))
-    name = attachment_name(anchor)
+    fallback = f'image_{index}.jpg' if not direct else f'attachment_{index}.bin'
+    name = attachment_name(anchor, fallback=fallback)
     # ``fileThumb`` is the site's image stream even when its URL is an
     # opaque hash or the filename is absent.  ``post__attachment-link`` is
     # the separate direct-file stream and stays serial/downloadable as an
@@ -312,12 +313,12 @@ class _LegacyWorker(QThread):
                     u=a.get('href','').strip()
                     direct='post__attachment-link' in (a.get('class') or [])
                     if u.startswith(('https://file.pawchive.pw/','https://n2.pawchive.pw/')) and u not in link_urls:
-                        name=attachment_name(a)
+                        name=attachment_name(a, fallback=f'image_{len(links) + 1}.jpg' if not direct else f'attachment_{len(links) + 1}.bin')
                         link_urls.add(u); links.append((u,name,direct))
                 for j,(url,name,direct) in enumerate(links,1):
                     if j == 1:
                         self.file_progress.emit(0, len(links))
-                    name=safe_path_component(unquote(name or Path(urlparse(url).path).name), fallback=f'image_{j}.bin')
+                    name=safe_path_component(unquote(name or Path(urlparse(url).path).name), fallback=f'image_{j}.jpg' if not direct else f'attachment_{j}.bin')
                     # The fileThumb class is authoritative for image
                     # attachments even when the generated fallback name has
                     # a ``.bin`` suffix; direct links remain non-image files.

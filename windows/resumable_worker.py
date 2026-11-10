@@ -377,8 +377,10 @@ class DownloadEngine:
                     name=self.h.get('attachment_name', lambda item, fallback='': (
                         item.get('download','').strip() or (parse_qs(urlparse(item.get('href','')).query).get('f') or [''])[0]
                         or re.sub(r'^Download\s+','',item.get_text(' ',strip=True),flags=re.I)
-                    ))(anchor, f'image_{number}.bin')
-                    name=self.h['safe_path_component'](unquote(name or Path(urlparse(url).path).name),fallback=f'image_{number}.bin')
+                    ))(anchor, f'image_{number}.jpg' if not direct else f'attachment_{number}.bin')
+                    name=self.h['safe_path_component'](
+                        unquote(name or Path(urlparse(url).path).name),
+                        fallback=f'image_{number}.jpg' if not direct else f'attachment_{number}.bin')
                     dest=self.destination_for(title,name,album_dest,direct=direct)
                     dest=inside(self.w.folder,dest,child=bool(self.w.by_title or self.queue_layout))
                     dest.mkdir(parents=True,exist_ok=True)
