@@ -8,7 +8,7 @@ import sys
 import uuid
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from activation import is_activated
@@ -39,6 +39,12 @@ def run(window_class,argv=None):
     args=parser.parse_args(argv)
     _set_windows_app_user_model_id()
     app=QApplication(sys.argv[:1]); app.setApplicationName('PawchiveDownloader')
+    # Keep Chinese glyph fallback and dialog metrics stable across Windows
+    # locale/DPI combinations. Individual dialogs may still override sizes
+    # for headings, but their body text now shares one predictable base font.
+    base_font=QFont('Microsoft YaHei UI', 10)
+    base_font.setStyleHint(QFont.StyleHint.SansSerif)
+    app.setFont(base_font)
     app.setOrganizationName('PawchiveTools'); app.setQuitOnLastWindowClosed(False)
     icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
     app.setWindowIcon(rounded_icon(icon_path))

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
     QAbstractButton, QCheckBox, QDialog, QDialogButtonBox,
     QScrollArea, QGridLayout, QSpinBox, QSizePolicy, QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
-    QListWidget, QListWidgetItem,
+    QListWidget, QListWidgetItem, QInputDialog,
     QMessageBox)
 from background_store import BackgroundStore
 from background_ui import BackgroundLayer, BackgroundSettingsDialog, load_preview
@@ -2830,7 +2830,8 @@ class App(QWidget):
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
         if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
-        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj is not self:
+        native_dialog = isinstance(obj, (QFileDialog, QInputDialog, QMessageBox))
+        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj is not self and not native_dialog:
             # Modal dialogs are created by several feature modules. Applying
             # the shared chrome here keeps their caption, border, and buttons
             # visually consistent without duplicating layout code in each one.
