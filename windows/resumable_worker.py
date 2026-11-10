@@ -364,8 +364,10 @@ class DownloadEngine:
                     url=anchor.get('href','').strip()
                     if not original_url(url) or url in seen: continue
                     seen.add(url); direct='post__attachment-link' in (anchor.get('class') or [])
-                    name=anchor.get('download','').strip() or (parse_qs(urlparse(url).query).get('f') or [''])[0]
-                    name=name or re.sub(r'^Download\s+','',anchor.get_text(' ',strip=True),flags=re.I)
+                    name=self.h.get('attachment_name', lambda item, fallback='': (
+                        item.get('download','').strip() or (parse_qs(urlparse(item.get('href','')).query).get('f') or [''])[0]
+                        or re.sub(r'^Download\s+','',item.get_text(' ',strip=True),flags=re.I)
+                    ))(anchor, f'image_{number}.bin')
                     name=self.h['safe_path_component'](unquote(name or Path(urlparse(url).path).name),fallback=f'image_{number}.bin')
                     dest=self.destination_for(title,name,album_dest)
                     dest=inside(self.w.folder,dest,child=bool(self.w.by_title or self.queue_layout))

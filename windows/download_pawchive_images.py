@@ -58,6 +58,58 @@ def attachment_category(name):
     return 'other'
 
 
+def attachment_name(anchor, fallback=''):
+    """Return the filename advertised by a Pawchive attachment anchor.
+
+    Pawchive uses two link shapes: image ``fileThumb`` links often carry a
+    filename in the ``f`` query parameter, while downloadable attachments
+    expose it through ``download`` or their visible label. The URL path is
+    frequently an opaque hash, so looking only at its suffix loses the file
+    category and makes the queue treat images as unknown attachments.
+    """
+    if anchor is None:
+        return str(fallback or '')
+    href = str(anchor.get('href') or '').strip()
+    candidates = [str(anchor.get('download') or '').strip()]
+    try:
+        candidates.append((parse_qs(urlparse(href).query).get('f') or [''])[0].strip())
+    except (TypeError, ValueError):
+        pass
+    candidates.append(str(fallback or '').strip())
+    text = re.sub(r'^Download\s+', '', anchor.get_text(' ', strip=True), flags=re.I)
+    candidates.append(text)
+    try:
+        candidates.append(Path(unquote(urlparse(href).path)).name)
+    except (TypeError, ValueError):
+        pass
+    for value in candidates:
+        value = unquote(str(value or '')).strip()
+        if value and value not in {'#', '/'}:
+            return value
+    return ''
+
+
+def attachment_info(anchor, index=1):
+    """Normalize one HTML attachment into name, category and direct flag."""
+    href = str(anchor.get('href') or '').strip() if anchor is not None else ''
+    direct = bool(anchor is not None and 'post__attachment-link' in (anchor.get('class') or []))
+    name = attachment_name(anchor, fallback=f'image_{index}.bin')
+    # ``fileThumb`` is an image stream when the site omits its extension;
+    # direct attachment links remain conservative and are classified as
+    # ``other`` until a filename proves they are a video/archive/etc.
+    category = attachment_category(name)
+    if direct and category == 'image':
+        category = 'other'
+    if not direct and category == 'other':
+        suffix = Path(unquote(urlparse(href).path)).suffix.lower()
+        if suffix in IMAGE_EXTENSIONS:
+            category = 'image'
+    suffix = Path(name).suffix.lower()
+    if not suffix:
+        suffix = Path(unquote(urlparse(href).path)).suffix.lower()
+    return name, category, direct, suffix
+
+
 def cleanup_stale_cache_dirs(current=None, *, max_age=STALE_CACHE_AGE_SECONDS, now=None):
     """Remove old Pawchive preview directories left by interrupted runs.
 
@@ -90,7 +142,12 @@ def cleanup_stale_cache_dirs(current=None, *, max_age=STALE_CACHE_AGE_SECONDS, n
     except OSError:
         return 0
     for entry in entries:
-        if not entry.name.startswith('pawchive_cache_') or not entry.is_dir():
+        # Only touch names created by Pawchive in the system temp root.  This
+        # keeps the startup sweep useful without ever scanning arbitrary user
+        # files or following a junction/symlink outside the root.
+        owned_dir = entry.is_dir() and entry.name.startswith(('pawchive_cache_', 'pawchive_preview_'))
+        owned_file = entry.is_file() and entry.name.startswith('pawchive_') and entry.suffix.lower() in {'.tmp', '.part', '.json'}
+        if not owned_dir and not owned_file:
             continue
         if entry.is_symlink() or getattr(entry, 'is_junction', lambda: False)():
             continue
@@ -101,7 +158,10 @@ def cleanup_stale_cache_dirs(current=None, *, max_age=STALE_CACHE_AGE_SECONDS, n
             age = timestamp - entry.stat().st_mtime
             if age < threshold:
                 continue
-            shutil.rmtree(entry)
+            if owned_dir:
+                shutil.rmtree(entry)
+            else:
+                entry.unlink(missing_ok=True)
         except (OSError, RuntimeError, ValueError):
             continue
         removed += 1
@@ -254,17 +314,17 @@ class _LegacyWorker(QThread):
                     u=a.get('href','').strip()
                     direct='post__attachment-link' in (a.get('class') or [])
                     if u.startswith(('https://file.pawchive.pw/','https://n2.pawchive.pw/')) and u not in link_urls:
-                        name=a.get('download','').strip()
-                        if not name:
-                            name=(parse_qs(urlparse(u).query).get('f') or [''])[0]
-                        if not name:
-                            name=re.sub(r'^Download\s+','',a.get_text(' ',strip=True),flags=re.I)
+                        name=attachment_name(a)
                         link_urls.add(u); links.append((u,name,direct))
                 for j,(url,name,direct) in enumerate(links,1):
                     if j == 1:
                         self.file_progress.emit(0, len(links))
                     name=safe_path_component(unquote(name or Path(urlparse(url).path).name), fallback=f'image_{j}.bin')
                     category=attachment_category(name)
+                    # ``fileThumb`` image URLs may be opaque hashes without a
+                    # suffix; the link class is still authoritative here.
+                    if not Path(name).suffix and not direct:
+                        category='image'
                     if self.by_title:
                         dest=album_dest
                     elif category == 'image':
@@ -399,7 +459,8 @@ class Worker(_LegacyWorker):
             return super().run()
         from resumable_worker import DownloadEngine
         helpers=dict(absolute_post_url=absolute_post_url,safe_path_component=safe_path_component,
-                     unique_path=unique_path,valid_download=valid_download,PAGE_SIZE=PAGE_SIZE,USER_AGENT=USER_AGENT)
+                     unique_path=unique_path,valid_download=valid_download,attachment_name=attachment_name,
+                     PAGE_SIZE=PAGE_SIZE,USER_AGENT=USER_AGENT)
         DownloadEngine(self,helpers).run()
 
 
@@ -1323,17 +1384,23 @@ class ProfileScanWorker(QThread):
                                 ir=session.get(src,timeout=8); ir.raise_for_status(); suffix=Path(unquote(urlparse(src).path)).suffix.lower(); suffix=suffix if re.fullmatch(r'\.[a-z0-9]{1,8}',suffix) else '.img'; image_path=self.cache_dir/f'{len(titles):06}{suffix}'; image_path.write_bytes(ir.content)
                             except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    formats=[]; file_count=0
+                    formats=[]; image_formats=[]; attachment_formats=[]; file_count=0; image_count=0; attachment_count=0
                     try:
                         detail=session.get(post_url,timeout=12); detail.raise_for_status(); ds=BeautifulSoup(detail.text,'html.parser')
                         attachments=ds.select('.post__files a.fileThumb[href], a.post__attachment-link[href]')
                         file_count=len(attachments)
-                        for attachment in attachments:
-                            ext=Path(urlparse(attachment['href']).path).suffix.lower()
+                        for number, attachment in enumerate(attachments, 1):
+                            _name, category, direct, ext = attachment_info(attachment, number)
                             if ext and ext not in formats: formats.append(ext)
+                            if direct or category != 'image':
+                                attachment_count += 1
+                                if ext and ext not in attachment_formats: attachment_formats.append(ext)
+                            else:
+                                image_count += 1
+                                if ext and ext not in image_formats: image_formats.append(ext)
                     except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    seen.add(post_key); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'image_url':image_url,'formats':formats,'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
+                    seen.add(post_key); titles.append({'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'image_url':image_url,'formats':formats,'image_formats':image_formats,'attachment_formats':attachment_formats,'image_count':image_count,'attachment_count':attachment_count,'direct':bool(attachment_count),'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                     if self.finish_requested: break
                 repeated_page=page_signature and page_signature==previous_signature
                 if (self.finish_requested or len(cards)<PAGE_SIZE
@@ -1370,6 +1437,10 @@ class App(QWidget):
         icon_path=Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))/'1.ico'
         self.setWindowIcon(rounded_icon(icon_path))
         self.taskbar_progress=TaskbarProgress(self)
+        # Sweep only Pawchive-owned temp roots before creating this run's
+        # cache.  The 24-hour limit prevents abandoned previews from slowly
+        # consuming the system drive while preserving an active session.
+        cleanup_stale_cache_dirs()
         self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_'))
         self.busy=False; self._close_when_worker_stops=False; self._link_prompt_active=False; self._handling_link_input=False
         self.queue_scheduler=None; self._queue_scan_entries=[]; self._queue_profile=''
@@ -1724,17 +1795,35 @@ class App(QWidget):
         if not self.services:
             return
         try:
-            from artist_cards import AvatarFetchWorker, record_download
+            from artist_cards import AvatarFetchWorker, ArtistMetadataWorker, record_download, update_artist_metadata
             card=record_download(self.services.store, profile, posts=posts, files=files)
         except (OSError, ValueError, RuntimeError):
             return
-        if not card or not card.get('new_master'):
+        if not card:
             self.refresh_reward_badge(); return
-        worker=AvatarFetchWorker(self.services.store.data_dir, profile, self)
-        self._artist_avatar_workers[card['profile']]=worker
-        worker.finished.connect(self._artist_avatar_finished)
-        worker.finished.connect(lambda *_: worker.deleteLater())
-        worker.start()
+        # Every completed creator download creates one deduplicated profile
+        # card.  Metadata is fetched lazily in a worker; the existing avatar
+        # worker remains reserved for the achievement cabinet's large image.
+        metadata = ArtistMetadataWorker(card['profile'], self)
+        self._artist_avatar_workers['meta:' + card['profile']] = metadata
+        def metadata_done(profile_url, name, avatar, error):
+            self._artist_avatar_workers.pop('meta:' + profile_url, None)
+            try:
+                update_artist_metadata(self.services.store, profile_url, name=name, avatar_status='missing' if error else 'ready')
+            except (OSError, ValueError, RuntimeError):
+                return
+            if avatar:
+                # Reuse the bounded avatar fetcher so the settings record only
+                # references a local, validated image path.
+                fetch = AvatarFetchWorker(self.services.store.data_dir, profile_url, self)
+                self._artist_avatar_workers[profile_url] = fetch
+                fetch.finished.connect(self._artist_avatar_finished)
+                fetch.finished.connect(lambda *_: fetch.deleteLater())
+                fetch.start()
+            self.refresh_reward_badge()
+        metadata.finished.connect(metadata_done)
+        metadata.finished.connect(lambda *_: metadata.deleteLater())
+        metadata.start()
         self.refresh_reward_badge()
 
     def _artist_avatar_finished(self, profile, path, error):
