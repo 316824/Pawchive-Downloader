@@ -65,6 +65,21 @@ class DownloadEngine:
         except (TypeError,ValueError):
             layout_version=0
         self.queue_layout=bool(config.get('queue_task') or layout_version>=2)
+        self.content_mode = config.get('content_mode', 'all')
+        if self.content_mode not in {'all', 'images', 'attachments'}:
+            raise ValueError('Invalid download content selection.')
+        self._records_by_url = {(r['post_url'], r['url']): r for r in self.job['files']}
+
+    def includes(self, direct):
+        return (self.content_mode == 'all' or
+                self.content_mode == ('attachments' if direct else 'images'))
+
+    def reset_session(self):
+        # A broken keep-alive/TLS connection must not be reused throughout an
+        # automatic recovery cycle. Cookies are not used by this downloader.
+        if self.session is not None: self.session.close()
+        self.session = requests.Session()
+        self.session.headers['User-Agent'] = self.h['USER_AGENT']
 
     def destination_for(self, title, name, album_folder, direct=False):
         """Resolve the destination directory for one queue attachment."""
@@ -209,8 +224,8 @@ class DownloadEngine:
 
     def record(self,date,post_url,title,url,name,direct,dest):
         records=self.job['files']
-        for record in records:
-            if record['post_url']==post_url and record['url']==url: return record
+        existing = self._records_by_url.get((post_url, url))
+        if existing is not None: return existing
         target=dest/name
         if not self.w.by_title:
             other=[r for r in records if r['name']==name and r['post_url']!=post_url and r.get('status')=='complete']
@@ -231,7 +246,7 @@ class DownloadEngine:
         part=dest/f'.pawchive-{self.job["id"]}-{key}.part'
         record=dict(url=url,name=name,target=str(target),part=str(part),post_url=post_url,
                     date=date,title=title,direct=bool(direct),status='pending',sequence=len(records),prefixed=target.name.startswith('('+title+') - '))
-        records.append(record); self.save(record)
+        records.append(record); self._records_by_url[(post_url, url)] = record; self.save(record)
         return record
 
     def finalize(self,record):
@@ -249,11 +264,12 @@ class DownloadEngine:
         part=inside(self.w.folder,record['part']); target=inside(self.w.folder,record['target'])
         self.current=record
         error=None
-        attachment=Path(urlparse(record['url']).path).suffix.lower() in {'.zip','.rar','.7z','.tar','.gz','.psd','.clip','.mp4','.mov','.webm','.mkv','.pdf'}
+        attachment=bool(record.get('direct')) or Path(urlparse(record['url']).path).suffix.lower() in {'.zip','.rar','.7z','.tar','.gz','.psd','.clip','.mp4','.mov','.webm','.mkv','.pdf'}
         for attempt in range(1,5):
             self.interrupted()
             try:
                 if attempt>1:
+                    self.reset_session()
                     cooldown=min(18,3*(2**(attempt-2))+random.uniform(.5,2.5)) if attachment else 0
                     self.w.wait_interruptibly(1.5*(attempt-1)+cooldown)
                 offset=part.stat().st_size if part.exists() else 0
@@ -337,7 +353,7 @@ class DownloadEngine:
     def run(self):
         try:
             self.w.folder.mkdir(parents=True,exist_ok=True)
-            self.session=requests.Session(); self.session.headers['User-Agent']=self.h['USER_AGENT']
+            self.reset_session()
             self.job['status']='running'; self.normalize()
             self.w.completed_records=[dict(record) for record in self.job.get('files',[])
                                       if record.get('status') in ('complete','ready')]
@@ -364,6 +380,8 @@ class DownloadEngine:
                 unique_anchors=[]; anchor_urls=set()
                 for candidate in anchors:
                     candidate_url=candidate.get('href','').strip()
+                    direct='post__attachment-link' in (candidate.get('class') or [])
+                    if not self.includes(direct): continue
                     if original_url(candidate_url) and candidate_url not in anchor_urls:
                         anchor_urls.add(candidate_url); unique_anchors.append(candidate)
                 file_total=len(unique_anchors)
@@ -394,8 +412,7 @@ class DownloadEngine:
                     label=f'({index}/{len(posts)}) {title} / {Path(record["target"]).name}'
                     self.transfer(record,label); self.current=None
                     if record.get('status') in ('complete','ready'):
-                        self.w.completed_records=[dict(item) for item in self.job.get('files',[])
-                                                  if item.get('status') in ('complete','ready')]
+                        self.w.completed_records.append(dict(record))
                     self.w.progress.emit('✓  '+label,1,1)
                     file_done+=1
                     if hasattr(self.w,'file_progress'): self.w.file_progress.emit(file_done,file_total)
@@ -432,14 +449,21 @@ class DownloadEngine:
             self.w.completed_records=[dict(record) for record in self.job.get('files',[])
                                       if record.get('status') in ('complete','ready')]
             count=sum(r['status']=='complete' for r in self.job['files'])
-            self.job.update(status='completed',album=None,saved_count=count,error='',posts=None,files=[],done_posts=[])
-            self.journal.save(self.job); self.w.finished_ok.emit(count)
+            # Keep the manifest after transfer: a crash before the batch-wide
+            # renamer runs must still be recoverable, including finished albums.
+            pending_rename = bool(self.queue_layout and self.job['config'].get('queue_rename_order'))
+            self.job.update(status='downloaded' if pending_rename else 'completed',
+                            album=None,saved_count=count,error='')
+            self.journal.save(self.job,dirty_records=[]); self.w.finished_ok.emit(count)
         except Exception as exc:
             self.w.completed_records=[dict(record) for record in self.job.get('files',[])
                                       if record.get('status') in ('complete','ready')]
             paused=self.w.isInterruptionRequested() and self.w.preserve_on_interrupt
             try:
-                if not paused:
+                # Queue failures are retryable. Keep verified images and the
+                # resumable partial instead of deleting an entire album on each
+                # automatic attempt. Legacy explicit-stop cleanup stays intact.
+                if not paused and not (self.queue_layout and not self.w.isInterruptionRequested()):
                     if self.current: inside(self.w.folder,self.current['part']).unlink(missing_ok=True)
                     self.cleanup_album(); self.job['album']=None
                 self.job['status']='paused' if paused else 'cancelled' if self.w.isInterruptionRequested() else 'failed'

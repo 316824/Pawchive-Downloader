@@ -287,6 +287,77 @@ class DownloadResumeTests(unittest.TestCase):
         self.assertFalse((self.folder/'Beta').exists())
         self.assertEqual(self.journal.load(w.job_id)['saved_count'],1)
 
+    def test_content_selection_downloads_only_requested_stream_and_counts_it(self):
+        attachment = FILE.replace('a' * 64, 'b' * 64).replace('.png?f=one.png', '.zip?f=album.zip')
+        for mode, expected in [('images', FILE), ('attachments', attachment), ('all', None)]:
+            with self.subTest(mode=mode):
+                worker = self.worker()
+                job = self.journal.load(worker.job_id)
+                job['config'].update(queue_task=True, content_mode=mode)
+                self.journal.save(job)
+                session = Session(worker)
+                original = session.get
+                def get(url, **kwargs):
+                    if url == POST:
+                        return Response(('<div class="post__files"><a class="fileThumb" href="' + FILE +
+                            '" download="image.png"></a></div><a class="post__attachment-link" href="' +
+                            attachment + '" download="album.zip">Download album.zip</a>').encode())
+                    if url == attachment:
+                        session.calls.append((url, kwargs))
+                        return Response(b'PK\x03\x04archive fixture', headers={'content-length': '19'})
+                    return original(url, **kwargs)
+                session.get = get
+                progress = []
+                worker.file_progress.connect(lambda current, total: progress.append((current, total)))
+                self.run_worker(worker, session)
+                self.assertFalse(worker.errors, worker.errors)
+                requested = [url for url, _ in session.calls if url in (FILE, attachment)]
+                self.assertEqual(set(requested), {expected} if expected else {FILE, attachment})
+                self.assertEqual(progress[-1], (1, 1) if expected else (2, 2))
+
+    def test_queue_failure_keeps_complete_images_and_partial_for_fresh_retry_session(self):
+        import requests
+        second = FILE.replace('a' * 64, 'b' * 64)
+        first = self.worker()
+        job = self.journal.load(first.job_id)
+        job['config']['queue_task'] = True
+        self.journal.save(job)
+        session = Session(first, file_urls=[FILE, second])
+        original = session.get
+        def get(url, **kwargs):
+            if url == second:
+                class InterruptedResponse(Response):
+                    def iter_content(self, size):
+                        yield PNG[:40]
+                        raise requests.ConnectionError('offline connection lost')
+                return InterruptedResponse(PNG, headers={'content-length': str(len(PNG)), 'etag': '"fixture"'})
+            return original(url, **kwargs)
+        session.get = get
+        self.run_worker(first, session)
+        failed = self.journal.load(first.job_id)
+        self.assertEqual(failed['status'], 'failed')
+        self.assertEqual(failed['saved_count'], 1)
+        self.assertTrue(Path(failed['files'][0]['target']).is_file())
+        self.assertTrue(Path(failed['files'][1]['part']).is_file())
+        resumed = self.worker(first.job_id)
+        second_session = Session(resumed, 'range', file_urls=[FILE, second])
+        self.run_worker(resumed, second_session)
+        self.assertFalse(resumed.errors, resumed.errors)
+        self.assertEqual(resumed.success, [2])
+        self.assertNotIn(FILE, [url for url, _ in second_session.calls])
+
+    def test_queue_numbering_waits_durably_for_batch_finalize(self):
+        worker = self.worker()
+        job = self.journal.load(worker.job_id)
+        job['config'].update(queue_task=True, queue_rename_order=True, batch_id='test-batch')
+        self.journal.save(job)
+        self.run_worker(worker, Session(worker))
+        downloaded = self.journal.load(worker.job_id)
+        self.assertEqual(downloaded['status'], 'downloaded')
+        self.assertEqual(len(downloaded['files']), 1)
+        self.assertEqual(downloaded['files'][0]['status'], 'complete')
+        self.assertTrue(Path(downloaded['files'][0]['target']).exists())
+
     def test_multi_gigabyte_progress_is_not_truncated_to_a_qt_32bit_integer(self):
         worker=self.worker(); progress=[]
         worker.progress.connect(lambda name,received,total:progress.append((received,total)))

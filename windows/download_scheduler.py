@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 import uuid
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot, QTimer
 
 
 IMAGE_EXTENSIONS = frozenset({
@@ -142,6 +142,36 @@ def normalize_task(value: DownloadTask | dict[str, Any] | Any, sequence: int) ->
         priority=int(sequence), files_total=expected_files, metadata=metadata)
 
 
+class _WorkerRelay(QObject):
+    """Deliver worker signals to the scheduler's GUI thread, never a lambda's thread."""
+    def __init__(self, scheduler, task_id, serial):
+        super().__init__(scheduler)
+        self.scheduler, self.task_id, self.serial = scheduler, task_id, serial
+
+    def valid(self):
+        return self.scheduler._run_serial.get(self.task_id) == self.serial
+
+    @Slot(str, object, object)
+    def progress(self, label, current, total):
+        if self.valid(): self.scheduler._on_progress(self.task_id, label, current, total)
+
+    @Slot(int, int)
+    def file_progress(self, current, total):
+        if self.valid(): self.scheduler._on_file_progress(self.task_id, current, total)
+
+    @Slot(int)
+    def success(self, count):
+        if self.valid(): self.scheduler._on_success(self.task_id, count)
+
+    @Slot(str)
+    def failure(self, error):
+        if self.valid(): self.scheduler._on_failure(self.task_id, error)
+
+    @Slot()
+    def finished(self):
+        if self.valid(): self.scheduler._worker_finished(self.task_id)
+
+
 class DownloadScheduler(QObject):
     """Run album workers in priority order with safe concurrency limits.
 
@@ -164,6 +194,7 @@ class DownloadScheduler(QObject):
     # remaining albums continue. Once the rest of the queue is drained we
     # give it a few automatic recovery attempts before requiring user input.
     AUTO_RETRY_LIMIT = 3
+    AUTO_RETRY_DELAY_MS = 5000
 
     def __init__(self, worker_factory: Callable[[DownloadTask], Any], parent: QObject | None = None):
         super().__init__(parent)
@@ -178,6 +209,14 @@ class DownloadScheduler(QObject):
         self._finished_signals: set[str] = set()
         self._started = False
         self._closing = False
+        self._suspended = False
+        self._resume_pending: set[str] = set()
+        self._run_serial: dict[str, int] = {}
+        self._relays: dict[str, _WorkerRelay] = {}
+        self._retry_task_id = None
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._run_auto_retry)
 
     @property
     def tasks(self) -> tuple[DownloadTask, ...]:
@@ -188,7 +227,9 @@ class DownloadScheduler(QObject):
         return tuple(task for task in self._tasks.values() if task.is_active)
 
     def ordered_tasks(self) -> list[DownloadTask]:
-        return sorted(self._tasks.values(), key=lambda task: (task.priority, task.sequence, task.id))
+        return sorted(self._tasks.values(), key=lambda task: (
+            not (task.metadata.get('failure_pinned', False) and task.state not in {'completed', 'cancelled'}),
+            task.priority, task.sequence, task.id))
 
     def task(self, task_id: str) -> DownloadTask | None:
         return self._tasks.get(str(task_id))
@@ -206,7 +247,18 @@ class DownloadScheduler(QObject):
         return task
 
     def add_tasks(self, values: Iterable[DownloadTask | dict[str, Any] | Any]) -> list[DownloadTask]:
-        result = [self.add_task(value) for value in values]
+        # Bulk insertion must not emit a full queue refresh or start a worker
+        # for each row. The host can populate hundreds of albums in one pass.
+        result = []
+        for value in values:
+            task = normalize_task(value, len(self._tasks))
+            if task.id in self._tasks: task.id = uuid.uuid4().hex
+            task.priority = len(self._tasks)
+            self._tasks[task.id] = task
+            result.append(task)
+            self.task_added.emit(task.public_copy())
+        if result: self.queue_changed.emit()
+        if self._started: self._schedule()
         return result
 
     def start(self) -> None:
@@ -218,6 +270,8 @@ class DownloadScheduler(QObject):
         """Request interruption of every active worker and stop scheduling."""
         self._closing = True
         self._started = False
+        self._cancel_auto_retry()
+        self._resume_pending.clear()
         for task in self.active_tasks:
             task.intent = 'cancel'
             task.state = 'cancelling'
@@ -239,6 +293,7 @@ class DownloadScheduler(QObject):
         task = self.task(task_id)
         if task is None or task.state in {'completed', 'cancelled'}:
             return False
+        self._resume_pending.discard(task.id)
         if task.state == 'queued':
             task.state = 'paused'
             task.intent = ''
@@ -264,42 +319,87 @@ class DownloadScheduler(QObject):
             return True
         return False
 
+    @property
+    def has_paused_tasks(self) -> bool:
+        return any(task.state in {'paused', 'pausing'} for task in self._tasks.values())
+
+    def pause_all(self) -> int:
+        """Pause active and waiting work without starting replacements between rows."""
+        self._suspended = True
+        self._cancel_auto_retry()
+        self._resume_pending.clear()
+        try:
+            count = sum(1 for task in list(self._tasks.values())
+                        if task.state in {'queued', 'running', 'pausing'} and self.pause(task.id))
+        finally:
+            self._suspended = False
+        self.queue_changed.emit()
+        return count
+
+    def resume_all(self) -> int:
+        self._suspended = True
+        try:
+            count = sum(1 for task in list(self._tasks.values())
+                        if task.state in {'paused', 'pausing'} and self.resume(task.id))
+        finally:
+            self._suspended = False
+        self.queue_changed.emit()
+        if self._started: self._schedule()
+        return count
+
     def resume(self, task_id: str) -> bool:
         task = self.task(task_id)
-        if task is None or task.state not in {'paused', 'failed'}:
+        if task is None or task.state not in {'paused', 'pausing', 'failed'}:
             return False
+        if task.state == 'pausing':
+            # requestInterruption cannot be undone on a QThread. Remember the
+            # click and restart from its checkpoint after that native thread exits.
+            self._resume_pending.add(task.id)
+            return True
+        if self._retry_task_id == task.id: self._cancel_auto_retry()
         task.state = 'queued'
         task.intent = ''
         task.error = ''
         task.attempts += 1
         self._emit(task)
         self.queue_changed.emit()
-        if self._started:
-            self._schedule()
+        if self._started: self._schedule()
         return True
 
     def retry(self, task_id: str) -> bool:
-        """Retry a failed task at the highest priority."""
+        """Retry without dropping the failure pin until the task really succeeds."""
         task = self.task(task_id)
         if task is None or task.state not in {'failed', 'paused'}:
             return False
+        if self._retry_task_id == task.id: self._cancel_auto_retry()
+        task.metadata['auto_retry_count'] = 0
+        task.metadata.pop('auto_retry_pending', None)
         task.state = 'queued'
         task.intent = ''
         task.error = ''
-        if isinstance(task.metadata, dict):
-            # A deliberate retry is a fresh recovery cycle. It should get the
-            # same automatic retry allowance as a newly failed task.
-            task.metadata['auto_retry_count'] = 0
         task.attempts += 1
         self.move_to_top((task.id,))
-        if self._started:
-            self._schedule()
+        self._emit(task)
+        self.queue_changed.emit()
+        if self._started: self._schedule()
         return True
+
+    def retry_all_failed(self) -> int:
+        self._suspended = True
+        try:
+            count = sum(1 for task in list(self._tasks.values())
+                        if task.state == 'failed' and self.retry(task.id))
+        finally:
+            self._suspended = False
+        if self._started: self._schedule()
+        return count
 
     def cancel(self, task_id: str) -> bool:
         task = self.task(task_id)
         if task is None or task.state in {'completed', 'cancelled'}:
             return False
+        if self._retry_task_id == task.id: self._cancel_auto_retry()
+        self._resume_pending.discard(task.id)
         if task.state == 'queued' or task.state in {'paused', 'failed'}:
             task.state = 'cancelled'
             task.intent = 'cancel'
@@ -423,12 +523,14 @@ class DownloadScheduler(QObject):
         self.task_updated.emit(task.public_copy())
 
     def _schedule(self) -> None:
-        if not self._started or self._closing:
+        if not self._started or self._closing or self._suspended:
             return
-        active = [task for task in self._tasks.values() if task.is_active]
+        # Terminal callbacks can arrive before QThread.finished. These native
+        # threads still occupy their slots until they have fully stopped.
+        active = [self._tasks[task_id] for task_id in self._workers if task_id in self._tasks]
         if any(task.direct for task in active):
             return
-        first_queued=next((task for task in self.ordered_tasks() if task.state=='queued'),None)
+        first_queued=next((task for task in self.ordered_tasks() if task.state=='queued' and task.id not in self._workers),None)
         if first_queued is not None and first_queued.direct:
             # Direct links use a single global slot and block the image pool.
             if not active:
@@ -439,7 +541,7 @@ class DownloadScheduler(QObject):
         if capacity <= 0:
             return
         for task in self.ordered_tasks():
-            if task.state != 'queued':
+            if task.state != 'queued' or task.id in self._workers:
                 continue
             if task.direct:
                 # A direct task cannot run alongside already-started images;
@@ -463,26 +565,18 @@ class DownloadScheduler(QObject):
             worker = self.worker_factory(task.public_copy())
             task.worker = worker
             self._workers[task.id] = worker
+            serial = self._run_serial.get(task.id, 0) + 1
+            self._run_serial[task.id] = serial
+            relay = _WorkerRelay(self, task.id, serial)
+            self._relays[task.id] = relay
             finished_signal = getattr(worker, 'finished', None)
             if finished_signal is not None and hasattr(finished_signal, 'connect'):
                 self._finished_signals.add(task.id)
-                finished_signal.connect(lambda task_id=task.id: self._worker_finished(task_id))
-            progress = getattr(worker, 'progress', None)
-            if progress is not None:
-                progress.connect(lambda label, current, total, task_id=task.id:
-                                 self._on_progress(task_id, label, current, total))
-            file_progress = getattr(worker, 'file_progress', None)
-            if file_progress is not None:
-                file_progress.connect(lambda current, total, task_id=task.id:
-                                      self._on_file_progress(task_id, current, total))
-            finished = getattr(worker, 'finished_ok', None)
-            if finished is not None:
-                finished.connect(lambda count, task_id=task.id:
-                                 self._on_success(task_id, count))
-            failed = getattr(worker, 'failed', None)
-            if failed is not None:
-                failed.connect(lambda error, task_id=task.id:
-                               self._on_failure(task_id, error))
+                finished_signal.connect(relay.finished)
+            for name, slot in (('progress', relay.progress), ('file_progress', relay.file_progress),
+                               ('finished_ok', relay.success), ('failed', relay.failure)):
+                signal = getattr(worker, name, None)
+                if signal is not None: signal.connect(slot)
             worker.start()
         except Exception as exc:
             self._on_failure(task.id, str(exc))
@@ -563,6 +657,8 @@ class DownloadScheduler(QObject):
             self.task_finished.emit(task.public_copy())
         else:
             task.state = 'completed'
+            task.metadata.pop('failure_pinned', None)
+            task.metadata.pop('auto_retry_pending', None)
             task.progress = 1.0
             try:
                 task.completed_files = max(0, int(count or 0))
@@ -611,6 +707,7 @@ class DownloadScheduler(QObject):
             # the failed item at the visible top of the queue so its cover and
             # error text cannot be lost below a long list of pending albums.
             task.state = 'failed'
+            task.metadata['failure_pinned'] = True
             self._move_failed_to_top(task.id)
             self._emit(task)
             self.task_finished.emit(task.public_copy())
@@ -620,6 +717,8 @@ class DownloadScheduler(QObject):
     def _worker_finished(self, task_id: str) -> None:
         """Release a QThread wrapper only after its native thread stopped."""
         self._finished_signals.discard(task_id)
+        if task_id not in self._terminal_tasks and task_id in self._workers:
+            self._on_failure(task_id, 'Download worker stopped without a completion result.')
         self._release_after_finished(task_id)
 
     def _release_after_finished(self, task_id: str) -> None:
@@ -632,7 +731,19 @@ class DownloadScheduler(QObject):
                 return
         self._terminal_tasks.discard(task_id)
         self._finished_signals.discard(task_id)
-        self._workers.pop(task_id, None)
+        worker = self._workers.pop(task_id, None)
+        relay = self._relays.pop(task_id, None)
+        self._run_serial[task_id] = self._run_serial.get(task_id, 0) + 1
+        if relay is not None: relay.deleteLater()
+        if isinstance(worker, QObject): worker.deleteLater()
+        if task_id in self._resume_pending:
+            self._resume_pending.discard(task_id)
+            task = self.task(task_id)
+            if task is not None and task.state == 'paused':
+                task.state, task.intent, task.error = 'queued', '', ''
+                task.attempts += 1
+                self._emit(task)
+                self.queue_changed.emit()
         self._schedule_or_idle()
 
     def _move_failed_to_top(self, task_id: str) -> None:
@@ -647,46 +758,55 @@ class DownloadScheduler(QObject):
         ordered.insert(0, task_id)
         self._reindex(ordered)
 
-    def _auto_retry_failed(self) -> bool:
-        """Queue one failed task for a deferred automatic retry.
+    def _cancel_auto_retry(self) -> None:
+        self._retry_timer.stop()
+        task = self.task(self._retry_task_id) if self._retry_task_id else None
+        if task is not None: task.metadata.pop('auto_retry_pending', None)
+        self._retry_task_id = None
 
-        This is intentionally called only after no active or queued work is
-        left. Failed tasks therefore remain visible and do not starve the
-        user's other selected albums. ``attempts`` is kept for diagnostics;
-        the separate counter limits only automatic retries and is persisted
-        in the task metadata used by the queue UI.
-        """
-        candidates = [task for task in self.ordered_tasks() if task.state == 'failed']
-        for task in candidates:
-            metadata = task.metadata if isinstance(task.metadata, dict) else {}
-            try:
-                count = max(0, int(metadata.get('auto_retry_count', 0) or 0))
-            except (TypeError, ValueError):
-                count = 0
-            if count >= self.AUTO_RETRY_LIMIT:
-                continue
-            metadata['auto_retry_count'] = count + 1
-            task.metadata = metadata
-            task.state = 'queued'
-            task.intent = ''
-            task.error = ''
-            task.progress = 0.0
-            task.current = task.total = 0
-            task.files_current = 0
-            task.attempts += 1
-            self._move_failed_to_top(task.id)
+    def _auto_retry_failed(self) -> bool:
+        """Back off after the rest of the queue drains; never tight-loop a blocked host."""
+        if self._retry_timer.isActive(): return True
+        if self._closing or self._suspended: return False
+        for task in self.ordered_tasks():
+            if task.state != 'failed' or task.id in self._workers: continue
+            try: count = max(0, int(task.metadata.get('auto_retry_count', 0) or 0))
+            except (TypeError, ValueError): count = 0
+            if count >= self.AUTO_RETRY_LIMIT: continue
+            self._retry_task_id = task.id
+            task.metadata['auto_retry_pending'] = True
+            self._retry_timer.start(min(30000, self.AUTO_RETRY_DELAY_MS * (2 ** count)))
             self._emit(task)
             self.queue_changed.emit()
             return True
         return False
 
+    @Slot()
+    def _run_auto_retry(self) -> None:
+        task = self.task(self._retry_task_id) if self._retry_task_id else None
+        self._retry_task_id = None
+        if task is None: return
+        task.metadata.pop('auto_retry_pending', None)
+        if not self._started or self._closing or self._suspended or task.state != 'failed': return
+        # Newly added/manual retry work takes precedence over an old timer.
+        if self._workers or any(item.state == 'queued' for item in self._tasks.values()): return
+        try: count = max(0, int(task.metadata.get('auto_retry_count', 0) or 0))
+        except (TypeError, ValueError): count = 0
+        task.metadata['auto_retry_count'] = count + 1
+        task.state, task.intent, task.error = 'queued', '', ''
+        task.current = task.total = 0
+        task.attempts += 1
+        self._emit(task)
+        self.queue_changed.emit()
+        # worker_factory always builds a fresh worker and HTTP session, while
+        # the durable checkpoint keeps already verified files and safe ranges.
+        self._schedule()
+
     def _schedule_or_idle(self) -> None:
         self._schedule()
-        if self._started and not any(task.is_active or task.state == 'queued'
-                                     for task in self._tasks.values()):
-            if self._auto_retry_failed():
-                self._schedule()
-                return
+        if self._started and not self._closing and not self._suspended and not self._workers and not any(
+                task.is_active or task.state == 'queued' for task in self._tasks.values()):
+            if self._auto_retry_failed(): return
             self.became_idle.emit()
 
 
