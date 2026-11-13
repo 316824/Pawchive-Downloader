@@ -187,6 +187,21 @@ class DownloadSchedulerTests(unittest.TestCase):
         self.assertEqual(tasks[0].state, 'running')
         self.assertTrue(all(task.state == 'queued' for task in tasks[1:]))
 
+    def test_pause_all_does_not_auto_retry_failed_rows_after_last_worker_stops(self):
+        self.scheduler.MAX_IMAGE_WORKERS = 1
+        tasks = self.scheduler.add_tasks([
+            dict(title=str(n), url=f'post-{n}', formats=['.png']) for n in range(2)])
+        self.scheduler.start()
+        self.workers[tasks[0].id].failed.emit('network error')
+        self.scheduler.pause_all()
+        self.workers[tasks[1].id].failed.emit('interrupted')
+        self.assertEqual(tasks[0].state,'failed')
+        self.assertEqual(tasks[1].state,'paused')
+        self.assertFalse(self.scheduler._retry_timer.isActive())
+        self.assertFalse(self.scheduler._workers)
+        self.scheduler.resume_all()
+        self.assertEqual(tasks[1].state,'running')
+
     def test_auto_retry_backs_off_and_manual_retry_cancels_pending_timer(self):
         task = self.scheduler.add_task(dict(title='first', url='post-1', formats=['.png']))
         self.scheduler.start()

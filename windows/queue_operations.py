@@ -34,6 +34,8 @@ class QueuePreparationWorker(QThread):
                     task_thumbnail_url=str(item.get('image_url') or ''),
                     task_formats=list(item.get('formats') or []),
                     task_file_count=int(item.get('file_count') or 0), batch_id=batch_id)
+                meta.setdefault('completed_records',[])
+                meta.setdefault('_journal_records',[])
                 job = None
                 if self.journal and meta.get('job_id'):
                     job=self.journal.load(meta['job_id'])

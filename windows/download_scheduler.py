@@ -210,6 +210,7 @@ class DownloadScheduler(QObject):
         self._started = False
         self._closing = False
         self._suspended = False
+        self._all_paused = False
         self._resume_pending: set[str] = set()
         self._run_serial: dict[str, int] = {}
         self._relays: dict[str, _WorkerRelay] = {}
@@ -262,6 +263,7 @@ class DownloadScheduler(QObject):
         return result
 
     def start(self) -> None:
+        self._all_paused = False
         self._started = True
         self._closing = False
         self._schedule()
@@ -325,6 +327,7 @@ class DownloadScheduler(QObject):
 
     def pause_all(self) -> int:
         """Pause active and waiting work without starting replacements between rows."""
+        self._all_paused = True
         self._suspended = True
         self._cancel_auto_retry()
         self._resume_pending.clear()
@@ -337,6 +340,7 @@ class DownloadScheduler(QObject):
         return count
 
     def resume_all(self) -> int:
+        self._all_paused = False
         self._suspended = True
         try:
             count = sum(1 for task in list(self._tasks.values())
@@ -351,6 +355,7 @@ class DownloadScheduler(QObject):
         task = self.task(task_id)
         if task is None or task.state not in {'paused', 'pausing', 'failed'}:
             return False
+        self._all_paused = False
         if task.state == 'pausing':
             # requestInterruption cannot be undone on a QThread. Remember the
             # click and restart from its checkpoint after that native thread exits.
@@ -371,6 +376,7 @@ class DownloadScheduler(QObject):
         task = self.task(task_id)
         if task is None or task.state not in {'failed', 'paused'}:
             return False
+        self._all_paused = False
         if self._retry_task_id == task.id: self._cancel_auto_retry()
         task.metadata['auto_retry_count'] = 0
         task.metadata.pop('auto_retry_pending', None)
@@ -523,7 +529,7 @@ class DownloadScheduler(QObject):
         self.task_updated.emit(task.public_copy())
 
     def _schedule(self) -> None:
-        if not self._started or self._closing or self._suspended:
+        if not self._started or self._closing or self._suspended or self._all_paused:
             return
         # Terminal callbacks can arrive before QThread.finished. These native
         # threads still occupy their slots until they have fully stopped.
@@ -767,7 +773,7 @@ class DownloadScheduler(QObject):
     def _auto_retry_failed(self) -> bool:
         """Back off after the rest of the queue drains; never tight-loop a blocked host."""
         if self._retry_timer.isActive(): return True
-        if self._closing or self._suspended: return False
+        if self._closing or self._suspended or self._all_paused: return False
         for task in self.ordered_tasks():
             if task.state != 'failed' or task.id in self._workers: continue
             try: count = max(0, int(task.metadata.get('auto_retry_count', 0) or 0))
@@ -787,7 +793,7 @@ class DownloadScheduler(QObject):
         self._retry_task_id = None
         if task is None: return
         task.metadata.pop('auto_retry_pending', None)
-        if not self._started or self._closing or self._suspended or task.state != 'failed': return
+        if not self._started or self._closing or self._suspended or self._all_paused or task.state != 'failed': return
         # Newly added/manual retry work takes precedence over an old timer.
         if self._workers or any(item.state == 'queued' for item in self._tasks.values()): return
         try: count = max(0, int(task.metadata.get('auto_retry_count', 0) or 0))
