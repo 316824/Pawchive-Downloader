@@ -148,6 +148,140 @@ class QueueOperationsTests(unittest.TestCase):
                 self.assertTrue(worker.errors)
                 self.assertEqual(self.journal.load(job_id)['status'],'downloaded')
 
+    def legacy_empty_job(self, title, **changes):
+        config={**self.config,'task_title':title,'task_post_url':PROFILE+'/post/old',**changes}
+        config.pop('batch_id',None)
+        job_id=self.journal.create(config)
+        job=self.journal.load(job_id)
+        job.update(status='completed',files=[],posts=None,done_posts=[])
+        self.journal.save(job)
+        return job_id
+
+    def write_local(self, relative, payload, mtime):
+        path=self.folder/relative
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(payload)
+        os.utime(path,ns=(mtime,mtime))
+        return path
+
+    def test_old_empty_completed_manifest_is_migrated_with_existing_flat_images(self):
+        old=self.legacy_empty_job('old')
+        self.write_local('图片文件/legacy.jpg',b'legacy',100)
+        self.write_local('图片文件/nested/ignored.jpg',b'nested',50)
+        self.write_local('图片文件/preserve.psd',b'project',50)
+        current=self.job('downloaded',[('图片文件/new.png',b'new',200,False)])
+        worker=self.finalize([current])
+        self.assertFalse(worker.errors,worker.errors)
+        self.assertEqual((self.folder/'图片文件/1.jpg').read_bytes(),b'legacy')
+        self.assertEqual((self.folder/'图片文件/2.png').read_bytes(),b'new')
+        self.assertEqual((self.folder/'图片文件/nested/ignored.jpg').read_bytes(),b'nested')
+        self.assertTrue((self.folder/'图片文件/preserve.psd').exists())
+        host=self.journal.load(current)
+        self.assertEqual(len(host['local_numbering']),1)
+        self.assertEqual(host['local_numbering'][0]['target'],str(self.folder/'图片文件/1.jpg'))
+        self.assertNotIn('url',host['local_numbering'][0])
+        self.assertEqual(self.journal.load(old)['files'],[])
+        self.assertFalse(self.finalize([current]).errors)
+        self.assertFalse(list((self.folder/'图片文件').glob('.pawchive-rename-*')))
+
+    def test_old_title_directories_are_scanned_precisely_without_touching_attachments(self):
+        self.legacy_empty_job('Old title',by_title=True)
+        self.write_local('Old title/untracked.jpg',b'old',100)
+        self.write_local('Old title/附件文件/attachment.jpg',b'attachment',50)
+        self.write_local('Unrelated/image.jpg',b'unrelated',50)
+        current=self.job('downloaded',[('New title/new.png',b'new',200,False)],
+            by_title=True,task_title='New title')
+        worker=self.finalize([current])
+        self.assertFalse(worker.errors,worker.errors)
+        self.assertEqual((self.folder/'Old title/1.jpg').read_bytes(),b'old')
+        self.assertEqual((self.folder/'New title/1.png').read_bytes(),b'new')
+        self.assertEqual((self.folder/'Old title/附件文件/attachment.jpg').read_bytes(),b'attachment')
+        self.assertEqual((self.folder/'Unrelated/image.jpg').read_bytes(),b'unrelated')
+
+    def test_local_migration_survives_process_exit_after_staging_or_final_os_move(self):
+        import queue_operations
+        root=self.folder
+        for crash_on in (1,2):
+            with self.subTest(crash_on=crash_on):
+                self.folder=root/f'crash-{crash_on}'
+                self.folder.mkdir()
+                self.legacy_empty_job('old',folder=str(self.folder))
+                self.write_local('图片文件/legacy.jpg',b'legacy',100)
+                current=self.job('downloaded',[('图片文件/new.png',b'new',200,False)],folder=str(self.folder))
+                original=queue_operations.move_exclusive
+                moves=[]
+                def crash(source,target):
+                    original(source,target)
+                    moves.append(str(target))
+                    if len(moves)==crash_on: raise SystemExit('simulated local rename interruption')
+                with patch('queue_operations.move_exclusive',side_effect=crash):
+                    with self.assertRaises(SystemExit): self.finalize([current])
+                self.assertEqual(self.journal.load(current)['status'],'downloaded')
+                self.journal.close()
+                self.journal=DownloadJournal(self.root/'journal')
+                worker=self.finalize([current])
+                self.assertFalse(worker.errors,worker.errors)
+                self.assertEqual((self.folder/'图片文件/1.jpg').read_bytes(),b'legacy')
+                self.assertEqual((self.folder/'图片文件/2.png').read_bytes(),b'new')
+                record=self.journal.load(current)['local_numbering'][0]
+                self.assertFalse(record.get('move_to'))
+                self.assertTrue(Path(record['target']).exists())
+                self.assertFalse(list((self.folder/'图片文件').glob('.pawchive-rename-*')))
+        self.folder=root
+
+    def test_duplicate_remote_references_follow_one_shared_file_through_renaming(self):
+        first=self.job('completed',[('图片文件/shared.jpg',b'shared',100,False)])
+        second=self.job('downloaded',[('图片文件/shared.jpg',b'shared',100,False),
+            ('图片文件/new.png',b'new',200,False)])
+        worker=self.finalize([second])
+        self.assertFalse(worker.errors,worker.errors)
+        a=self.journal.load(first)['files'][0]
+        b=self.journal.load(second)['files'][0]
+        self.assertEqual(a['target'],b['target'])
+        self.assertEqual(Path(a['target']).read_bytes(),b'shared')
+        self.assertEqual(len(list((self.folder/'图片文件').iterdir())),2)
+        self.assertFalse(self.finalize([second]).errors)
+
+    def test_shared_alias_recovers_exit_during_journal_intent_writes_before_os_move(self):
+        first=self.job('completed',[('图片文件/shared.jpg',b'shared',100,False)])
+        second=self.job('downloaded',[('图片文件/shared.jpg',b'shared',100,False)])
+        original=self.journal.save
+        saves=[]
+        def stop_after_intent(job,dirty_records=None):
+            original(job,dirty_records=dirty_records)
+            if any(record.get('move_to') for record in job['files']):
+                saves.append(job['id'])
+                if len(saves)==1: raise SystemExit('interrupted alias checkpoint writes')
+        with patch.object(self.journal,'save',side_effect=stop_after_intent):
+            with self.assertRaises(SystemExit): self.finalize([second])
+        self.journal.close()
+        self.journal=DownloadJournal(self.root/'journal')
+        worker=self.finalize([second])
+        self.assertFalse(worker.errors,worker.errors)
+        a=self.journal.load(first)['files'][0]
+        b=self.journal.load(second)['files'][0]
+        self.assertEqual(a['target'],b['target'])
+        self.assertEqual(Path(a['target']).read_bytes(),b'shared')
+
+    def test_local_manifest_outside_path_and_symlinks_are_not_followed(self):
+        current=self.job('downloaded',[('图片文件/new.jpg',b'new',200,False)])
+        outside=self.write_local('outside.jpg',b'outside',100)
+        link=self.folder/'图片文件/link.jpg'
+        try: link.symlink_to(outside)
+        except OSError:
+            # Windows may deny creating symlinks without Developer Mode.
+            original=Path.is_symlink
+            with patch.object(Path,'is_symlink',lambda path:path==link or original(path)):
+                link.write_bytes(b'skip fixture')
+                self.assertFalse(self.finalize([current]).errors)
+                self.assertEqual(link.read_bytes(),b'skip fixture')
+        else:
+            self.assertFalse(self.finalize([current]).errors)
+            self.assertTrue(link.is_symlink())
+        job=self.journal.load(current)
+        job['local_numbering']=[dict(id='a'*32,target=str(self.root/'escape.jpg'),size=1,sha256='b'*64)]
+        with self.assertRaises(ValueError): self.journal.save(job,dirty_records=[])
+
     def prepare(self, entries, config=None):
         worker=QueuePreparationWorker(self.journal,entries,config or self.config)
         result=[]; errors=[]

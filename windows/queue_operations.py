@@ -5,8 +5,8 @@ import uuid
 
 from PySide6.QtCore import QThread, Signal
 
-from download_journal import inside, matches
-from resumable_worker import DownloadEngine, IMAGE_EXTENSIONS
+from download_journal import inside, matches, fingerprint
+from resumable_worker import DownloadEngine, IMAGE_EXTENSIONS, IMAGE_FOLDER, move_exclusive
 from download_scheduler import has_direct_attachment
 
 
@@ -88,6 +88,7 @@ class QueuePreparationWorker(QThread):
                     meta['_journal_records']=job['files']
                     meta['completed_records']=[dict(r) for r in job['files']
                                                if r.get('status') in ('complete','ready')]
+                    meta['_worker_config']={**config,'_saved_count':job.get('saved_count',0)}
                 meta.update(profile_url=config['profile'], ordinal=sequence,
                     by_title=config.get('by_title',True), queue_rename_order=config['queue_rename_order'],
                     content_mode=mode, batch_id=config.get('batch_id',batch_id))
@@ -102,6 +103,40 @@ class QueuePreparationWorker(QThread):
             self.failed.emit(str(error))
 
 
+class _LocalNumberingOwner:
+    """Journal local-only images without inventing a remote URL or download record."""
+    def __init__(self, engine, helpers):
+        self.engine, self.helpers = engine, helpers
+        self.job, self.w = engine.job, engine.w
+
+    def save(self, record=None):
+        self.engine.journal.save(self.job,dirty_records=[])
+
+    def move_record(self, record, destination):
+        source=inside(self.w.folder,record['target'])
+        destination=inside(self.w.folder,destination)
+        if source==destination:
+            record.pop('move_to',None)
+            self.save(record)
+            return
+        if not source.exists():
+            if not matches(record,destination):
+                raise ValueError('待编号图片已丢失，请恢复下载：'+source.name)
+        else:
+            if not matches(record,source):
+                raise ValueError('图片已被外部修改，保留原文件并停止编号：'+source.name)
+            if destination.exists():
+                destination=self.helpers['unique_path'](destination.parent,destination.name)
+            record['move_to']=str(destination)
+            self.save(record)
+            try: move_exclusive(source,destination)
+            except FileExistsError:
+                return self.move_record(record,self.helpers['unique_path'](destination.parent,destination.name))
+        record['target']=str(destination)
+        record.pop('move_to',None)
+        self.save(record)
+
+
 class QueueFinalizeWorker(QThread):
     result = Signal(object)
     failed = Signal(str)
@@ -110,15 +145,66 @@ class QueueFinalizeWorker(QThread):
         super().__init__(parent)
         self.journal,self.job_ids,self.helpers=journal,list(job_ids),helpers
 
+    @staticmethod
+    def _rename_enabled(config):
+        return bool(config.get('queue_rename_order',config.get('rename_order',False)))
+
+    def _directory(self, engine):
+        config=engine.job['config']
+        if not config.get('by_title',True):
+            return inside(engine.w.folder,engine.w.folder/IMAGE_FOLDER)
+        title=str(config.get('task_title') or '')
+        if not title: return None
+        safe=self.helpers.get('safe_path_component')
+        if safe is not None:
+            title=safe(title,limit=100)
+        elif title in ('.','..') or '/' in title or chr(92) in title:
+            # Without the application's sanitizer, only an exact safe single
+            # component is eligible for migration. Never guess a parent path.
+            return None
+        return inside(engine.w.folder,engine.w.folder/title)
+
+    @staticmethod
+    def _finish_pending_move(owner, record):
+        destination=record.get('move_to')
+        if not destination: return
+        destination=inside(owner.w.folder,destination)
+        if matches(record,destination):
+            # The old target might already hold another staged image after a
+            # crash. The recorded destination/hash proves this move finished;
+            # do not touch the current contents of that old path.
+            record['target']=str(destination)
+            record.pop('move_to',None)
+            owner.save(record)
+        else:
+            owner.move_record(record,destination)
+
+    @staticmethod
+    def _move_references(references, target):
+        owner,record=references[0]
+        # All aliases journal the intended move before any filesystem change.
+        # Each can recover independently if the process stops after OS rename.
+        for alias_owner,alias in references:
+            alias['move_to']=str(target)
+            alias_owner.save(alias)
+        owner.move_record(record,target)
+        actual=record['target']
+        for alias_owner,alias in references[1:]:
+            if not matches(alias,actual):
+                raise ValueError('共享图片编号校验失败，保留文件并停止编号。')
+            alias['target']=actual
+            alias.pop('move_to',None)
+            alias_owner.save(alias)
+
     def run(self):
         try:
             jobs={}
             for job_id in self.job_ids:
                 job=self.journal.load(job_id)
                 jobs[job_id]=job
-                for sibling in self.journal.list_related(job['config']):
+                for sibling in self.journal.list_related(job['config'],include_legacy=True):
                     jobs[sibling['id']]=sibling
-            groups={}; engines={}; seen=set()
+            engines={}; local_owners={}; references={}; directories={}; all_records=[]
             for job_id,job in jobs.items():
                 config=job['config']
                 if job['status'] not in ('completed','downloaded'):
@@ -127,44 +213,86 @@ class QueueFinalizeWorker(QThread):
                     folder=Path(config['folder']),by_title=config.get('by_title',True))
                 engine=DownloadEngine(worker,self.helpers)
                 engines[job_id]=engine
-                if not config.get('queue_rename_order',config.get('rename_order',False)):
-                    continue
-                # Finish an interrupted atomic move before looking at target.
-                # A process can stop after the OS rename but before the record
-                # switches from target -> move_to, so target alone may be absent.
-                for record in engine.job['files']:
-                    if record.get('move_to'):
-                        engine.move_record(record,Path(record['move_to']))
-                    if record.get('status')!='complete': continue
-                    path=inside(worker.folder,record['target'])
-                    if path.suffix.lower() not in IMAGE_EXTENSIONS: continue
-                    if not path.is_file():
-                        raise ValueError('待编号图片已丢失，请恢复下载：'+path.name)
-                    key=str(path).casefold()
-                    if key in seen: continue
-                    if not matches(record):
-                        raise ValueError('图片已被外部修改，保留原文件并停止编号：'+path.name)
-                    seen.add(key)
-                    groups.setdefault(path.parent,[]).append((path.stat().st_mtime_ns,
-                        str(record.get('date','')),record.get('sequence',0),engine,record))
-            # Stage the complete group before assigning numbers; each move is
-            # journaled so an interrupted finalization can resume safely.
+                local_owners[job_id]=_LocalNumberingOwner(engine,self.helpers)
+                if not self._rename_enabled(config): continue
+                directory=self._directory(engine)
+                if directory is not None: directories.setdefault(directory,engine)
+                owners=[(engine,r) for r in engine.job['files'] if r.get('status')=='complete']
+                owners.extend((local_owners[job_id],r) for r in engine.job.get('local_numbering',[]))
+                all_records.extend(owners)
+            # If the process exited while journaling a shared move (before
+            # every alias committed), propagate its recorded transition to
+            # the remaining aliases before physically completing that move.
+            transitions={}
+            for owner,record in all_records:
+                if record.get('move_to'):
+                    key=(str(record['target']).casefold(),record.get('size'),record.get('sha256'))
+                    transitions[key]=record['move_to']
+            for owner,record in all_records:
+                key=(str(record['target']).casefold(),record.get('size'),record.get('sha256'))
+                if not record.get('move_to') and key in transitions:
+                    record['move_to']=transitions[key]
+                    owner.save(record)
+            for owner,record in all_records:
+                self._finish_pending_move(owner,record)
+            for owner,record in all_records:
+                path=inside(owner.w.folder,record['target'])
+                if path.suffix.lower() not in IMAGE_EXTENSIONS: continue
+                if not path.is_file():
+                    raise ValueError('待编号图片已丢失，请恢复下载：'+path.name)
+                if not matches(record):
+                    raise ValueError('图片已被外部修改，保留原文件并停止编号：'+path.name)
+                references.setdefault(path,[]).append((owner,record))
+            # Old releases erased their completed manifests. Include the
+            # actual direct-child images in the exact image/title directories
+            # and persist local hashes before moving any of them. Attachments,
+            # subdirectories, symbolic links and untracked staging files stay out.
+            for directory,engine in directories.items():
+                if not directory.is_dir(): continue
+                # Keep migration records on a current recoverable batch member
+                # rather than turning an old empty manifest into a redownload.
+                host=next((engines[i] for i in self.job_ids if i in engines and
+                           engines[i].w.folder==engine.w.folder and
+                           self._rename_enabled(engines[i].job['config'])),engine)
+                owner=local_owners[host.job['id']]
+                for candidate in directory.iterdir():
+                    if candidate.suffix.lower() not in IMAGE_EXTENSIONS: continue
+                    if candidate.name.startswith('.pawchive-rename-'): continue
+                    if candidate.is_symlink() or getattr(candidate,'is_junction',lambda:False)(): continue
+                    path=inside(host.w.folder,candidate)
+                    if not path.is_file() or path in references: continue
+                    record=dict(id=uuid.uuid4().hex,target=str(path),status='complete',
+                        size=path.stat().st_size,sha256=fingerprint(path),sequence=0,date='')
+                    host.job.setdefault('local_numbering',[]).append(record)
+                    owner.save(record)
+                    references[path]=[(owner,record)]
+            groups={}
+            for path,refs in references.items():
+                record=refs[0][1]
+                groups.setdefault(path.parent,[]).append((path.stat().st_mtime_ns,
+                    str(record.get('date','')),record.get('sequence',0),str(path),refs))
+            # Every participant is recoverable until all staged moves and
+            # their journal references have committed.
+            for engine in engines.values():
+                if self._rename_enabled(engine.job['config']) and (engine.job['files'] or engine.job.get('local_numbering')):
+                    engine.job['status']='downloaded'
+                    engine.save()
             for directory,items in groups.items():
-                items.sort(key=lambda item:(item[0],item[1],item[2],item[4]['target']))
+                items.sort(key=lambda item:item[:4])
                 staged=[]
-                for _,_,_,engine,record in items:
-                    source=Path(record['target'])
-                    extension=source.suffix
-                    engine.move_record(record,directory/f'.pawchive-rename-{uuid.uuid4().hex}{extension}')
-                    staged.append((engine,record,extension))
+                for *_,refs in items:
+                    extension=Path(refs[0][1]['target']).suffix
+                    self._move_references(refs,directory/f'.pawchive-rename-{uuid.uuid4().hex}{extension}')
+                    staged.append((refs,extension))
                 number=1
-                for engine,record,extension in staged:
+                for refs,extension in staged:
                     target=directory/f'{number}{extension}'
                     while target.exists():
                         number+=1; target=directory/f'{number}{extension}'
-                    engine.move_record(record,target)
-                    record['number']=number
-                    engine.save(record)
+                    self._move_references(refs,target)
+                    for owner,record in refs:
+                        record['number']=number
+                        owner.save(record)
                     number+=1
             for engine in engines.values():
                 engine.job['status']='completed'

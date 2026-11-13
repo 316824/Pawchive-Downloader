@@ -114,6 +114,18 @@ class DownloadJournal:
                 name=Path(record['part']).name
                 if not re.fullmatch(r'\.pawchive-'+job['id']+r'-[a-f0-9]{20}\.part',name):
                     raise ValueError('Unowned checkpoint temporary file.')
+        local=job.get('local_numbering',[])
+        if not isinstance(local,list) or len(local)>100000:
+            raise ValueError('Invalid local numbering manifest.')
+        for record in local:
+            if (not isinstance(record,dict) or not re.fullmatch(r'[a-f0-9]{32}',str(record.get('id','')))
+                    or not re.fullmatch(r'[a-f0-9]{64}',str(record.get('sha256','')))
+                    or type(record.get('size')) is not int or record['size']<0):
+                raise ValueError('Invalid local numbering record.')
+            for key in ('target','move_to'):
+                if record.get(key): inside(folder,record[key])
+            if not record.get('target'):
+                raise ValueError('Invalid local numbering path.')
         album=job.get('album')
         if album: inside(folder,album['path'])
         return job
@@ -174,11 +186,37 @@ class DownloadJournal:
 
     def list_recoverable(self):
         with self._lock:
-            rows=self._db.execute("SELECT id FROM jobs WHERE status IN ('running','paused','failed') ORDER BY updated DESC").fetchall()
+            rows=self._db.execute("SELECT id FROM jobs WHERE status IN ('running','paused','failed','downloaded') ORDER BY updated DESC").fetchall()
         result=[]
         for (job_id,) in rows:
             try: result.append(self.load(job_id))
             except (ValueError,KeyError,OSError): continue
+        return result
+
+    def list_related(self, config, *, include_legacy=False):
+        """Include finished siblings so a resumed batch can number every image."""
+        with self._lock:
+            rows=self._db.execute('SELECT id,document FROM jobs ORDER BY updated').fetchall()
+        result=[]
+        for job_id,document in rows:
+            try: other=json.loads(document).get('config',{})
+            except (ValueError,TypeError,AttributeError): continue
+            if not other.get('queue_task'):
+                continue
+            if config.get('batch_id'):
+                same=other.get('batch_id')==config['batch_id']
+            else:
+                keys=('folder','profile','order','by_title','queue_rename_order')
+                same=all(other.get(key)==config.get(key) for key in keys)
+            if not same and include_legacy and not other.get('batch_id'):
+                # Earlier releases cleared completed manifests and did not
+                # assign batch IDs. Restrict migration to this exact creator
+                # and destination; the finalizer inspects only named directories.
+                same=(str(other.get('folder','')).casefold()==str(config.get('folder','')).casefold()
+                      and str(other.get('profile','')).rstrip('/')==str(config.get('profile','')).rstrip('/'))
+            if same:
+                try: result.append(self.load(job_id))
+                except (KeyError,ValueError,OSError): pass
         return result
 
     def discard(self,job_id):
