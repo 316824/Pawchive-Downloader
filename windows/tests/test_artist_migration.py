@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt,QObject,Signal
 from PySide6.QtWidgets import QApplication,QWidget
 from app_state import AppState
 from artist_cards import record_download,remove_card,update_artist_metadata,list_cards
@@ -207,6 +207,61 @@ class ArtistMigrationTests(unittest.TestCase):
             self.assertIn('invalid_profile',data[0])
             worker.deleteLater()
         self.qt.processEvents()
+
+    def test_avatar_loader_limits_visible_page_and_preserves_workers_when_dialog_closes(self):
+        from artist_cards import ArtistAvatarLoader
+        profiles=[f'https://pawchive.pw/fanbox/user/{i}' for i in range(30)]
+        for profile in profiles: record_download(self.target,profile,posts=0,files=0)
+        created=[]
+        class Worker(QObject):
+            result=Signal(str,str,str)
+            finished=Signal()
+            def __init__(self,data_dir,profile,parent):
+                super().__init__(parent); self.profile=profile; self.started=False; created.append(self)
+            def start(self): self.started=True
+        parent=QWidget()
+        loader=ArtistAvatarLoader(self.target,parent,worker_class=Worker)
+        loader.request(profiles)
+        self.assertEqual(len(created),3)
+        self.assertEqual(len(loader._wanted),20)
+        self.assertTrue(all(worker.parent() is parent for worker in created))
+        # Flip to the next page: only its not-yet-started avatars may start.
+        loader.request(profiles[20:])
+        first=created[0]
+        remove_card(self.target,first.profile)
+        first.result.emit(first.profile,str(self.root/'avatar.png'),'')
+        first.finished.emit()
+        self.assertNotIn(first.profile,self.target.get_setting('artist_cards'))
+        self.assertEqual(len(created),4)
+        self.assertEqual(created[-1].profile,profiles[20])
+        self.assertTrue(all(profile in profiles[20:] for profile in loader._queue))
+        loader.close()
+        outstanding=list(loader.workers.values())
+        before=len(created)
+        for worker in outstanding:
+            worker.result.emit(worker.profile,'','fixture failure'); worker.finished.emit()
+        self.assertEqual(len(created),before)
+        self.assertFalse(loader.workers)
+        parent.deleteLater(); self.qt.processEvents()
+
+    def test_avatar_loader_waits_for_subscription_checks_before_starting_requests(self):
+        from artist_cards import ArtistAvatarLoader
+        record_download(self.target,PROFILE,posts=0,files=0)
+        created=[]
+        class Worker(QObject):
+            result=Signal(str,str,str)
+            finished=Signal()
+            def __init__(self,data_dir,profile,parent):
+                super().__init__(parent); self.profile=profile; created.append(self)
+            def start(self): pass
+        parent=QWidget(); parent._subscription_check_running=True
+        loader=ArtistAvatarLoader(self.target,parent,worker_class=Worker)
+        loader.request([PROFILE])
+        self.assertFalse(created)
+        self.assertTrue(loader._defer_timer.isActive())
+        parent._subscription_check_running=False; loader._pump()
+        self.assertEqual(len(created),1)
+        loader.close(); created[0].finished.emit(); parent.deleteLater(); self.qt.processEvents()
 
     def test_dialog_copy_invalid_feedback_restore_and_card_live_markers(self):
         from feature_dialogs import ArtistCardsDialog

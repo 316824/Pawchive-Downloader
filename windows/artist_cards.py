@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot, QTimer
 
 
 PROFILE_RE = re.compile(
@@ -268,6 +268,7 @@ class AvatarFetchWorker(QThread):
             return
         target_dir = self.data_dir / 'artist-cards'
         try:
+            if self.isInterruptionRequested(): raise OSError('cancelled')
             target_dir.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256(self.profile.encode('utf-8')).hexdigest()
             session = requests.Session()
@@ -292,6 +293,7 @@ class AvatarFetchWorker(QThread):
                 total = 0
                 with temporary.open('wb') as stream:
                     for chunk in response.iter_content(64 * 1024):
+                        if self.isInterruptionRequested(): raise OSError('cancelled')
                         if not chunk:
                             continue
                         total += len(chunk)
@@ -300,6 +302,7 @@ class AvatarFetchWorker(QThread):
                         stream.write(chunk)
                 if total == 0:
                     raise ValueError('empty_avatar')
+                if self.isInterruptionRequested(): raise OSError('cancelled')
                 temporary.replace(target)
                 self.result.emit(self.profile, str(target), '')
             finally:
@@ -310,3 +313,83 @@ class AvatarFetchWorker(QThread):
             except (OSError, UnboundLocalError):
                 pass
             self.result.emit(self.profile, '', str(error)[:80])
+
+
+class ArtistAvatarLoader(QObject):
+    """Load only the visible cabinet page with three native workers at most.
+
+    The loader and workers belong to the main window, so closing a cabinet
+    never destroys a running native thread. Data updates use GUI-thread slots;
+    closing merely discards the not-yet-started page queue.
+    """
+    changed = Signal(str, str, str)
+    MAX_WORKERS = 3
+
+    def __init__(self,store,parent=None,*,worker_class=None):
+        super().__init__(parent)
+        self.store=store
+        self.worker_class=worker_class or AvatarFetchWorker
+        self.workers={}
+        self._wanted=set(); self._queue=[]; self._failed=set(); self._closed=False
+        self._defer_timer=QTimer(self); self._defer_timer.setSingleShot(True)
+        self._defer_timer.timeout.connect(self._pump)
+
+    @staticmethod
+    def _has_avatar(card):
+        filename=str(card.get('avatar_path') or '')
+        try: return bool(filename and Path(filename).is_file())
+        except (ValueError,OSError): return False
+
+    def request(self,profiles):
+        if self._closed: return
+        wanted=[]
+        for value in profiles:
+            profile=normalize_profile(value)
+            if profile and profile not in wanted: wanted.append(profile)
+            if len(wanted)>=20: break
+        self._wanted=set(wanted)
+        cards={item['profile']:item for item in list_cards(self.store)}
+        self._queue=[profile for profile in wanted if profile in cards and profile not in self.workers
+                     and profile not in self._failed and not self._has_avatar(cards[profile])]
+        self._pump()
+
+    def _pump(self):
+        if self._closed: return
+        if getattr(self.parent(),'_subscription_check_running',False):
+            if self._queue: self._defer_timer.start(500)
+            return
+        self._defer_timer.stop()
+        cards={item['profile']:item for item in list_cards(self.store)}
+        while self._queue and len(self.workers)<self.MAX_WORKERS:
+            profile=self._queue.pop(0)
+            card=cards.get(profile)
+            if profile not in self._wanted or card is None or profile in self.workers or self._has_avatar(card):
+                continue
+            worker=self.worker_class(self.store.data_dir,profile,self.parent())
+            self.workers[profile]=worker
+            worker.result.connect(self._on_result)
+            worker.finished.connect(self._on_finished)
+            worker.start()
+
+    @Slot(str,str,str)
+    def _on_result(self,profile,path,error):
+        if error: self._failed.add(profile)
+        # Explicit add/import creates cards. A deleted card stays deleted even
+        # if an old in-flight avatar request succeeds a moment later.
+        card=update_artist_metadata(self.store,profile,avatar_path=path or None,
+                                   avatar_status='missing' if error else 'ready')
+        if card is not None: self.changed.emit(profile,path,error)
+
+    @Slot()
+    def _on_finished(self):
+        worker=self.sender()
+        profile=getattr(worker,'profile','')
+        self.workers.pop(profile,None)
+        if worker is not None: worker.deleteLater()
+        if self._closed:
+            if not self.workers: self.deleteLater()
+        else: self._pump()
+
+    def close(self):
+        self._closed=True; self._wanted.clear(); self._queue.clear(); self._defer_timer.stop()
+        if not self.workers: self.deleteLater()

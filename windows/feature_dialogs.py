@@ -553,6 +553,10 @@ class ArtistCardsDialog(QDialog):
         self.migration_button.clicked.connect(self.open_migration)
         actions.insertWidget(2,self.migration_button)
         self._status_labels={}; self._spinner_phase=0
+        from artist_cards import ArtistAvatarLoader
+        self._avatar_loader=ArtistAvatarLoader(self.store,self.parent_window)
+        self._avatar_loader.changed.connect(self._avatar_changed)
+        self.finished.connect(self._avatar_loader.close)
         self._page=0; self._page_size=20; self.refresh()
         self._status_timer=QTimer(self); self._status_timer.setInterval(250)
         self._status_timer.timeout.connect(self._poll_status); self._status_timer.start()
@@ -591,6 +595,9 @@ class ArtistCardsDialog(QDialog):
                 fallback=self.parent_window.windowIcon() if self.parent_window is not None else QIcon()
                 if not fallback.isNull():
                     item.setIcon(fallback)
+            if item.icon().isNull():
+                fallback=self.parent_window.windowIcon() if self.parent_window is not None else QIcon()
+                if not fallback.isNull(): item.setIcon(fallback)
             self.cards.addItem(item)
             from PySide6.QtWidgets import QWidget
             from PySide6.QtCore import QSize
@@ -607,6 +614,17 @@ class ArtistCardsDialog(QDialog):
         self.cards.verticalScrollBar().setValue(scroll)
         self._data_signature=self._signature()
         self._update_markers()
+        self._load_visible_avatars()
+
+    def showEvent(self,event):
+        super().showEvent(event)
+        self._load_visible_avatars()
+
+    def _load_visible_avatars(self):
+        if self.isVisible(): self._avatar_loader.request(self._status_labels)
+
+    def _avatar_changed(self,*_):
+        if self.isVisible(): self.refresh()
 
     def _signature(self):
         from artist_cards import list_cards
