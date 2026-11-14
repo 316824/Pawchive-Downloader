@@ -230,6 +230,48 @@ function Get-ApplicationProcesses {
     return [pscustomobject]@{ Processes = @($applicationProcesses.ToArray()); ScriptCheckComplete = $complete }
 }
 
+function Get-TemporaryDirectories {
+    param([string[]]$Candidates)
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $result = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $Candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        try {
+            $full = Get-AbsoluteDirectoryPath -LiteralPath $candidate
+            if (Test-Path -LiteralPath $full) {
+                $ancestor = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+                if (-not $ancestor.PSIsContainer) { throw "临时路径不是目录：$full" }
+                while ($null -ne $ancestor) {
+                    if (($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw "临时路径包含重解析点：$($ancestor.FullName)"
+                    }
+                    $ancestor = $ancestor.Parent
+                }
+            }
+            if ($seen.Add($full)) { $result.Add($full) }
+        }
+        catch { Write-Warning "已忽略不安全的临时根目录：$($_.Exception.Message)" }
+    }
+    return $result
+}
+
+function Assert-StaleTemporaryDirectory {
+    param(
+        [string]$LiteralPath,
+        [string[]]$ApprovedRoots,
+        [datetime]$BeforeUtc
+    )
+
+    $full = Get-AbsoluteDirectoryPath -LiteralPath $LiteralPath
+    $parent = [IO.Directory]::GetParent($full).FullName
+    if ($ApprovedRoots -notcontains $parent) {
+        throw "拒绝不属于已批准临时根目录的缓存：$full"
+    }
+    return Assert-RemovalDirectory -LiteralPath $full -ExpectedParent $parent `
+        -LeafPattern '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$' -BeforeUtc $BeforeUtc
+}
+
 function Get-StaleCacheDirectories {
     param(
         [string]$TempDirectory,
@@ -262,19 +304,29 @@ function Get-StaleCacheDirectories {
 
 $localDataDir = Get-AbsoluteDirectoryPath -LiteralPath ([Environment]::GetFolderPath('LocalApplicationData'))
 $stateDir = Get-AbsoluteDirectoryPath -LiteralPath (Join-Path $localDataDir 'PawchiveDownloader')
-$tempDir = Get-AbsoluteDirectoryPath -LiteralPath ([IO.Path]::GetTempPath())
+# Python tempfile and .NET can select different roots when TEMP and TMP differ.
+# Inventory each explicit OS/Python candidate once, never a recursive temp scan.
+$tempDirectories = @(Get-TemporaryDirectories -Candidates @(
+    $env:TEMP, $env:TMP, $env:TMPDIR, [IO.Path]::GetTempPath(),
+    (Join-Path $localDataDir 'Temp')
+))
 $staleCacheBefore = [DateTime]::UtcNow.AddHours(-24)
 $registryPath = 'HKCU:\Software\PawchiveTools\PawchiveDownloader'
 $prefix = Get-CurrentUserTaskPrefix
 $tasks = @(Get-ApplicationTasks -Prefix $prefix)
 $backgroundArtifacts = @(Get-BackgroundArtifacts -StateDirectory $stateDir)
-$staleCacheDirectories = @(Get-StaleCacheDirectories -TempDirectory $tempDir -BeforeUtc $staleCacheBefore)
+$staleCacheDirectories = @(@(
+    foreach ($directory in $tempDirectories) {
+        Get-StaleCacheDirectories -TempDirectory $directory -BeforeUtc $staleCacheBefore
+    }
+) | Sort-Object -Unique)
 $processCheck = Get-ApplicationProcesses
 $processes = @($processCheck.Processes)
 
 Write-Host 'Pawchive Downloader · 发布者本机记录清理工具' -ForegroundColor Cyan
 Write-Host "数据目录：$stateDir"
-Write-Host "临时缓存目录：$tempDir"
+Write-Host '已批准的临时缓存根目录：'
+$tempDirectories | ForEach-Object { Write-Host "  $_" }
 if ($staleCacheDirectories.Count -eq 0) {
     Write-Host '超过 24 小时的 Pawchive 临时缓存：未发现'
 }
@@ -354,8 +406,8 @@ foreach ($task in $tasks) {
 foreach ($cacheDirectory in $staleCacheDirectories) {
     # Recheck immediately before recursive deletion in case a directory changed
     # after the initial inventory or user confirmation.
-    $cacheDirectory = Assert-RemovalDirectory -LiteralPath $cacheDirectory -ExpectedParent $tempDir `
-        -LeafPattern '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$' -BeforeUtc $staleCacheBefore
+    $cacheDirectory = Assert-StaleTemporaryDirectory -LiteralPath $cacheDirectory `
+        -ApprovedRoots $tempDirectories -BeforeUtc $staleCacheBefore
     if ($PSCmdlet.ShouldProcess($cacheDirectory, '删除过期 Pawchive 临时缓存')) {
         Remove-Item -LiteralPath $cacheDirectory -Recurse -Force
         Write-Host "已删除过期临时缓存：$cacheDirectory" -ForegroundColor Green
