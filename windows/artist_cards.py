@@ -221,13 +221,33 @@ def list_cards(store):
     return list(_safe_cards(store.get_setting('artist_cards', {})).values())
 
 
+def visible_avatar_paths(store, profiles):
+    """Resolve already cached avatars for a small set of visible profiles."""
+    from subscriptions import SubscriptionStore
+    wanted = {normalize_profile(profile) for profile in profiles}
+    paths = {}
+    for record in SubscriptionStore(store).list() + list_cards(store):
+        profile = record['profile']
+        filename = str(record.get('avatar_path') or '')
+        if profile not in wanted or not filename:
+            continue
+        try:
+            candidate = Path(filename)
+            if candidate.is_file() and candidate.stat().st_size <= MAX_AVATAR_BYTES:
+                paths[profile] = filename
+        except (ValueError, OSError):
+            pass
+    return paths
+
+
 def cleanup_cache(store):
     """Remove interrupted or unreferenced avatar files without touching cards."""
     root = (Path(store.data_dir).resolve() / 'artist-cards').resolve()
     if not root.is_dir() or root.is_symlink():
         return 0
     referenced = set()
-    for card in list_cards(store):
+    from subscriptions import SubscriptionStore
+    for card in list_cards(store) + SubscriptionStore(store).list():
         value = str(card.get('avatar_path') or '')
         if not value:
             continue
@@ -316,7 +336,7 @@ class AvatarFetchWorker(QThread):
 
 
 class ArtistAvatarLoader(QObject):
-    """Load only the visible cabinet page with three native workers at most.
+    """Load visible artist/card rows with three shared native workers at most.
 
     The loader and workers belong to the main window, so closing a cabinet
     never destroys a running native thread. Data updates use GUI-thread slots;
@@ -345,6 +365,18 @@ class ArtistAvatarLoader(QObject):
         try: return bool(filename and Path(filename).is_file())
         except (ValueError,OSError): return False
 
+    def _records(self):
+        # Subscribing does not unlock/create an achievement card. Both views
+        # can still share the same bounded avatar cache and in-flight pool.
+        from subscriptions import SubscriptionStore
+        records = {item['profile']: item for item in SubscriptionStore(self.store).list()}
+        for card in list_cards(self.store):
+            previous = records.get(card['profile'], {})
+            if not self._has_avatar(card) and self._has_avatar(previous):
+                card = dict(card, avatar_path=previous['avatar_path'])
+            records[card['profile']] = card
+        return records
+
     def request(self,profiles):
         if self._closed: return
         wanted=[]
@@ -353,7 +385,7 @@ class ArtistAvatarLoader(QObject):
             if profile and profile not in wanted: wanted.append(profile)
             if len(wanted)>=20: break
         self._wanted=set(wanted)
-        cards={item['profile']:item for item in list_cards(self.store)}
+        cards=self._records()
         self._queue=[profile for profile in wanted if profile in cards and profile not in self.workers
                      and profile not in self._failed and not self._has_avatar(cards[profile])]
         self._pump()
@@ -368,7 +400,7 @@ class ArtistAvatarLoader(QObject):
             if self._queue: self._defer_timer.start(500)
             return
         self._defer_timer.stop()
-        cards={item['profile']:item for item in list_cards(self.store)}
+        cards=self._records()
         pending=len(self._queue)
         while self._queue and len(self._registry)<self.MAX_WORKERS and pending:
             pending-=1
@@ -393,7 +425,10 @@ class ArtistAvatarLoader(QObject):
         # if an old in-flight avatar request succeeds a moment later.
         card=update_artist_metadata(self.store,profile,avatar_path=path or None,
                                    avatar_status='missing' if error else 'ready')
-        if card is not None: self.changed.emit(profile,path,error)
+        from subscriptions import SubscriptionStore
+        subscription=SubscriptionStore(self.store).update_avatar(profile,path) if path else None
+        if card is not None or subscription is not None or profile in self._wanted:
+            self.changed.emit(profile,path,error)
 
     @Slot()
     def _on_finished(self):

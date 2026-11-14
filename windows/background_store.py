@@ -27,6 +27,8 @@ BACKGROUND_PAGES = (
     'close_choice',
     'resume_choice',
     'scan',
+    'artist_cards',
+    'subscriptions',
 )
 BACKGROUND_MODES = ('default', 'custom', 'reward')
 ALLOWED_IMAGE_SUFFIXES = frozenset({'.jpg', '.jpeg', '.png', '.webp'})

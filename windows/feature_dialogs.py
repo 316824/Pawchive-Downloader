@@ -262,7 +262,8 @@ class ScheduleDialog(QDialog):
         self.refresh()
 
     def browse(self):
-        folder=QFileDialog.getExistingDirectory(self,tr(self.lang,'folder'),self.folder.text())
+        folder=QFileDialog.getExistingDirectory(self,tr(self.lang,'folder'),self.folder.text(),
+                                               options=QFileDialog.Option.DontUseNativeDialog)
         if folder:self.folder.setText(folder)
 
     def add_schedule(self):
@@ -556,13 +557,13 @@ class ArtistCardsDialog(QDialog):
         layout.addWidget(heading)
         self.cards = QListWidget(); self.cards.setIconSize(QPixmap(64, 64).size())
         self.cards.setSpacing(8); self.cards.itemClicked.connect(self.open_card); layout.addWidget(self.cards, 1)
-        self.empty_hint=label(reward_tr(self.lang, 'artist_cards_empty'), True); layout.addWidget(self.empty_hint)
-        actions=QHBoxLayout(); self.add_button=QPushButton('添加画师'); self.remove_button=QPushButton('删除选中'); self.prev_button=QPushButton('上一页'); self.next_button=QPushButton('下一页'); self.page_label=label('')
+        self.empty_hint=label(self.text('下载画师图集后会生成档案卡，也可以手动添加画师。'), True); layout.addWidget(self.empty_hint)
+        actions=QHBoxLayout(); self.add_button=QPushButton(self.text('添加画师')); self.remove_button=QPushButton(self.text('删除选中')); self.prev_button=QPushButton(self.text('上一页')); self.next_button=QPushButton(self.text('下一页')); self.page_label=label('')
         self.add_button.clicked.connect(self.add_artist); self.remove_button.clicked.connect(self.remove_artist); self.prev_button.clicked.connect(self.previous_page); self.next_button.clicked.connect(self.next_page)
         self.cards.currentItemChanged.connect(lambda *_: self.remove_button.setEnabled(bool(self.cards.currentItem())))
         actions.addWidget(self.add_button); actions.addWidget(self.remove_button); actions.addStretch(1); actions.addWidget(self.prev_button); actions.addWidget(self.page_label); actions.addWidget(self.next_button); layout.addLayout(actions)
         close = QPushButton(tr(self.lang, 'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
-        self.migration_button=QPushButton('数据迁移')
+        self.migration_button=QPushButton(self.text('数据迁移'))
         self.migration_button.clicked.connect(self.open_migration)
         actions.insertWidget(2,self.migration_button)
         self._status_labels={}; self._spinner_phase=0
@@ -570,9 +571,18 @@ class ArtistCardsDialog(QDialog):
         self._avatar_loader=ArtistAvatarLoader(self.store,self.parent_window)
         self._avatar_loader.changed.connect(self._avatar_changed)
         self.finished.connect(self._avatar_loader.close)
+        self._visible_timer=QTimer(self); self._visible_timer.setSingleShot(True)
+        self._visible_timer.timeout.connect(self._load_visible_avatars)
+        self.cards.verticalScrollBar().valueChanged.connect(self._schedule_visible)
+        self.finished.connect(self._visible_timer.stop)
         self._page=0; self._page_size=20; self.refresh()
         self._status_timer=QTimer(self); self._status_timer.setInterval(250)
         self._status_timer.timeout.connect(self._poll_status); self._status_timer.start()
+        self.finished.connect(self._status_timer.stop)
+
+    def text(self, source, **values):
+        from artist_ui_text import artist_text
+        return artist_text(self.lang,source,**values)
 
     def refresh(self, cards=None):
         from feature_text import reward_tr
@@ -588,12 +598,14 @@ class ArtistCardsDialog(QDialog):
             self._page=max_page; page,total=paged_cards(self.store,self._page,self._page_size)
         self._page=min(self._page,max_page); self.page_label.setText(f'{self._page+1}/{max_page+1}' if total else '0/0')
         self.prev_button.setEnabled(self._page>0); self.next_button.setEnabled(self._page<max_page); self.remove_button.setEnabled(bool(self.cards.currentItem()))
+        from artist_cards import visible_avatar_paths
+        avatar_paths=visible_avatar_paths(self.store,[item['profile'] for item in page])
         for card in page:
             title = str(card.get('name') or 'Unknown Artist')
             artist_id = str(card.get('artist_id') or str(card.get('profile','')).rsplit('/user/',1)[-1])
-            status = reward_tr(self.lang, 'artist_card_master') if card.get('achievement') == 'master' else '已记录'
+            status = reward_tr(self.lang, 'artist_card_master') if card.get('achievement') == 'master' else self.text('已记录')
             detail = reward_tr(self.lang, 'artist_card_progress', posts=card.get('posts', 0), files=card.get('files', 0))
-            avatar_path = str(card.get('avatar_path') or '')
+            avatar_path = avatar_paths.get(card['profile'],'')
             item = QListWidgetItem(f'✦ {title}  ·  ID {artist_id}\n{status}  ·  {detail}')
             item.setData(Qt.ItemDataRole.UserRole, card.get('profile',''))
             item.setToolTip(str(card.get('profile', '')))
@@ -627,14 +639,25 @@ class ArtistCardsDialog(QDialog):
         self.cards.verticalScrollBar().setValue(scroll)
         self._data_signature=self._signature()
         self._update_markers()
-        self._load_visible_avatars()
+        self._schedule_visible()
 
     def showEvent(self,event):
         super().showEvent(event)
-        self._load_visible_avatars()
+        self._schedule_visible()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        if hasattr(self,'_visible_timer'): self._schedule_visible()
+
+    def _schedule_visible(self,*_):
+        if self.isVisible(): self._visible_timer.start(20)
 
     def _load_visible_avatars(self):
-        if self.isVisible(): self._avatar_loader.request(self._status_labels)
+        if not self.isVisible(): return
+        viewport=self.cards.viewport().rect()
+        self._avatar_loader.request([self.cards.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(self.cards.count())
+            if self.cards.visualItemRect(self.cards.item(index)).intersects(viewport)])
 
     def _avatar_changed(self,*_):
         if self.isVisible(): self.refresh()
@@ -658,10 +681,10 @@ class ArtistCardsDialog(QDialog):
         for profile,marker in self._status_labels.items():
             if profile in loading:
                 marker.setText(frames[self._spinner_phase%4]); marker.setStyleSheet('color:#8da9f5;background:transparent;')
-                marker.setToolTip('正在检查画师更新…')
+                marker.setToolTip(self.text('正在检查画师更新…'))
             elif records.get(profile,{}).get('unread'):
                 marker.setText('●'); marker.setStyleSheet('color:#f06b85;background:transparent;')
-                marker.setToolTip('有新图集，点击查看更新')
+                marker.setToolTip(self.text('有新图集，点击查看更新'))
             else:
                 marker.clear(); marker.setToolTip('')
 
@@ -695,14 +718,14 @@ class ArtistCardsDialog(QDialog):
         if callable(handler) and profile:
             from PySide6.QtWidgets import QMessageBox
             handler(profile,prompt_post=False)
-            answer=QMessageBox.question(self,'下载画师图集','是否扫描该画师的全部图集并选择下载？',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)
+            answer=QMessageBox.question(self,self.text('下载画师图集'),self.text('是否扫描该画师的全部图集并选择下载？'),QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)
             if answer==QMessageBox.StandardButton.Yes:
                 self.accept(); start=getattr(self.parent_window,'download',None)
                 if callable(start): start()
 
     def add_artist(self):
         from artist_cards import artist_profile_url
-        value,ok=QInputDialog.getText(self,'添加画师','输入 Pawchive 画师主页或数字 ID')
+        value,ok=QInputDialog.getText(self,self.text('添加画师'),self.text('输入 Pawchive 画师主页或数字 ID'))
         if not ok:return
         profile=artist_profile_url(value)
         if not profile:return

@@ -165,6 +165,24 @@ class SubscriptionStore:
             records = [item for item in self.list() if item["profile"] != normalized]
             self._save(records)
 
+    def update_avatar(self, profile, path):
+        """Update display cache only, without advancing a subscription baseline.
+
+        Avatar requests can outlive a dialog. They must never re-add a deleted
+        subscription or change its unread, enabled or last-checked state.
+        """
+        normalized = normalize_profile(profile)
+        if not normalized or not path:
+            return None
+        with self._lock:
+            records = self.list()
+            record = next((item for item in records if item['profile'] == normalized), None)
+            if record is None:
+                return None
+            record['avatar_path'] = str(path)[:512]
+            self._save(records)
+            return dict(record)
+
     def set_baseline(self, profile, latest_ts, *, name=None, avatar_path=None, unread=None):
         normalized = normalize_profile(profile)
         if not normalized:
