@@ -115,10 +115,10 @@ class SubscriptionDialog(QDialog):
         profile = item.data(Qt.ItemDataRole.UserRole)
         if not profile:
             return
-        self.store.mark_read(profile)
-        self.refresh()
-        self._notify_parent()
         parent = self.parent_window
+        callback=getattr(parent,'open_artist_profile',None)
+        if callable(callback):
+            self.accept(); callback(profile); return
         if hasattr(parent, "handle_link_text"):
             parent.handle_link_text(profile, prompt_post=False)
 
@@ -127,8 +127,10 @@ class SubscriptionDialog(QDialog):
             return
         self.refresh_button.setEnabled(False)
         self.info.setText("正在后台检查订阅…")
-        self.worker = SubscriptionCheckWorker(self.store, self)
-        self.worker.progress.connect(lambda *_: self.refresh())
+        # The main window owns the thread, so closing this optional dialog
+        # never destroys a still-running network worker.
+        self.worker = SubscriptionCheckWorker(self.store, self.parent_window)
+        self.worker.progress.connect(self._refresh_progress)
         self.worker.finished_all.connect(self._check_finished)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
@@ -140,15 +142,24 @@ class SubscriptionDialog(QDialog):
         self.refresh()
         self._notify_parent()
 
+    def _refresh_progress(self, *_):
+        self.refresh()
+
+    def done(self, result):
+        from shiboken6 import isValid
+        if self.worker is not None and isValid(self.worker) and self.worker.isRunning():
+            self.worker.stop()
+        super().done(result)
+
     def _notify_parent(self):
         callback = getattr(self.parent_window, "refresh_subscription_badge", None)
         if callable(callback):
             callback()
 
     def closeEvent(self, event):
-        if self.worker is not None and self.worker.isRunning():
+        from shiboken6 import isValid
+        if self.worker is not None and isValid(self.worker) and self.worker.isRunning():
             self.worker.stop()
-            self.worker.wait(2500)
         super().closeEvent(event)
 
 

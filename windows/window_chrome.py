@@ -115,8 +115,18 @@ class WindowChrome(QFrame):
     def set_title(self, title):
         self.title.setText(str(title or 'Pawchive'))
 
+    def sync_window_state(self):
+        portrait=bool(getattr(self.window,'portrait_mode',False))
+        expanded=self.window.isMaximized() or self.window.isFullScreen()
+        self.maximize.setEnabled(not portrait)
+        self.maximize.setText('❐' if expanded else '□')
+        self.maximize.setToolTip('竖屏模式下请先切回窗口模式' if portrait else
+                                '还原窗口' if expanded else '最大化窗口')
+
     def toggle_maximized(self):
-        if self.window.isMaximized():
+        if getattr(self.window,'portrait_mode',False):
+            return
+        if self.window.isFullScreen() or self.window.isMaximized():
             self.window.showNormal()
             self.maximize.setText('□')
             self.maximize.setToolTip('最大化窗口')
@@ -124,6 +134,7 @@ class WindowChrome(QFrame):
             self.window.showMaximized()
             self.maximize.setText('❐')
             self.maximize.setToolTip('还原窗口')
+        self.sync_window_state()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

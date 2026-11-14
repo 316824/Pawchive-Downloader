@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 import uuid
+import weakref
 
 from PySide6.QtCore import QObject, Signal, Slot, QTimer
 
@@ -146,30 +147,41 @@ class _WorkerRelay(QObject):
     """Deliver worker signals to the scheduler's GUI thread, never a lambda's thread."""
     def __init__(self, scheduler, task_id, serial):
         super().__init__(scheduler)
-        self.scheduler, self.task_id, self.serial = scheduler, task_id, serial
+        # Qt already owns this relay through its parent. A Python strong
+        # reference back to that parent creates a mixed ownership cycle:
+        # deferred relay destruction can drop the parent's final reference,
+        # whose destructor then deletes the same child a second time.
+        self._scheduler_ref = weakref.ref(scheduler)
+        self.task_id, self.serial = task_id, serial
 
-    def valid(self):
-        return self.scheduler._run_serial.get(self.task_id) == self.serial
+    def live_scheduler(self):
+        scheduler = self._scheduler_ref()
+        return scheduler if scheduler is not None and scheduler._run_serial.get(self.task_id) == self.serial else None
 
     @Slot(str, object, object)
     def progress(self, label, current, total):
-        if self.valid(): self.scheduler._on_progress(self.task_id, label, current, total)
+        scheduler = self.live_scheduler()
+        if scheduler is not None: scheduler._on_progress(self.task_id, label, current, total)
 
     @Slot(int, int)
     def file_progress(self, current, total):
-        if self.valid(): self.scheduler._on_file_progress(self.task_id, current, total)
+        scheduler = self.live_scheduler()
+        if scheduler is not None: scheduler._on_file_progress(self.task_id, current, total)
 
     @Slot(int)
     def success(self, count):
-        if self.valid(): self.scheduler._on_success(self.task_id, count)
+        scheduler = self.live_scheduler()
+        if scheduler is not None: scheduler._on_success(self.task_id, count)
 
     @Slot(str)
     def failure(self, error):
-        if self.valid(): self.scheduler._on_failure(self.task_id, error)
+        scheduler = self.live_scheduler()
+        if scheduler is not None: scheduler._on_failure(self.task_id, error)
 
     @Slot()
     def finished(self):
-        if self.valid(): self.scheduler._worker_finished(self.task_id)
+        scheduler = self.live_scheduler()
+        if scheduler is not None: scheduler._worker_finished(self.task_id)
 
 
 class DownloadScheduler(QObject):

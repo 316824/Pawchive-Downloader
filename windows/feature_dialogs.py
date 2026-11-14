@@ -86,6 +86,14 @@ class CloseChoice(QDialog):
     def finish(self,choice):
         self.choice=choice; self.accept()
 
+    def showEvent(self,event):
+        super().showEvent(event)
+        def center():
+            parent=self.parentWidget()
+            if parent is not None:
+                self.move(parent.frameGeometry().center()-self.rect().center())
+        QTimer.singleShot(0,center)
+
 
 class ResumeChoice(QDialog):
     def __init__(self,parent,job):
@@ -514,6 +522,11 @@ class CheckInDialog(QDialog):
         dialog.exec(); dialog.deleteLater()
 
     def _dispatch_recommendation(self,data,kind):
+        confirm=getattr(self.parent_window,'confirm_recommended_download',None)
+        if callable(confirm):
+            self.accept()
+            QTimer.singleShot(0,lambda:confirm(data,kind))
+            return
         if kind=='post':
             url=str(data.get('url') or '')
         else:

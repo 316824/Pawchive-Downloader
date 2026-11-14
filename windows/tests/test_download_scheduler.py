@@ -3,11 +3,12 @@ from pathlib import Path
 import sys
 import time
 import unittest
+import weakref
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QCoreApplication, QObject, Signal, QThread
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal, QThread
 
 from download_scheduler import DownloadScheduler, has_direct_attachment
 
@@ -241,6 +242,12 @@ class DownloadSchedulerTests(unittest.TestCase):
         self.assertEqual(task.state, 'completed')
         self.assertFalse(self.scheduler._workers)
         self.assertTrue(all(thread == self.scheduler.thread() for thread in calls))
+        # The relay's queued delete must not keep its Qt parent alive through
+        # a Python ownership cycle or re-enter that parent's child destructor.
+        scheduler_ref = weakref.ref(self.scheduler)
+        self.scheduler = None
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertIsNone(scheduler_ref())
 
     def test_bulk_add_emits_only_one_queue_change(self):
         changes = []

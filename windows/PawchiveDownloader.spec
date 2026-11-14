@@ -14,7 +14,9 @@ a = Analysis(
     # These modules are imported from menu/dialog callbacks, so keeping them
     # explicit makes the frozen build independent of PyInstaller's optional
     # function-scope import analysis.
-    hiddenimports=['artist_cards', 'popular_features', 'subscriptions', 'subscription_ui'],
+    hiddenimports=['artist_cards', 'popular_features', 'subscriptions', 'subscription_ui',
+                   'queue_operations', 'queue_failure_ui','download_plan',
+                   'update_checker','artist_migration'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(directory / 'runtime_windows_icu.py')],
@@ -33,4 +35,5 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon=str(directory / '1.ico'),
+    version=str(directory / 'version_info.txt'),
 )

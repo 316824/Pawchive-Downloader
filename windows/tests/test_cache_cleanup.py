@@ -12,6 +12,20 @@ from download_pawchive_images import cleanup_stale_cache_dirs
 
 
 class CacheCleanupTests(unittest.TestCase):
+    def test_startup_sweeper_keeps_even_old_currently_displayed_previews(self):
+        import popular_features
+        with tempfile.TemporaryDirectory(prefix='pawchive_cache_test_') as folder:
+            active=Path(folder)/'pawchive_preview_active123'
+            orphan=Path(folder)/'pawchive_preview_orphan123'
+            for item in (active,orphan):
+                item.mkdir(); (item/'image.png').write_bytes(b'preview')
+                os.utime(item,(1,1))
+            with patch('download_pawchive_images.tempfile.gettempdir',return_value=folder), \
+                 patch.object(popular_features,'active_preview_paths',return_value={active}):
+                self.assertEqual(cleanup_stale_cache_dirs(now=200000),1)
+            self.assertTrue(active.exists())
+            self.assertFalse(orphan.exists())
+
     def test_stale_cache_cleanup_keeps_recent_and_active_directories(self):
         with tempfile.TemporaryDirectory(prefix='pawchive_cache_test_') as folder:
             root = Path(folder)

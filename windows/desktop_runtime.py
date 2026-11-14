@@ -273,6 +273,12 @@ class DesktopRuntime(QObject):
         if worker and worker.isRunning():worker.preserve_on_interrupt=True
 
     def request_exit(self):
+        if self.window is not None and self.window.busy:
+            choice=QMessageBox.question(self.window,'退出 Pawchive',
+                '检测到当前下载任务正在进行，是否继续退出？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if choice != QMessageBox.StandardButton.Yes: return
         self.prepare_exit(); self.window.close()
 
     def finish_exit(self):
@@ -421,6 +427,15 @@ class DesktopRuntime(QObject):
         if not jobs:return
         from feature_dialogs import ResumeChoice
         jobs=sorted(jobs,key=lambda value:value.get('updated',0),reverse=True)
+        # Restore one plan at a time; unrelated roots/artists can carry
+        # different folder and numbering choices and must never be merged.
+        first=jobs[0].get('config',{})
+        if first.get('queue_task'):
+            keys=('folder','profile','order','by_title','queue_rename_order')
+            batch=first.get('batch_id')
+            jobs=[job for job in jobs if job.get('config',{}).get('queue_task') and
+                  (job['config'].get('batch_id')==batch if batch else
+                   all(job['config'].get(key)==first.get(key) for key in keys))]
         dialog=ResumeChoice(self.window,jobs)
         try:dialog.exec(); choice=dialog.choice
         finally:

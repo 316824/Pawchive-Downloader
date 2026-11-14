@@ -4,11 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import (QByteArray, QEvent, QMimeData, QPoint, QRect, QRectF, QSize,
-    Qt, QSignalBlocker, Signal)
+    Qt, QSignalBlocker, Signal, QTimer)
 from PySide6.QtGui import (QColor, QDrag, QIcon, QKeySequence, QPainter, QPainterPath,
     QPixmap, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
-    QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+    QLineEdit, QMenu, QComboBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
     QTextEdit, QVBoxLayout, QWidget, QBoxLayout, QApplication, QAbstractButton,
     QRubberBand)
 
@@ -235,7 +235,7 @@ class QueueItemWidget(QFrame):
     def __init__(self, item=None, progress_class=None, parent=None):
         super().__init__(parent)
         self.setObjectName('queueItem')
-        self.setMinimumHeight(92)
+        self.setFixedHeight(100)
         self.setMouseTracking(True)
         self._press_pos = None
         self._selected = False
@@ -305,9 +305,11 @@ class QueueItemWidget(QFrame):
         button = QPushButton(text)
         button.setObjectName('queueAction')
         button.setFixedSize(25, 25)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setToolTip(action)
         button.setAccessibleName(action)
-        button.clicked.connect(lambda: self.actionRequested.emit(self.item_id, action))
+        button.clicked.connect(lambda: self.actionRequested.emit(self.item_id,
+            'resume' if action=='pause' and button.text()=='▶' else action))
         return button
 
     @staticmethod
@@ -375,8 +377,9 @@ class QueueItemWidget(QFrame):
         self.pause_button.setText('Ⅱ' if status == 'running' else '▶')
         self.cancel_button.setVisible(status not in self.TERMINAL and status not in {'failed', 'paused'})
         self.retry_button.setVisible(status in {'failed'})
-        self.setProperty('queueState', status)
-        self._polish()
+        if self.property('queueState') != status:
+            self.setProperty('queueState', status)
+            self._polish()
 
     def set_language(self, language):
         self.language = language if language in COPY else '简体中文'
@@ -413,6 +416,11 @@ class QueueItemWidget(QFrame):
         if style is not None:
             style.unpolish(self)
             style.polish(self)
+            # The failure selector depends on the ancestor frame property;
+            # Qt does not repolish descendants when that property changes.
+            style.unpolish(self.status)
+            style.polish(self.status)
+            self.status.update()
         self.update()
 
     def mousePressEvent(self, event):
@@ -458,6 +466,10 @@ class DownloadQueueWidget(QFrame):
         self._selected = set()
         self._rubber_origin = None
         self._rubber = None
+        self._pending_items = []
+        self._row_timer = QTimer(self)
+        self._row_timer.setInterval(8)
+        self._row_timer.timeout.connect(self._populate_rows)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -508,6 +520,9 @@ class DownloadQueueWidget(QFrame):
 
     def set_items(self, items):
         normalized = list(items or [])
+        bar=self.scroll.verticalScrollBar()
+        old_value=bar.value()
+        self.body.setUpdatesEnabled(False)
         wanted = []
         for item in normalized:
             row_id = QueueItemWidget._item_value(item, 'id', 'key', 'post_url', 'url', default='')
@@ -517,15 +532,31 @@ class DownloadQueueWidget(QFrame):
         for row_id in list(self._order):
             if row_id not in wanted_ids:
                 self.remove_item(row_id, emit=False)
+        self._pending_items=[]
         for index, (row_id, item) in enumerate(wanted):
             row = self._rows.get(row_id)
             if row is None:
-                row = QueueItemWidget(item, self.progress_class, self.body)
-                self._insert_row(row, index)
+                self._pending_items.append((index,item))
             else:
-                row.set_item(item)
+                if row.item != item:
+                    row.set_item(item)
                 self._move_row_local(row_id, index)
+        self.body.setUpdatesEnabled(True)
+        bar.setValue(old_value)
+        if self._pending_items:
+            self._populate_rows()
+            self._row_timer.start()
         self._emit_selection()
+
+    def _populate_rows(self):
+        pending=self._pending_items[:8]
+        del self._pending_items[:8]
+        for index,item in pending:
+            row_id=str(QueueItemWidget._item_value(item,'id',default=''))
+            if row_id in self._rows: continue
+            row=QueueItemWidget(item,self.progress_class,self.body)
+            self._insert_row(row,index)
+        if not self._pending_items: self._row_timer.stop()
 
     def upsert_item(self, item, index=None):
         row_id = str(QueueItemWidget._item_value(item, 'id', 'key', 'post_url', 'url', default='') or id(item))
@@ -563,6 +594,7 @@ class DownloadQueueWidget(QFrame):
         return True
 
     def clear_items(self):
+        self._row_timer.stop(); self._pending_items=[]
         for item_id in list(self._order):
             self.remove_item(item_id, emit=False)
         self._order.clear()
@@ -572,6 +604,8 @@ class DownloadQueueWidget(QFrame):
     def _move_row_local(self, item_id, index):
         item_id = str(item_id)
         if item_id not in self._rows:
+            return False
+        if 0 <= index < len(self._order) and self._order[index] == item_id:
             return False
         old = self._order.index(item_id)
         index = max(0, min(int(index), len(self._order) - 1))
@@ -914,6 +948,13 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     options = QVBoxLayout(w.options_panel)
     options.setContentsMargins(0, 5, 0, 0)
     options.setSpacing(14)
+    content_row=QHBoxLayout()
+    content_row.addWidget(QLabel('下载内容'))
+    w.content_combo=QComboBox()
+    for name,value in (('图片与附件','all'),('仅图片','images'),('仅直链附件','attachments')):
+        w.content_combo.addItem(name,value)
+    content_row.addWidget(w.content_combo,1)
+    options.addLayout(content_row)
     ordering = QHBoxLayout()
     w.order_label = text_label('', 'optionLabel')
     ordering.addWidget(w.order_label)
@@ -1042,13 +1083,15 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.status.setWordWrap(True)
     w.status.setMinimumHeight(28)
     w.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-    state.addWidget(w.status)
+    status_row=QHBoxLayout()
+    status_row.addWidget(w.status,1)
     controls = QHBoxLayout()
     w.open_folder_button = GlowButton()
     w.open_folder_button.setMinimumHeight(36)
     w.open_folder_button.clicked.connect(w.open_download_folder)
     w.open_folder_button.hide()
-    controls.addWidget(w.open_folder_button)
+    status_row.addWidget(w.open_folder_button)
+    state.addLayout(status_row)
     w.stop_button = QPushButton()
     w.stop_button.setMinimumHeight(36)
     w.stop_button.setObjectName('stopButton')
@@ -1090,6 +1133,15 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.queue_cancel_selected_button.clicked.connect(lambda: getattr(w,'handle_queue_selection_action',lambda *_: None)('cancel'))
     queue_header.addWidget(w.queue_cancel_selected_button)
     queue_box.addLayout(queue_header)
+    queue_tools=QHBoxLayout()
+    w.queue_pause_all_button=QPushButton('全部暂停')
+    w.queue_pause_all_button.clicked.connect(lambda: getattr(w,'toggle_queue_pause_all',lambda:None)())
+    w.queue_failures_button=QPushButton('失败任务')
+    w.queue_failures_button.clicked.connect(lambda: getattr(w,'show_failed_queue',lambda:None)())
+    queue_tools.addWidget(w.queue_pause_all_button)
+    queue_tools.addWidget(w.queue_failures_button)
+    queue_tools.addStretch(1)
+    queue_box.addLayout(queue_tools)
     w.download_queue = DownloadQueueWidget(RainbowProgress, w.queue_card)
     w.download_queue.setMinimumHeight(150)
     w.download_queue.actionRequested.connect(
@@ -1132,7 +1184,17 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
 
     footer = QHBoxLayout()
     w.footer_hint = text_label('', 'footerHint')
-    footer.addWidget(w.footer_hint)
+    footer_left=QVBoxLayout()
+    footer_left.setSpacing(0)
+    footer_left.addWidget(w.footer_hint)
+    versions=QHBoxLayout()
+    versions.addWidget(text_label('v1.3','footerHint'))
+    w.update_button=QPushButton()
+    w.update_button.setMaximumWidth(230)
+    versions.addWidget(w.update_button)
+    versions.addStretch(1)
+    footer_left.addLayout(versions)
+    footer.addLayout(footer_left,1)
     footer.addStretch(1)
     w.credit = RainbowCredit('千泽音奈  ·  QQ：3412892533')
     w.credit.setMinimumWidth(260)
@@ -1274,6 +1336,7 @@ def apply_style(w, dark, skin='default'):
         QLabel#queueThumbnail {{background:{p['hover']};color:{p['muted']};border:1px solid {p['line']};border-radius:9px;font-size:22px;}}
         QLabel#queueTitle {{font-size:13px;font-weight:600;}}
         QLabel#queueStatus {{color:{p['accent']};font-size:11px;}}
+        QFrame#queueItem[queueState="failed"] QLabel#queueStatus {{color:#ef6378;font-weight:600;}}
         QLabel#queuePercent {{color:{p['text']};font-size:12px;font-weight:600;}}
         QLabel#queueDetail {{color:{p['small']};font-size:10px;}}
         QLabel#queueCount {{color:{p['muted']};font-size:11px;}}
@@ -1319,6 +1382,11 @@ def apply_style(w, dark, skin='default'):
         QScrollBar::handle:vertical:hover {{background:{p['small']};}}
         QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {{height:0;}}
         QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical {{background:transparent;}}
+        QScrollBar:horizontal {{background:transparent;height:9px;margin:0 4px;}}
+        QScrollBar::handle:horizontal {{background:{p['line']};border-radius:4px;min-width:40px;}}
+        QScrollBar::handle:horizontal:hover {{background:{p['small']};}}
+        QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal {{width:0;}}
+        QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal {{background:transparent;}}
         QToolTip {{background:{p['card']};color:{p['text']};border:1px solid {p['line']};padding:7px;}}
         QMenu {{background:{p['card']};color:{p['text']};border:1px solid {p['line']};padding:6px;}}
         QMenu::item {{padding:10px 18px;border-radius:7px;}}

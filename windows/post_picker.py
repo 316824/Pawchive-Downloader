@@ -9,7 +9,7 @@ import re
 from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPainterPath, QPixmap, QTransform
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+    QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget, QComboBox)
 
 from background_ui import install_background_host
 from desktop_visuals import icon
@@ -161,6 +161,13 @@ class CoverCard(QFrame):
         self.title_label.setStyleSheet(f'background:transparent;border:0;color:{palette["text"]};'
                                       'font-size:12px;')
         layout.addWidget(self.title_label)
+        self.content_choice=QComboBox(self)
+        for name,value in (('图片与附件','all'),('仅图片','images'),('仅直链附件','attachments')):
+            self.content_choice.addItem(name,value)
+        self.content_choice.setToolTip('可对每个图集单独选择下载内容')
+        self.content_choice.currentIndexChanged.connect(
+            lambda _: self.entry.__setitem__('content_mode',self.content_choice.currentData()))
+        layout.addWidget(self.content_choice)
         self.check.toggled.connect(self._changed)
         self._style(True)
         self.check.raise_()
@@ -281,6 +288,8 @@ class PostPicker(QDialog):
         for index, entry in enumerate(self.titles):
             card = CoverCard(entry, checkbox_class, text, self.palette, self.dark, self.body,
                              cover_cache=self._cover_cache)
+            mode=getattr(getattr(parent,'content_combo',None),'currentData',lambda:'all')()
+            card.content_choice.setCurrentIndex(max(0,card.content_choice.findData(mode)))
             card.toggled.connect(lambda checked, n=index: self._set_selected(n, checked))
             self.cards.append(card)
             self.checks.append(card.check)
