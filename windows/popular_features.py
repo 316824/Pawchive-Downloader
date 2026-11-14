@@ -25,6 +25,65 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QGridLayout, QHBoxLayo
     QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
     QVBoxLayout, QFileDialog, QWidget, QGraphicsOpacityEffect, QGraphicsScene,
     QGraphicsView)
+from feature_text import LANGUAGES
+from ui_i18n import localize_dialog, t
+
+
+_COPY={
+    'recommendations':('今日画师推荐','今日畫師推薦','Today’s artist picks','今日のおすすめ作家'),
+    'loading':('正在加载今日热搜…','正在載入今日熱搜…','Loading today’s popular collections…','今日の人気コレクションを読み込み中…'),
+    'interrupted':('今日热搜数据流中断，请稍后再试','今日熱搜資料流中斷，請稍後再試','Today’s popular collections are unavailable. Please try again later.','今日の人気データを取得できません。後でもう一度お試しください。'),
+    'picks':('今日推荐 · {count} 个图集','今日推薦 · {count} 個圖集','Today’s picks · {count} collections','今日のおすすめ · {count} コレクション'),
+    'empty':('今日暂无可用推荐','今日暫無可用推薦','No recommendations are available today','今日のおすすめはまだありません'),
+    'artist':('画师 ID {artist_id}','畫師 ID {artist_id}','Artist ID {artist_id}','作家ID {artist_id}'),
+    'unknown':('未知','未知','Unknown','不明'),
+    'untitled':('未命名图集','未命名圖集','Untitled collection','無題のコレクション'),
+    'cover_loading':('加载封面…','載入封面…','Loading cover…','カバーを読み込み中…'),
+    'cover_missing':('封面暂不可用','封面暫不可用','Cover unavailable','カバーを表示できません'),
+    'preview':('图集预览','圖集預覽','Collection preview','コレクションのプレビュー'),
+    'reading':('正在读取图集内容…','正在讀取圖集內容…','Reading collection contents…','コレクションを読み込み中…'),
+    'post':('下载此图集','下載此圖集','Download collection','このコレクションをダウンロード'),
+    'creator':('搜寻画师全部图集','搜尋畫師全部圖集','Find all artist collections','作家の全コレクションを検索'),
+    'attachments':('附件下载','附件下載','Download attachments','添付ファイルをダウンロード'),
+    'read_failed':('图集读取失败，请稍后重试','圖集讀取失敗，請稍後重試','Could not read the collection. Please try again later.','コレクションを読み込めません。後で再試行してください。'),
+    'images':('共 {count} 张图片','共 {count} 張圖片','{count} images','画像 {count} 枚'),
+    'attachment_count':(' · {count} 个附件',' · {count} 個附件',' · {count} attachments',' · 添付ファイル {count} 件'),
+    'full_failed':('高清图片读取失败，请稍后重试','高畫質圖片讀取失敗，請稍後重試','Could not load the full-size image. Please try again later.','高解像度画像を読み込めません。後で再試行してください。'),
+    'cache_failed':('高清预览缓存无法写入','高畫質預覽快取無法寫入','Could not write the full-size preview cache','高解像度プレビューのキャッシュに書き込めません'),
+    'external_title':('浏览器确认附件','瀏覽器確認附件','Confirm attachment in browser','ブラウザーで添付ファイルを確認'),
+    'external_question':('此附件需在浏览器中确认，是否打开？','此附件需在瀏覽器中確認，是否開啟？','This attachment must be checked in your browser. Open it now?','この添付ファイルはブラウザーでの確認が必要です。開きますか？'),
+    'attachment_choices':('选择附件操作','選擇附件操作','Choose an attachment action','添付ファイルの操作を選択'),
+    'download_attachments':('下载 {count} 个站内附件…','下載 {count} 個站內附件…','Download {count} site attachments…','サイト内の添付ファイル {count} 件をダウンロード…'),
+    'browser':('浏览器查看：','瀏覽器查看：','View in browser: ','ブラウザーで表示：'),
+    'attachment_folder':('选择附件保存位置','選擇附件儲存位置','Choose an attachment save folder','添付ファイルの保存先を選択'),
+    'attachment_downloading':('正在下载附件…','正在下載附件…','Downloading attachments…','添付ファイルをダウンロード中…'),
+    'attachment_progress':('正在下载附件 {index}/{total}：{name}','正在下載附件 {index}/{total}：{name}','Downloading attachment {index}/{total}: {name}','添付ファイルをダウンロード中 {index}/{total}：{name}'),
+    'attachment_done':('附件下载完成：成功 {ok}，失败 {failed}','附件下載完成：成功 {ok}，失敗 {failed}','Attachments finished: {ok} saved, {failed} failed','添付ファイルの処理完了：成功 {ok} 件、失敗 {failed} 件'),
+    'external_attachment_requires_browser':('请在浏览器中确认此附件','請在瀏覽器中確認此附件','Check this attachment in your browser','ブラウザーで添付ファイルを確認してください'),
+    'attachment_is_error_page':('网站返回了错误页面','網站傳回了錯誤頁面','The site returned an error page','サイトからエラーページが返されました'),
+    'attachment_cancelled':('附件下载已取消','附件下載已取消','Attachment download cancelled','添付ファイルのダウンロードを取り消しました'),
+    'incomplete_attachment':('附件接收不完整，请重试','附件接收不完整，請重試','The attachment is incomplete; please retry','添付ファイルが不完全です。再試行してください'),
+    'empty_attachment':('附件内容为空','附件內容為空','The attachment was empty','添付ファイルが空です'),
+    'too_many_name_collisions':('同名文件过多，请选择其它目录','同名檔案過多，請選擇其他目錄','Too many files share this name; choose another folder','同名ファイルが多すぎます。別のフォルダーを選択してください'),
+    'unsafe_download_redirect':('附件跳转到了不支持的地址','附件重新導向至不支援的位址','The attachment redirected to an unsupported address','添付ファイルの転送先に対応していません'),
+    'too_many_redirects':('网站重定向次数过多','網站重新導向次數過多','The site redirected too many times','サイトの転送回数が多すぎます'),
+}
+
+
+def _copy(language,key,**values):
+    index=LANGUAGES.index(language) if language in LANGUAGES else 0
+    return _COPY[key][index].format(**values)
+
+
+def _attachment_error(language,error):
+    # Keep server filenames and HTTP diagnostics intact, but translate our
+    # internal error codes before showing them to users.
+    text=str(error or '')
+    for key in ('external_attachment_requires_browser','attachment_is_error_page',
+                'attachment_cancelled','incomplete_attachment','empty_attachment',
+                'too_many_name_collisions','unsafe_download_redirect','too_many_redirects'):
+        text=text.replace(key,_copy(language,key))
+    return text
 
 BASE_URL = 'https://pawchive.pw'
 POPULAR_URL = BASE_URL + '/posts/popular?date={}&period=day'
@@ -438,6 +497,7 @@ class _WorkerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._workers = set()
+        self._closed = False
         self._closing_result = None
         self._pending_dispatch = None
         self.finished.connect(self._dispatch_after_closed)
@@ -485,6 +545,7 @@ class _WorkerDialog(QDialog):
             if callable(callback): callback(data)
 
     def done(self, result):
+        self._closed = True
         self._closing_result = result
         self._cleanup_on_close()
         for worker in self._workers: worker.requestInterruption()
@@ -511,9 +572,9 @@ def _preview_pixmap(payload):
 
 class RecommendationCard(QPushButton):
     """A translucent ID tag slides from the right edge on hover."""
-    def __init__(self, artist_id='', parent=None):
+    def __init__(self, artist_id='', parent=None, *, language='简体中文'):
         super().__init__(parent)
-        self.artist_tag = QLabel(f'画师 ID {artist_id or "Unknown"}', self)
+        self.artist_tag = QLabel(_copy(language,'artist',artist_id=artist_id or _copy(language,'unknown')), self)
         self.artist_tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.artist_tag.setStyleSheet('QLabel{background:rgba(20,24,36,190);color:#fff;padding:4px 7px;border-radius:7px;}')
         self.artist_tag.adjustSize()
@@ -549,15 +610,16 @@ class PopularRecommendationsDialog(_WorkerDialog):
     def __init__(self, parent=None, *, language='简体中文', on_post=None, on_profile=None):
         super().__init__(parent)
         self.lang, self.on_post, self.on_profile = language, on_post, on_profile
-        self.setWindowTitle('今日画师推荐'); self.resize(860, 640)
+        self.setWindowTitle(_copy(self.lang,'recommendations')); self.resize(860, 640)
         self._covers, self._cover_queue, self._cover_active = {}, deque(), set()
         layout = QVBoxLayout(self)
-        self.status = QLabel('正在加载今日热搜…'); self.status.setWordWrap(True); layout.addWidget(self.status)
+        self.status = QLabel(_copy(self.lang,'loading')); self.status.setWordWrap(True); layout.addWidget(self.status)
         self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True)
         self.body = QWidget(); self.grid = QGridLayout(self.body); self.grid.setSpacing(12)
         self.scroll.setWidget(self.body); layout.addWidget(self.scroll, 1)
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(self.reject); layout.addWidget(close)
+        localize_dialog(self,self.lang)
         self.load()
 
     def load(self):
@@ -568,25 +630,26 @@ class PopularRecommendationsDialog(_WorkerDialog):
 
     @Slot(str)
     def _failed(self, error):
-        if self._closing_result is None:
-            self.status.setText('今日热搜数据流中断，请稍后再试')
+        if not self._closed and self._closing_result is None:
+            self.status.setText(_copy(self.lang,'interrupted'))
 
     @Slot(object)
     def _populate(self, items):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget(): item.widget().deleteLater()
         self._covers.clear(); self._cover_queue.clear()
-        self.status.setText(f'今日推荐 · {len(items)} 个图集' if items else '今日暂无可用推荐')
+        self.status.setText(_copy(self.lang,'picks',count=len(items)) if items else _copy(self.lang,'empty'))
         for index, data in enumerate(items):
-            card = RecommendationCard(data.get('artist_id', ''))
+            card = RecommendationCard(data.get('artist_id', ''),language=self.lang)
             card.setCursor(Qt.CursorShape.PointingHandCursor); card.setMinimumSize(245, 180)
             card.setStyleSheet('QPushButton{text-align:left;padding:8px;border-radius:12px;}QPushButton:hover{border:1px solid #b89af4;}')
             box = QVBoxLayout(card)
-            image = QLabel('加载封面…'); image.setAlignment(Qt.AlignmentFlag.AlignCenter); image.setMinimumHeight(110)
+            image = QLabel(_copy(self.lang,'cover_loading')); image.setAlignment(Qt.AlignmentFlag.AlignCenter); image.setMinimumHeight(110)
             box.addWidget(image)
-            title = QLabel(str(data.get('title') or 'Untitled')); title.setWordWrap(True); box.addWidget(title)
+            title = QLabel(str(data.get('title') or _copy(self.lang,'untitled')))
+            title.setTextFormat(Qt.TextFormat.PlainText); title.setWordWrap(True); box.addWidget(title)
             card.clicked.connect(lambda checked=False, item=dict(data): self.open_post(item))
             self.grid.addWidget(card, index // 3, index % 3)
             if data.get('image_url'):
@@ -595,17 +658,17 @@ class PopularRecommendationsDialog(_WorkerDialog):
         self._pump_covers()
 
     def _pump_covers(self):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         while self._cover_queue and len(self._cover_active) < 3:
             url = self._cover_queue.popleft(); worker = ImageBytesWorker(url)
             worker.result.connect(self._cover_ready); self._cover_active.add(worker); self._track(worker)
 
     @Slot(str, object, str)
     def _cover_ready(self, url, payload, error):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         pix = _preview_pixmap(payload) if payload else QPixmap()
         for label in self._covers.get(url, []):
-            if pix.isNull(): label.setText('封面暂不可用')
+            if pix.isNull(): label.setText(_copy(self.lang,'cover_missing'))
             else: label.setPixmap(pix.scaled(220, 110, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     def _after_worker_finished(self, worker):
@@ -644,21 +707,27 @@ class PostPreviewDialog(_WorkerDialog):
     def __init__(self, parent, data, *, language='简体中文', on_post=None, on_profile=None):
         super().__init__(parent)
         self.data, self.lang, self.on_post, self.on_profile = dict(data), language, on_post, on_profile
-        self.setWindowTitle(str(data.get('title') or '图集预览')); self.resize(900, 680)
+        self.setWindowTitle(str(data.get('title') or _copy(self.lang,'preview'))); self.resize(900, 680)
         self._temp = Path(tempfile.mkdtemp(prefix='pawchive_preview_')).resolve()
         with _PREVIEW_LOCK: _ACTIVE_PREVIEWS.add(self._temp)
         self._images, self._attachments = [], []
         self._thumb_requested, self._image_queue, self._image_active = set(), deque(), {}
         self._full_requested, self._full_cache = {}, {}
-        layout = QVBoxLayout(self); layout.addWidget(QLabel(str(data.get('title') or '图集预览')))
-        self.status = QLabel('正在读取图集内容…'); layout.addWidget(self.status)
+        # Owned timers cannot keep a Python bound method alive after Qt has
+        # already destroyed the list during a rapid close/reopen sequence.
+        self._visible_timer=QTimer(self); self._visible_timer.setSingleShot(True)
+        self._visible_timer.timeout.connect(self._load_visible)
+        layout = QVBoxLayout(self)
+        heading=QLabel(str(data.get('title') or _copy(self.lang,'preview')))
+        heading.setTextFormat(Qt.TextFormat.PlainText); heading.setWordWrap(True); layout.addWidget(heading)
+        self.status = QLabel(_copy(self.lang,'reading')); layout.addWidget(self.status)
         self.list = QListWidget(); self.list.setIconSize(QSize(150, 120)); self.list.itemClicked.connect(self._download_full)
         self.list.viewport().installEventFilter(self)
         self.list.verticalScrollBar().valueChanged.connect(self._load_visible)
         layout.addWidget(self.list, 1)
         buttons = QHBoxLayout()
-        self.download = QPushButton('下载此图集'); self.creator = QPushButton('搜寻画师全部图集')
-        self.attachments = QPushButton('附件下载'); self.attachments.hide(); close = QPushButton('关闭')
+        self.download = QPushButton(_copy(self.lang,'post')); self.creator = QPushButton(_copy(self.lang,'creator'))
+        self.attachments = QPushButton(_copy(self.lang,'attachments')); self.attachments.hide(); close = QPushButton(t(self.lang,'关闭'))
         for button in (self.download, self.creator, self.attachments): buttons.addWidget(button)
         buttons.addStretch(1); buttons.addWidget(close); layout.addLayout(buttons)
         self.download.clicked.connect(lambda: self._dispatch('post')); self.creator.clicked.connect(lambda: self._dispatch('profile'))
@@ -668,25 +737,28 @@ class PostPreviewDialog(_WorkerDialog):
 
     @Slot(object, object, str)
     def _assets_ready(self, images, attachments, error):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         self._images, self._attachments = list(images or []), list(attachments or [])
         if error:
-            self.status.setText('图集读取失败，请稍后重试'); return
-        self.status.setText(f'共 {len(images)} 张图片' + (f' · {len(attachments)} 个附件' if attachments else ''))
+            self.status.setText(_copy(self.lang,'read_failed')); return
+        self.status.setText(_copy(self.lang,'images',count=len(images)) + (_copy(self.lang,'attachment_count',count=len(attachments)) if attachments else ''))
         self.attachments.setVisible(bool(attachments))
         for index, image in enumerate(images):
             item = QListWidgetItem(image.get('name', f'image_{index+1}'))
             item.setData(Qt.ItemDataRole.UserRole, image); item.setSizeHint(QSize(180, 135)); self.list.addItem(item)
-        QTimer.singleShot(0, self._load_visible)
+        if self.isVisible(): self._load_visible()
+        self._visible_timer.start(0)
 
     def eventFilter(self, obj, event):
-        if hasattr(self, 'list') and obj is self.list.viewport() and event.type() in {QEvent.Type.Resize, QEvent.Type.Show}:
-            QTimer.singleShot(0, self._load_visible)
+        if self._closed: return super().eventFilter(obj,event)
+        if (hasattr(self, 'list') and event.type() in {QEvent.Type.Resize, QEvent.Type.Show}
+                and obj is self.list.viewport()):
+            self._visible_timer.start(0)
         return super().eventFilter(obj, event)
 
     @Slot()
     def _load_visible(self, *args):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         viewport = self.list.viewport().rect()
         visible = set()
         for index in range(self.list.count()):
@@ -707,24 +779,24 @@ class PostPreviewDialog(_WorkerDialog):
         self._pump_images()
 
     def _pump_images(self):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         while self._image_queue and len(self._image_active) < 3:
             url, full = self._image_queue.popleft(); worker = ImageBytesWorker(url, full=full)
             worker.result.connect(self._image_ready); self._image_active[worker] = (url, full); self._track(worker)
 
     @Slot(str, object, str)
     def _image_ready(self, url, payload, error):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         full = self._image_active.get(self.sender(), (url, False))[1]
         pix = _preview_pixmap(payload) if payload else QPixmap()
         if full:
             item = self._full_requested.pop(url, None)
             if pix.isNull():
-                self.status.setText('高清图片读取失败，请稍后重试'); return
+                self.status.setText(_copy(self.lang,'full_failed')); return
             target = self._temp / hashlib.sha256(url.encode()).hexdigest()
             try: target.write_bytes(payload)
             except OSError:
-                self.status.setText('高清预览缓存无法写入'); return
+                self.status.setText(_copy(self.lang,'cache_failed')); return
             self._full_cache[url] = target
             if item is not None: self._show_full(item.text(), pix)
         elif not pix.isNull():
@@ -737,7 +809,7 @@ class PostPreviewDialog(_WorkerDialog):
         self._image_active.pop(worker, None); self._pump_images()
 
     def _download_full(self, item):
-        if self._closing_result is not None: return
+        if self._closed or self._closing_result is not None: return
         data = item.data(Qt.ItemDataRole.UserRole) or {}; url = data.get('url', '')
         cached = self._full_cache.get(url)
         if cached and cached.is_file():
@@ -748,9 +820,11 @@ class PostPreviewDialog(_WorkerDialog):
         self._full_requested[url] = item; self._image_queue.appendleft((url, True)); self._pump_images()
 
     def _show_full(self, title, pix):
-        viewer = QDialog(self); viewer.setWindowTitle(title); viewer.resize(900, 700)
+        viewer = QDialog(self); viewer.lang=self.lang
+        viewer.setProperty('pawchiveChromeControls','resize')
+        viewer.setWindowTitle(title); viewer.resize(900, 700)
         body = QVBoxLayout(viewer); body.addWidget(_ZoomView(pix, viewer))
-        close = QPushButton('关闭'); close.clicked.connect(viewer.accept); body.addWidget(close)
+        close = QPushButton(t(self.lang,'关闭')); close.clicked.connect(viewer.accept); body.addWidget(close)
         viewer.exec(); viewer.deleteLater()
 
     def _dispatch(self, kind):
@@ -760,43 +834,46 @@ class PostPreviewDialog(_WorkerDialog):
     def _open_external_attachment(self, item):
         url = _external_url(item.get('url'))
         if not url: return
-        choice = QMessageBox.question(self, '浏览器确认附件', '此附件需在浏览器中确认，是否打开？\n' + url,
+        choice = QMessageBox.question(self, _copy(self.lang,'external_title'), _copy(self.lang,'external_question')+'\n'+url,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if choice == QMessageBox.StandardButton.Yes: QDesktopServices.openUrl(QUrl(url))
 
     def _open_attachment(self):
-        dialog = QDialog(self); dialog.setWindowTitle('选择附件操作'); layout = QVBoxLayout(dialog)
+        dialog = QDialog(self); dialog.lang=self.lang
+        dialog.setWindowTitle(_copy(self.lang,'attachment_choices')); layout = QVBoxLayout(dialog)
         downloadable = [item for item in self._attachments
                         if _file_host(urlparse(str(item.get('url') or '')).hostname)]
         unknown = [item for item in self._attachments if item not in downloadable]
         if downloadable:
-            button = QPushButton(f'下载 {len(downloadable)} 个站内附件…'); layout.addWidget(button)
+            button = QPushButton(_copy(self.lang,'download_attachments',count=len(downloadable))); layout.addWidget(button)
             button.clicked.connect(lambda: self._start_attachments(downloadable, dialog))
         for item in unknown:
-            button = QPushButton('浏览器查看：' + str(item.get('name') or item.get('url')))
+            button = QPushButton(_copy(self.lang,'browser') + str(item.get('name') or item.get('url')))
             button.clicked.connect(lambda checked=False, item=item: self._open_external_attachment(item)); layout.addWidget(button)
-        close = QPushButton('关闭'); close.clicked.connect(dialog.accept); layout.addWidget(close)
+        close = QPushButton(t(self.lang,'关闭')); close.clicked.connect(dialog.accept); layout.addWidget(close)
         dialog.exec(); dialog.deleteLater()
 
     def _start_attachments(self, items, chooser=None):
-        folder = QFileDialog.getExistingDirectory(self, '选择附件保存位置', '')
+        folder = QFileDialog.getExistingDirectory(self, _copy(self.lang,'attachment_folder'), '',
+            options=QFileDialog.Option.DontUseNativeDialog)
         if not folder: return
         if chooser: chooser.accept()
-        self.attachments.setEnabled(False); self.status.setText('正在下载附件…')
+        self.attachments.setEnabled(False); self.status.setText(_copy(self.lang,'attachment_downloading'))
         worker = AttachmentDownloadWorker(items, folder); self._attachment_worker = worker
         worker.progress.connect(self._attachment_progress); worker.result.connect(self._attachment_done); self._track(worker)
 
     @Slot(int, int, str)
     def _attachment_progress(self, index, total, name):
-        if self._closing_result is None: self.status.setText(f'正在下载附件 {index}/{total}：{name}')
+        if not self._closed and self._closing_result is None: self.status.setText(_copy(self.lang,'attachment_progress',index=index,total=total,name=name))
 
     @Slot(int, int, str)
     def _attachment_done(self, ok, failed, error):
-        if self._closing_result is None:
+        if not self._closed and self._closing_result is None:
             self.attachments.setEnabled(True)
-            self.status.setText(f'附件下载完成：成功 {ok}，失败 {failed}' + (f'\n{error}' if error else ''))
+            self.status.setText(_copy(self.lang,'attachment_done',ok=ok,failed=failed) + ('\n'+_attachment_error(self.lang,error) if error else ''))
 
     def _cleanup_on_close(self):
+        self._visible_timer.stop()
         self._image_queue.clear(); self._full_requested.clear(); self._full_cache.clear()
         shutil.rmtree(self._temp, ignore_errors=True)
         with _PREVIEW_LOCK: _ACTIVE_PREVIEWS.discard(self._temp)
