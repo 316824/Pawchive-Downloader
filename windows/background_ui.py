@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import (QBuffer, QEvent, QObject, QPoint, QPointF, QRectF, Qt,
+from PySide6.QtCore import (QBuffer, QEvent, QObject, QPoint, QPointF, QRectF, Qt, QTimer,
                             Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QImageReader, QPainter,
                            QPainterPath, QPen, QPixmap)
@@ -115,6 +115,10 @@ class CropView(QGraphicsView):
         self.handle_item = None
         self.image_size = None
         self._fit_pending = False
+        self._auto_fit = True
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_image_to_view)
         self._interaction = None
         self._last_scene = QPointF()
         self._last_view = QPoint()
@@ -161,10 +165,39 @@ class CropView(QGraphicsView):
         self.scene_obj.addItem(self.handle_item)
         self.scene_obj.setSceneRect(bounds)
         self._sync_handle()
-        self._fit_pending = True
-        self.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
-        self._fit_pending = False
+        self._auto_fit = True
+        self._schedule_fit()
         self.cropChanged.emit()
+
+    def _schedule_fit(self):
+        if self._auto_fit and self.image_item is not None:
+            self._fit_timer.start(0)
+
+    def _fit_image_to_view(self):
+        # Before the dialog is shown, Qt can report a 96x26 viewport even
+        # though the layout will give it hundreds of pixels. Fit only after
+        # geometry events settle; loading an existing background must not
+        # keep that tiny initial scale for the lifetime of the editor.
+        if (not self._auto_fit or self._fit_pending or self.image_item is None
+                or not self.isVisible()):
+            return
+        self._fit_pending = True
+        try:
+            self.fitInView(self.scene_obj.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        finally:
+            self._fit_pending = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_fit()
+
+    def _keep_user_view(self):
+        self._auto_fit = False
+        self._fit_timer.stop()
 
     def _sync_handle(self):
         if self.crop_item is None or self.handle_item is None:
@@ -211,6 +244,7 @@ class CropView(QGraphicsView):
         factor = 1.15 if delta > 0 else 1 / 1.15
         current = self.transform().m11()
         if .08 <= current * factor <= 12:
+            self._keep_user_view()
             self.scale(factor, factor)
         event.accept()
 
@@ -227,10 +261,12 @@ class CropView(QGraphicsView):
                 self._interaction = 'move'
             else:
                 self._interaction = 'pan'
+                self._keep_user_view()
             event.accept()
             return
         if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton):
             self._interaction = 'pan'
+            self._keep_user_view()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -261,29 +297,89 @@ class CropView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
 
+def _capture_window_controls(host):
+    """Capture visible controls once; keep the live host and its settings intact."""
+    if host is None or host.width() <= 0 or host.height() <= 0:
+        return QImage()
+    hidden = []
+    surface = getattr(host, '_set_custom_background_surface', None)
+    original_custom = bool(host.property('customBackground'))
+    try:
+        # Rendering children only omits the root's opaque default theme. The
+        # background layer and transient particles must not enter this image.
+        for name in ('background_layer', '_background_layer', 'overlay',
+                     '_pawchive_chrome_border'):
+            widget = getattr(host, name, None)
+            if isinstance(widget, QWidget) and not widget.isHidden():
+                hidden.append(widget)
+                widget.hide()
+        if callable(surface):
+            surface(True)
+        scale = min(1.0, 1200.0 / max(host.width(), host.height()))
+        image = QImage(max(1, round(host.width() * scale)),
+                       max(1, round(host.height() * scale)),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        try:
+            painter.scale(scale, scale)
+            host.render(painter, QPoint(), renderFlags=QWidget.RenderFlag.DrawChildren)
+        finally:
+            painter.end()
+        return image
+    except RuntimeError:
+        # A dialog may have closed between selecting the page and opening
+        # its editor. A background-only preview remains safe in that case.
+        return QImage()
+    finally:
+        if callable(surface):
+            surface(original_custom)
+        for widget in hidden:
+            widget.show()
+
+
 class CropWindowPreview(QWidget):
-    """Render the crop as it will appear inside the target window.
+    """Paint the same letterboxed crop/mask used at runtime, with actual controls."""
 
-    The editor keeps the original image in memory while it is open, so this
-    preview can repaint from the normalized crop on every drag/resize without
-    writing temporary files or reloading the source image.
-    """
-
-    def __init__(self, target_aspect=1.25, parent=None):
+    def __init__(self, target_aspect=1.25, parent=None, *, target_window=None,
+                 overlay=DEFAULT_OVERLAY):
         super().__init__(parent)
         self.target_aspect = max(.2, min(5.0, float(target_aspect or 1.25)))
         self.source_image = QImage()
+        self._source_key = None
+        self._source_size = None
         self.crop_rect = QRectF()
+        self.overlay = normalize_overlay(overlay)
+        self.controls = _capture_window_controls(target_window)
         self.setMinimumSize(250, 220)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_source(self, image):
-        self.source_image = image if isinstance(image, QImage) else QImage()
+        key = image.cacheKey() if isinstance(image, QImage) else None
+        if key == self._source_key:
+            return
+        self._source_key = key
+        self._source_size = image.size() if isinstance(image, QImage) else None
+        # Dragging the crop must not copy/decode a 24-megapixel source on each
+        # repaint. The original stays in the editor; this view owns one bound
+        # image and maps source coordinates onto it.
+        self.source_image = (image.scaled(MAX_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION,
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            if isinstance(image, QImage) and max(image.width(), image.height()) > MAX_PREVIEW_DIMENSION
+            else image if isinstance(image, QImage) else QImage())
         self.update()
 
     def set_crop(self, rect):
         self.crop_rect = QRectF(rect) if rect is not None else QRectF()
         self.update()
+
+    def window_rect(self):
+        outer = QRectF(self.rect()).adjusted(10, 10, -10, -10)
+        available = outer.adjusted(10, 30, -10, -10)
+        width = min(available.width(), available.height() * self.target_aspect)
+        height = width / self.target_aspect
+        return QRectF(available.center().x() - width / 2,
+                      available.center().y() - height / 2, width, height)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -295,47 +391,42 @@ class CropWindowPreview(QWidget):
             painter.setPen(QPen(QColor(184, 154, 244, 180), 1.5))
             painter.setBrush(QBrush(QColor('#121a2a')))
             painter.drawRoundedRect(outer, 14, 14)
-            window = outer.adjusted(10, 30, -10, -10)
-            if window.width() / max(1.0, window.height()) > self.target_aspect:
-                width = window.height() * self.target_aspect
-                window = QRectF(window.center().x() - width / 2, window.top(), width, window.height())
-            else:
-                height = window.width() / self.target_aspect
-                window = QRectF(window.left(), window.center().y() - height / 2, window.width(), height)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor('#070a10')))
-            painter.drawRoundedRect(window, 9, 9)
-            if not self.source_image.isNull() and self.crop_rect.width() > 1 and self.crop_rect.height() > 1:
-                source = self.crop_rect.intersected(QRectF(self.source_image.rect()))
-                # Render an explicit cropped/scaled image instead of relying
-                # on the QRectF/QImage overload.  The latter differs between
-                # Qt 6 builds and could leave the preview blank while the
-                # editor itself continued to work.  Keeping the crop in a
-                # bounded QImage also makes the preview deterministic and
-                # avoids retaining a second full-size source pixmap.
+            window = self.window_rect()
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(window, 9, 9)
+            painter.setClipPath(clip)
+            painter.fillRect(window, QColor('#070a10'))
+            if (not self.source_image.isNull() and self._source_size is not None
+                    and self.crop_rect.width() > 1 and self.crop_rect.height() > 1):
+                sx = self.source_image.width() / self._source_size.width()
+                sy = self.source_image.height() / self._source_size.height()
+                source = QRectF(self.crop_rect.x()*sx, self.crop_rect.y()*sy,
+                                self.crop_rect.width()*sx, self.crop_rect.height()*sy)
+                source = source.intersected(QRectF(self.source_image.rect()))
                 cropped = self.source_image.copy(source.toAlignedRect())
                 if not cropped.isNull():
-                    scaled = cropped.scaled(
-                        max(1, int(window.width())), max(1, int(window.height())),
-                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                    # Runtime uses KeepAspectRatio and dark side bars, so a
+                    # freely resized crop must never be stretched here.
+                    scaled = cropped.scaled(window.size().toSize(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation)
-                    painter.save()
-                    clip = QPainterPath()
-                    clip.addRoundedRect(window, 9, 9)
-                    painter.setClipPath(clip)
-                    painter.drawImage(window.topLeft(), scaled)
-                    # Match the runtime's dark readability mask in the preview.
-                    painter.fillRect(window, QColor(5, 8, 14, 92))
-                    painter.restore()
+                    origin = QPointF(window.center().x()-scaled.width()/2,
+                                     window.center().y()-scaled.height()/2)
+                    painter.drawImage(origin, scaled)
+            painter.fillRect(window, QColor(5, 8, 14, int(255*self.overlay/100)))
+            if not self.controls.isNull():
+                painter.drawImage(window, self.controls)
+            painter.restore()
             painter.setPen(QColor('#eaf0ff'))
             painter.setFont(QFont('Segoe UI', 9, QFont.Weight.DemiBold))
-            painter.drawText(QRectF(outer.left() + 12, outer.top() + 7, outer.width() - 24, 18),
-                             Qt.AlignmentFlag.AlignLeft, '窗口实际预览')
-            painter.setPen(QColor(181, 194, 221))
-            painter.setFont(QFont('Segoe UI', 8))
-            painter.drawText(QRectF(window.left() + 12, window.top() + 12, window.width() - 24, 18),
-                             Qt.AlignmentFlag.AlignLeft, 'Pawchive  ·  当前界面')
+            caption = '窗口实际预览' if not self.controls.isNull() else '背景效果预览'
+            painter.drawText(QRectF(outer.left()+12, outer.top()+7, outer.width()-24, 18),
+                             Qt.AlignmentFlag.AlignLeft, caption)
             painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
+            # The old black brush filled this final outline and hid the whole
+            # image. Always outline without a brush, after restoring the clip.
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(window, 9, 9)
         finally:
             painter.end()
@@ -428,10 +519,13 @@ def install_background_host(host, store, page, *, mode_getter=None):
     layer.show()
     layer.lower()
     store.register_layer(page, layer)
+    host._background_page = page
     host._background_auto_portrait = False
     host._background_previous_size = host.size()
 
     def adjust_portrait(config):
+        if host.isMaximized() or host.isFullScreen():
+            return
         tall = bool(config and float(config.get('aspect', 1.0)) < .82)
         if tall and not host.isVisible() and not host._background_auto_portrait:
             # Dialog constructors often call install_background_host before
@@ -484,7 +578,8 @@ class BackgroundEditorDialog(QDialog):
     """Choose a source image and save a bounded crop preview."""
 
     def __init__(self, parent, store, page='workspace', *, target_aspect=1.25,
-                 initial_source='', initial_crop=None):
+                 initial_source='', initial_crop=None, target_window=None,
+                 overlay=DEFAULT_OVERLAY):
         super().__init__(parent)
         self.store = store
         self.page = str(page)
@@ -504,7 +599,8 @@ class BackgroundEditorDialog(QDialog):
         self.view = CropView(self)
         self.view.setMinimumSize(500, 390)
         editor_row.addWidget(self.view, 2)
-        self.preview = CropWindowPreview(self.target_aspect, self)
+        self.preview = CropWindowPreview(self.target_aspect, self,
+            target_window=target_window, overlay=overlay)
         editor_row.addWidget(self.preview, 1)
         layout.addLayout(editor_row, 1)
         self.coordinates = QLabel('拖动裁剪框，右下角手柄可调整大小；滚轮缩放，空白处拖动平移。')
@@ -721,12 +817,17 @@ class BackgroundSettingsDialog(QDialog):
         initial = config.get('source', '') if config else ''
         initial_crop = config.get('crop') if config else None
         host = self.parentWidget()
-        width = max(1, host.width()) if host else 1180
-        height = max(1, host.height()) if host else 941
+        target = host if self.current_page == 'workspace' else next(
+            (widget for widget in QApplication.topLevelWidgets()
+             if widget.isVisible() and getattr(widget, '_background_page', None) == self.current_page),
+            None)
+        width = max(1, target.width()) if target else 1180
+        height = max(1, target.height()) if target else 941
         editor = BackgroundEditorDialog(
             self, self.store, self.current_page,
             target_aspect=width / height, initial_source=initial,
-            initial_crop=initial_crop)
+            initial_crop=initial_crop, target_window=target,
+            overlay=config.get('overlay', DEFAULT_OVERLAY) if config else DEFAULT_OVERLAY)
         try:
             if editor.exec() == QDialog.DialogCode.Accepted:
                 self.store.set_mode('custom')
