@@ -330,6 +330,11 @@ class ArtistAvatarLoader(QObject):
         self.store=store
         self.worker_class=worker_class or AvatarFetchWorker
         self.workers={}
+        registry=getattr(parent,'_cabinet_avatar_workers',None) if parent is not None else None
+        if registry is None:
+            registry={}
+            if parent is not None: parent._cabinet_avatar_workers=registry
+        self._registry=registry
         self._wanted=set(); self._queue=[]; self._failed=set(); self._closed=False
         self._defer_timer=QTimer(self); self._defer_timer.setSingleShot(True)
         self._defer_timer.timeout.connect(self._pump)
@@ -355,21 +360,31 @@ class ArtistAvatarLoader(QObject):
 
     def _pump(self):
         if self._closed: return
-        if getattr(self.parent(),'_subscription_check_running',False):
+        parent=self.parent()
+        if (getattr(parent,'_close_when_worker_stops',False) or
+                getattr(getattr(parent,'services',None),'exit_requested',False)):
+            self.close(); return
+        if getattr(parent,'_subscription_check_running',False):
             if self._queue: self._defer_timer.start(500)
             return
         self._defer_timer.stop()
         cards={item['profile']:item for item in list_cards(self.store)}
-        while self._queue and len(self.workers)<self.MAX_WORKERS:
+        pending=len(self._queue)
+        while self._queue and len(self._registry)<self.MAX_WORKERS and pending:
+            pending-=1
             profile=self._queue.pop(0)
             card=cards.get(profile)
             if profile not in self._wanted or card is None or profile in self.workers or self._has_avatar(card):
                 continue
+            if profile in self._registry:
+                self._queue.append(profile)
+                continue
             worker=self.worker_class(self.store.data_dir,profile,self.parent())
-            self.workers[profile]=worker
+            self.workers[profile]=worker; self._registry[profile]=worker
             worker.result.connect(self._on_result)
             worker.finished.connect(self._on_finished)
             worker.start()
+        if self._queue: self._defer_timer.start(500)
 
     @Slot(str,str,str)
     def _on_result(self,profile,path,error):
@@ -385,6 +400,7 @@ class ArtistAvatarLoader(QObject):
         worker=self.sender()
         profile=getattr(worker,'profile','')
         self.workers.pop(profile,None)
+        if self._registry.get(profile) is worker: self._registry.pop(profile,None)
         if worker is not None: worker.deleteLater()
         if self._closed:
             if not self.workers: self.deleteLater()

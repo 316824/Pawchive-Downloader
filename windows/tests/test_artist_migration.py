@@ -244,6 +244,33 @@ class ArtistMigrationTests(unittest.TestCase):
         self.assertFalse(loader.workers)
         parent.deleteLater(); self.qt.processEvents()
 
+    def test_reopened_cabinet_shares_inflight_limits_with_closed_cabinet(self):
+        from artist_cards import ArtistAvatarLoader
+        profiles=[f'https://pawchive.pw/fanbox/user/{i}' for i in range(4)]
+        for profile in profiles: record_download(self.target,profile,posts=0,files=0)
+        created=[]
+        class Worker(QObject):
+            result=Signal(str,str,str)
+            finished=Signal()
+            def __init__(self,data_dir,profile,parent):
+                super().__init__(parent); self.profile=profile; created.append(self)
+            def start(self): pass
+        parent=QWidget()
+        first=ArtistAvatarLoader(self.target,parent,worker_class=Worker)
+        first.request(profiles); first.close()
+        second=ArtistAvatarLoader(self.target,parent,worker_class=Worker)
+        second.request(profiles)
+        self.assertEqual(len(created),3)
+        self.assertEqual(len(parent._cabinet_avatar_workers),3)
+        created[0].finished.emit()
+        second._pump()
+        self.assertEqual(len(parent._cabinet_avatar_workers),3)
+        self.assertEqual(len(created),4)
+        second.close()
+        for worker in list(parent._cabinet_avatar_workers.values()): worker.finished.emit()
+        self.assertFalse(parent._cabinet_avatar_workers)
+        parent.deleteLater(); self.qt.processEvents()
+
     def test_avatar_loader_waits_for_subscription_checks_before_starting_requests(self):
         from artist_cards import ArtistAvatarLoader
         record_download(self.target,PROFILE,posts=0,files=0)
