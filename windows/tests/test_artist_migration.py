@@ -93,6 +93,28 @@ class ArtistMigrationTests(unittest.TestCase):
         self.assertEqual(target_subs.get(PROFILE)['baseline_ts'],300)
         self.assertEqual(len(list_cards(self.target)),2)
 
+    def test_recent_check_cannot_override_metadata_from_newer_download_history(self):
+        code=self.seed()
+        record_download(self.target,PROFILE,posts=30,files=150,latest_download_ts=300)
+        update_artist_metadata(self.target,PROFILE,name='newer downloaded artist name')
+        sub=SubscriptionStore(self.target)
+        sub.add(PROFILE,name='newer downloaded artist name',baseline_ts=300)
+        records=self.target.get_setting('artist_subscriptions')
+        records[0]['latest_ts']=400; records[0]['last_checked_ts']=500
+        self.target.set_setting('artist_subscriptions',records)
+        data=decode_code(code)
+        incoming=next(item for item in data if item['profile']==PROFILE)
+        incoming['name']='old downloaded name checked recently'
+        incoming['subscription']['last_checked_ts']=10000
+        incoming['subscription']['enabled']=False
+        import_code(self.target,envelope({'version':1,'artists':data}))
+        card=self.target.get_setting('artist_cards')[PROFILE]
+        self.assertEqual(card['name'],'newer downloaded artist name')
+        self.assertEqual(card['latest_download_ts'],300)
+        self.assertTrue(sub.get(PROFILE)['enabled'])
+        self.assertEqual(sub.get(PROFILE)['baseline_ts'],300)
+        self.assertEqual(sub.get(PROFILE)['last_checked_ts'],10000)
+
     def test_corrupt_truncated_wrong_schema_or_oversized_codes_are_rejected_without_writes(self):
         code=self.seed()
         record_download(self.target,SECOND,posts=2,files=2)

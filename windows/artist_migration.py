@@ -95,7 +95,10 @@ def _subscription(value, *, strict=False):
 
 def _freshness(card):
     sub=card.get('subscription') or {}
-    return max(card.get('download_ts',0),sub.get('latest_ts',0),sub.get('baseline_ts',0),sub.get('last_checked_ts',0))
+    # An idle background check is not newer downloaded history. Prefer the
+    # actual downloaded post time, then its baseline and remote observation.
+    return (card.get('download_ts',0),sub.get('baseline_ts',0),
+            sub.get('latest_ts',0),sub.get('last_checked_ts',0))
 
 
 def _merge_portable(old,new):
@@ -107,7 +110,7 @@ def _merge_portable(old,new):
     for key in ('posts','files','download_ts'): result[key]=max(old[key],new[key])
     a,b=old.get('subscription'),new.get('subscription')
     if a and b:
-        latest=b if max(b['latest_ts'],b['last_checked_ts'])>=max(a['latest_ts'],a['last_checked_ts']) else a
+        latest=b if (b['baseline_ts'],b['latest_ts'],b['last_checked_ts'])>=(a['baseline_ts'],a['latest_ts'],a['last_checked_ts']) else a
         sub={**latest}
         for key in ('baseline_ts','latest_ts','last_checked_ts'): sub[key]=max(a[key],b[key])
         sub['initialized']=a['initialized'] or b['initialized']
