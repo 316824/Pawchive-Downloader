@@ -74,6 +74,162 @@ function Get-BackgroundArtifacts {
     return @($paths | Where-Object { Test-Path -LiteralPath $_ })
 }
 
+function Get-AbsoluteDirectoryPath {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    if ([string]::IsNullOrWhiteSpace($LiteralPath) -or
+        -not [IO.Path]::IsPathRooted($LiteralPath)) {
+        throw "拒绝相对目录：$LiteralPath"
+    }
+    $full = [IO.Path]::GetFullPath($LiteralPath)
+    $root = [IO.Path]::GetPathRoot($full)
+    $inputRoot = [IO.Path]::GetPathRoot($LiteralPath)
+    if ($LiteralPath -match '^[A-Za-z]:(?:$|[^\\/])' -or
+        $inputRoot -in @('\', '/') -or $full -eq $root) {
+        throw "拒绝驱动器根目录或未限定路径：$LiteralPath"
+    }
+    return $full.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+}
+
+function Assert-RemovalDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedParent,
+        [Parameter(Mandatory = $true)][string]$LeafPattern,
+        [Nullable[datetime]]$BeforeUtc = $null
+    )
+
+    $full = Get-AbsoluteDirectoryPath -LiteralPath $LiteralPath
+    $parent = Get-AbsoluteDirectoryPath -LiteralPath $ExpectedParent
+    $actualParent = [IO.Directory]::GetParent($full).FullName
+    $leaf = [IO.Path]::GetFileName($full)
+    if (-not $actualParent.Equals($parent, [StringComparison]::OrdinalIgnoreCase) -or
+        $leaf -notmatch $LeafPattern) {
+        throw "拒绝超出清理范围的目录：$full"
+    }
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer) { throw "拒绝非目录清理目标：$full" }
+    if ($null -ne $BeforeUtc -and $item.LastWriteTimeUtc -ge $BeforeUtc) {
+        throw "临时目录未超过 24 小时，已保留：$full"
+    }
+    # Reject a junction/symlink in any existing ancestor as well as the target.
+    # GetFullPath normalizes '..' but does not resolve reparse-point targets.
+    $ancestor = $item
+    while ($null -ne $ancestor) {
+        if (($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "拒绝通过重解析点清理目录：$($ancestor.FullName)"
+        }
+        $ancestor = $ancestor.Parent
+    }
+    # Windows PowerShell and PowerShell 7 have differed in recursive junction
+    # handling. Traverse one level at a time and refuse the complete operation
+    # if any descendant is a reparse point; never recurse through that entry.
+    $prefix = $full + [IO.Path]::DirectorySeparatorChar
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($full)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($child in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+            $childPath = [IO.Path]::GetFullPath($child.FullName)
+            if (-not $childPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
+                ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "拒绝包含越界路径或重解析点的目录：$($child.FullName)"
+            }
+            if ($child.PSIsContainer) { $pending.Push($childPath) }
+        }
+    }
+    return $full
+}
+
+function Split-WindowsCommandLine {
+    param([string]$CommandLine)
+
+    if (-not ('PawchiveCleanupCommandLine' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class PawchiveCleanupCommandLine {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(string line, out int count);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+    public static string[] Split(string line) {
+        int count;
+        IntPtr memory = CommandLineToArgvW(line, out count);
+        if (memory == IntPtr.Zero) throw new InvalidOperationException("Cannot parse process command line.");
+        try {
+            string[] result = new string[count];
+            for (int i = 0; i < count; i++)
+                result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size));
+            return result;
+        } finally { LocalFree(memory); }
+    }
+}
+"@
+    }
+    return [PawchiveCleanupCommandLine]::Split($CommandLine)
+}
+
+function Test-PawchivePythonCommand {
+    param([string]$CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    $arguments = @(Split-WindowsCommandLine -CommandLine $CommandLine)
+    for ($index = 1; $index -lt $arguments.Count; $index++) {
+        $argument = $arguments[$index]
+        $leaf = ''
+        try { $leaf = [IO.Path]::GetFileName($argument) }
+        catch [ArgumentException] { } # A Python -c payload need not be a path.
+        # This application-specific filename is safe to recognize even when a
+        # user launches another checkout or passes a relative script path.
+        if ($leaf -ieq 'download_pawchive_images.py') { return $true }
+        if ($argument -eq '-m' -and $index + 1 -lt $arguments.Count -and
+            $arguments[$index + 1] -match '^(?:windows\.)?download_pawchive_images$') { return $true }
+        if ($argument -eq '-c' -and $index + 1 -lt $arguments.Count -and
+            $arguments[$index + 1] -match '\bdownload_pawchive_images\b' -and
+            $arguments[$index + 1] -match '\bdesktop_entry\b') { return $true }
+        if ($leaf -ieq 'desktop_entry.py' -and [IO.Path]::IsPathRooted($argument)) {
+            $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($argument))
+            $knownDirectories = @(
+                [IO.Path]::GetFullPath($PSScriptRoot),
+                [IO.Path]::GetFullPath((Join-Path (Split-Path $PSScriptRoot -Parent) 'PawchiveDownloader\windows'))
+            )
+            foreach ($known in $knownDirectories) {
+                if ($directory.Equals($known, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            }
+        }
+    }
+    return $false
+}
+
+function Get-ApplicationProcesses {
+    $applicationProcesses = [System.Collections.Generic.List[string]]::new()
+    foreach ($process in @(Get-Process -Name 'PawchiveDownloader' -ErrorAction SilentlyContinue)) {
+        $applicationProcesses.Add("PawchiveDownloader (PID $($process.Id))")
+    }
+    $complete = $true
+    $python = @(Get-Process -Name 'python', 'pythonw', 'python3' -ErrorAction SilentlyContinue)
+    if ($python.Count -gt 0) {
+        try {
+            $candidates = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe' OR Name = 'python3.exe'" -ErrorAction Stop)
+            foreach ($process in $candidates) {
+                if ([string]::IsNullOrWhiteSpace($process.CommandLine)) {
+                    $complete = $false
+                    continue
+                }
+                if (Test-PawchivePythonCommand -CommandLine $process.CommandLine) {
+                    $applicationProcesses.Add("$($process.Name) / Pawchive 脚本 (PID $($process.ProcessId))")
+                }
+            }
+        }
+        catch {
+            $complete = $false
+            Write-Warning "无法核实 Python 脚本进程：$($_.Exception.Message)"
+        }
+    }
+    return [pscustomobject]@{ Processes = @($applicationProcesses.ToArray()); ScriptCheckComplete = $complete }
+}
+
 function Get-StaleCacheDirectories {
     param(
         [string]$TempDirectory,
@@ -87,10 +243,15 @@ function Get-StaleCacheDirectories {
     try {
         $entries = Get-ChildItem -LiteralPath $TempDirectory -Directory -Force -ErrorAction Stop
         foreach ($entry in $entries) {
-            if ($entry.Name -notlike 'pawchive_cache_*') { continue }
+            if ($entry.Name -notmatch '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$') { continue }
             if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             if ($entry.LastWriteTimeUtc -ge $BeforeUtc) { continue }
-            $result.Add($entry.FullName)
+            try {
+                $validated = Assert-RemovalDirectory -LiteralPath $entry.FullName -ExpectedParent $TempDirectory `
+                    -LeafPattern '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$' -BeforeUtc $BeforeUtc
+                $result.Add($validated)
+            }
+            catch { Write-Warning "已保留不安全的临时目录：$($_.Exception.Message)" }
         }
     }
     catch {
@@ -99,15 +260,17 @@ function Get-StaleCacheDirectories {
     return $result
 }
 
-$stateDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'PawchiveDownloader'
-$tempDir = [IO.Path]::GetTempPath()
+$localDataDir = Get-AbsoluteDirectoryPath -LiteralPath ([Environment]::GetFolderPath('LocalApplicationData'))
+$stateDir = Get-AbsoluteDirectoryPath -LiteralPath (Join-Path $localDataDir 'PawchiveDownloader')
+$tempDir = Get-AbsoluteDirectoryPath -LiteralPath ([IO.Path]::GetTempPath())
 $staleCacheBefore = [DateTime]::UtcNow.AddHours(-24)
 $registryPath = 'HKCU:\Software\PawchiveTools\PawchiveDownloader'
 $prefix = Get-CurrentUserTaskPrefix
 $tasks = @(Get-ApplicationTasks -Prefix $prefix)
 $backgroundArtifacts = @(Get-BackgroundArtifacts -StateDirectory $stateDir)
 $staleCacheDirectories = @(Get-StaleCacheDirectories -TempDirectory $tempDir -BeforeUtc $staleCacheBefore)
-$processes = @(Get-Process -Name 'PawchiveDownloader' -ErrorAction SilentlyContinue)
+$processCheck = Get-ApplicationProcesses
+$processes = @($processCheck.Processes)
 
 Write-Host 'Pawchive Downloader · 发布者本机记录清理工具' -ForegroundColor Cyan
 Write-Host "数据目录：$stateDir"
@@ -126,6 +289,7 @@ else {
     Write-Host "背景图配置和缩略图缓存：发现 $($backgroundArtifacts.Count) 项（随本机数据一并清理）"
     $backgroundArtifacts | ForEach-Object { Write-Host "  $_" }
 }
+Write-Host '本机状态范围：签到/成就/激活/日程/断点、背景、今日推荐缓存、画师档案/头像、订阅基线与更新忽略设置。'
 Write-Host "注册表项：$registryPath"
 Write-Host "当前用户任务前缀：$prefix"
 if ($tasks.Count -eq 0) {
@@ -136,7 +300,23 @@ else {
     $tasks | ForEach-Object { Write-Host "  $_" }
 }
 if ($processes.Count -gt 0) {
-    throw '检测到 PawchiveDownloader 仍在运行（含托盘后台）。请先完全退出程序，再重新执行本工具。'
+    $processes | ForEach-Object { Write-Host "仍在运行：$_" -ForegroundColor Yellow }
+    throw '检测到 PawchiveDownloader 或其 Python 脚本仍在运行（含托盘后台）。请先完全退出程序，再重新执行本工具。'
+}
+
+if (-not $processCheck.ScriptCheckComplete) {
+    if ($Preview -or $WhatIfPreference) {
+        Write-Warning '未能确认全部 Python 进程。当前仅预览；实际清理前必须完成进程检查。'
+    }
+    else {
+        throw '无法确认 Python 脚本是否仍在使用 Pawchive 数据。请退出相关 Python 进程，或解决进程查询权限后重试。'
+    }
+}
+
+# Validate the explicit state target before any task or filesystem mutation.
+if (Test-Path -LiteralPath $stateDir) {
+    $null = Assert-RemovalDirectory -LiteralPath $stateDir -ExpectedParent $localDataDir `
+        -LeafPattern '^PawchiveDownloader$'
 }
 
 if ($Preview) {
@@ -149,7 +329,8 @@ if ($Force) {
 
 if (-not $Preview -and -not $Force -and -not $WhatIfPreference) {
     Write-Host ''
-    Write-Host '本操作会删除签到/等级/徽章/皮肤、激活、日程、断点、背景配置/缩略图、超过 24 小时的临时缓存和本机设置。' -ForegroundColor Yellow
+    Write-Host '本操作会删除签到/等级/徽章/皮肤、激活、日程、断点、背景、今日推荐缓存、画师档案/头像、订阅记录、更新忽略选择及其它本机设置。' -ForegroundColor Yellow
+    Write-Host '同时清理超过 24 小时的扫描与图集预览临时目录。' -ForegroundColor Yellow
     Write-Host '不会删除用户已下载的图片、附件或下载目录中的 .part 文件。' -ForegroundColor Yellow
     $answer = Read-Host '确认清理请输入 CLEAN，其他输入取消'
     if ($answer -cne 'CLEAN') {
@@ -158,11 +339,23 @@ if (-not $Preview -and -not $Force -and -not $WhatIfPreference) {
     }
 }
 
+# The user may have reopened the app while reviewing the confirmation prompt.
+if (-not $Preview -and -not $WhatIfPreference) {
+    $latestProcessCheck = Get-ApplicationProcesses
+    if ($latestProcessCheck.Processes.Count -gt 0 -or -not $latestProcessCheck.ScriptCheckComplete) {
+        throw '清理前再次检查发现程序仍在运行，或无法确认脚本进程。已停止清理，请完全退出软件后重试。'
+    }
+}
+
 foreach ($task in $tasks) {
     Remove-ApplicationTask -TaskName $task
 }
 
 foreach ($cacheDirectory in $staleCacheDirectories) {
+    # Recheck immediately before recursive deletion in case a directory changed
+    # after the initial inventory or user confirmation.
+    $cacheDirectory = Assert-RemovalDirectory -LiteralPath $cacheDirectory -ExpectedParent $tempDir `
+        -LeafPattern '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$' -BeforeUtc $staleCacheBefore
     if ($PSCmdlet.ShouldProcess($cacheDirectory, '删除过期 Pawchive 临时缓存')) {
         Remove-Item -LiteralPath $cacheDirectory -Recurse -Force
         Write-Host "已删除过期临时缓存：$cacheDirectory" -ForegroundColor Green
@@ -170,6 +363,8 @@ foreach ($cacheDirectory in $staleCacheDirectories) {
 }
 
 if (Test-Path -LiteralPath $stateDir) {
+    $stateDir = Assert-RemovalDirectory -LiteralPath $stateDir -ExpectedParent $localDataDir `
+        -LeafPattern '^PawchiveDownloader$'
     if ($PSCmdlet.ShouldProcess($stateDir, '删除 Pawchive 本机数据目录')) {
         Remove-Item -LiteralPath $stateDir -Recurse -Force
         Write-Host "已删除本机数据目录：$stateDir" -ForegroundColor Green
