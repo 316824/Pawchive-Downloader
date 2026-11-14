@@ -549,15 +549,26 @@ class ArtistCardsDialog(QDialog):
         self.cards.currentItemChanged.connect(lambda *_: self.remove_button.setEnabled(bool(self.cards.currentItem())))
         actions.addWidget(self.add_button); actions.addWidget(self.remove_button); actions.addStretch(1); actions.addWidget(self.prev_button); actions.addWidget(self.page_label); actions.addWidget(self.next_button); layout.addLayout(actions)
         close = QPushButton(tr(self.lang, 'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
+        self.migration_button=QPushButton('数据迁移')
+        self.migration_button.clicked.connect(self.open_migration)
+        actions.insertWidget(2,self.migration_button)
+        self._status_labels={}; self._spinner_phase=0
         self._page=0; self._page_size=20; self.refresh()
+        self._status_timer=QTimer(self); self._status_timer.setInterval(250)
+        self._status_timer.timeout.connect(self._poll_status); self._status_timer.start()
 
     def refresh(self, cards=None):
         from feature_text import reward_tr
-        self.cards.clear()
+        selected=self.cards.currentItem()
+        selected_profile=selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        scroll=self.cards.verticalScrollBar().value()
+        self.cards.clear(); self._status_labels={}
         from artist_cards import paged_cards
         page, total = paged_cards(self.store, self._page, self._page_size)
         self.empty_hint.setVisible(not bool(total))
         max_page=max(0,(total-1)//self._page_size)
+        if self._page>max_page:
+            self._page=max_page; page,total=paged_cards(self.store,self._page,self._page_size)
         self._page=min(self._page,max_page); self.page_label.setText(f'{self._page+1}/{max_page+1}' if total else '0/0')
         self.prev_button.setEnabled(self._page>0); self.next_button.setEnabled(self._page<max_page); self.remove_button.setEnabled(bool(self.cards.currentItem()))
         for card in page:
@@ -581,11 +592,77 @@ class ArtistCardsDialog(QDialog):
                 if not fallback.isNull():
                     item.setIcon(fallback)
             self.cards.addItem(item)
+            from PySide6.QtWidgets import QWidget
+            from PySide6.QtCore import QSize
+            row=QWidget(); row_layout=QHBoxLayout(row); row_layout.setContentsMargins(10,8,10,8)
+            avatar=QLabel(); avatar.setFixedSize(64,64)
+            if not item.icon().isNull(): avatar.setPixmap(item.icon().pixmap(64,64))
+            description=label(item.text()); description.setMinimumWidth(0)
+            marker=QLabel(''); marker.setFixedWidth(24); marker.setAlignment(Qt.AlignmentFlag.AlignTop|Qt.AlignmentFlag.AlignRight)
+            row_layout.addWidget(avatar); row_layout.addWidget(description,1); row_layout.addWidget(marker)
+            row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
+            item.setSizeHint(QSize(0,90)); self.cards.setItemWidget(item,row)
+            self._status_labels[str(card.get('profile',''))]=marker
+            if card.get('profile')==selected_profile: self.cards.setCurrentItem(item)
+        self.cards.verticalScrollBar().setValue(scroll)
+        self._data_signature=self._signature()
+        self._update_markers()
+
+    def _signature(self):
+        from artist_cards import list_cards
+        return tuple(sorted((item['profile'],item.get('name'),item.get('avatar_path'),
+                             item.get('posts'),item.get('files')) for item in list_cards(self.store)))
+
+    def _subscriptions(self):
+        current=getattr(self.parent_window,'subscription_store',None)
+        if current is None:
+            from subscriptions import SubscriptionStore
+            current=SubscriptionStore(self.store)
+        return current
+
+    def _update_markers(self):
+        records={item['profile']:item for item in self._subscriptions().list()}
+        loading=getattr(self.parent_window,'_subscription_loading_profiles',set())
+        frames=('◐','◓','◑','◒')
+        for profile,marker in self._status_labels.items():
+            if profile in loading:
+                marker.setText(frames[self._spinner_phase%4]); marker.setStyleSheet('color:#8da9f5;background:transparent;')
+                marker.setToolTip('正在检查画师更新…')
+            elif records.get(profile,{}).get('unread'):
+                marker.setText('●'); marker.setStyleSheet('color:#f06b85;background:transparent;')
+                marker.setToolTip('有新图集，点击查看更新')
+            else:
+                marker.clear(); marker.setToolTip('')
+
+    def _poll_status(self):
+        if not self.isVisible(): return
+        self._spinner_phase+=1
+        if self._signature()!=getattr(self,'_data_signature',None): self.refresh()
+        else: self._update_markers()
+
+    def open_migration(self):
+        from artist_migration import ArtistMigrationDialog
+        dialog=ArtistMigrationDialog(self,self.store,self._subscriptions())
+        def restored():
+            self._page=0; self.refresh()
+            for name in ('refresh_reward_badge','refresh_subscription_badge','start_subscription_check'):
+                callback=getattr(self.parent_window,name,None)
+                if callable(callback): callback()
+        dialog.changed.connect(restored)
+        try: dialog.exec()
+        finally: dialog.deleteLater()
 
     def open_card(self,item):
         profile=str(item.data(Qt.ItemDataRole.UserRole) or '')
+        record=self._subscriptions().get(profile) or {}
+        callback=getattr(self.parent_window,'confirm_artist_download',None)
+        if callable(callback) and profile:
+            self.accept()
+            callback(profile,updates_after=record.get('baseline_ts') if record.get('unread') else None)
+            return
         handler=getattr(self.parent_window,'handle_link_text',None)
         if callable(handler) and profile:
+            from PySide6.QtWidgets import QMessageBox
             handler(profile,prompt_post=False)
             answer=QMessageBox.question(self,'下载画师图集','是否扫描该画师的全部图集并选择下载？',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No)
             if answer==QMessageBox.StandardButton.Yes:
@@ -600,15 +677,24 @@ class ArtistCardsDialog(QDialog):
         if not profile:return
         try:
             from artist_cards import record_download, update_artist_metadata
-            record_download(self.store,profile,posts=0,files=0); update_artist_metadata(self.store,profile)
+            with self.store._lock:
+                record_download(self.store,profile,posts=0,files=0); update_artist_metadata(self.store,profile)
+                self._subscriptions().add(profile)
         except Exception:return
         self._page=0; self.refresh()
+        check=getattr(self.parent_window,'start_subscription_check',None)
+        if callable(check): check()
 
     def remove_artist(self):
         item=self.cards.currentItem()
         if not item:return
         from artist_cards import remove_card
-        remove_card(self.store,str(item.data(Qt.ItemDataRole.UserRole) or '')); self.refresh()
+        profile=str(item.data(Qt.ItemDataRole.UserRole) or '')
+        with self.store._lock:
+            remove_card(self.store,profile); self._subscriptions().remove(profile)
+        self.refresh()
+        callback=getattr(self.parent_window,'refresh_subscription_badge',None)
+        if callable(callback): callback()
 
     def previous_page(self):
         self._page=max(0,self._page-1); self.refresh()

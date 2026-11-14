@@ -7,6 +7,9 @@ are never used as a path supplied by a web page.
 from __future__ import annotations
 
 import hashlib
+import math
+from contextlib import nullcontext
+from functools import wraps
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -58,6 +61,20 @@ def artist_profile_url(value: str) -> str:
     return normalize_profile(value)
 
 
+def _locked_mutation(method):
+    @wraps(method)
+    def call(store,*args,**kwargs):
+        with getattr(store,'_lock',nullcontext()):
+            return method(store,*args,**kwargs)
+    return call
+
+
+def _safe_timestamp(value):
+    try: result=float(value or 0)
+    except (ValueError,TypeError,OverflowError): return 0.0
+    return result if math.isfinite(result) and result>=0 else 0.0
+
+
 def _safe_cards(value):
     if not isinstance(value, dict):
         return {}
@@ -82,11 +99,14 @@ def _safe_cards(value):
             'unlocked': unlocked,
             'avatar_path': str(card.get('avatar_path') or ''),
             'avatar_status': str(card.get('avatar_status') or 'missing')[:24],
+            'avatar_url': avatar_url(profile),
+            'latest_download_ts': _safe_timestamp(card.get('latest_download_ts',card.get('download_ts',0))),
         }
     return result
 
 
-def record_download(store, profile: str, *, posts=1, files=0):
+@_locked_mutation
+def record_download(store, profile: str, *, posts=1, files=0, latest_download_ts=None):
     """Increment an artist's local counters and return the card state.
 
     The counters are intentionally local and contain no download URLs or
@@ -106,6 +126,8 @@ def record_download(store, profile: str, *, posts=1, files=0):
         files = max(0, min(1_000_000, int(files)))
     except (TypeError, ValueError, OverflowError):
         posts = files = 0
+    if latest_download_ts is not None:
+        card['latest_download_ts']=max(_safe_timestamp(card.get('latest_download_ts')), _safe_timestamp(latest_download_ts))
     previous = card.get('achievement', 'none')
     card['posts'] += posts
     card['files'] += files
@@ -122,7 +144,8 @@ def record_download(store, profile: str, *, posts=1, files=0):
     return card
 
 
-def update_artist_metadata(store, profile: str, *, name=None, avatar_path=None, avatar_status=None):
+@_locked_mutation
+def update_artist_metadata(store, profile: str, *, name=None, avatar_path=None, avatar_status=None, create=False):
     """Merge display metadata into an existing deduplicated card.
 
     Metadata is optional and bounded; a failed page parse therefore leaves a
@@ -132,6 +155,8 @@ def update_artist_metadata(store, profile: str, *, name=None, avatar_path=None, 
     if not profile:
         return None
     cards = _safe_cards(store.get_setting('artist_cards', {}))
+    if profile not in cards and not create:
+        return None  # A stale metadata worker must not recreate a deleted card.
     card = cards.setdefault(profile, {
         'profile': profile, 'artist_id': profile_id(profile), 'name': 'Unknown Artist',
         'posts': 0, 'files': 0, 'achievement': 'none', 'unlocked': [],
@@ -150,6 +175,7 @@ def update_artist_metadata(store, profile: str, *, name=None, avatar_path=None, 
     return dict(card)
 
 
+@_locked_mutation
 def remove_card(store, profile: str):
     profile = normalize_profile(profile)
     cards = _safe_cards(store.get_setting('artist_cards', {}))
@@ -167,14 +193,14 @@ def paged_cards(store, page=0, page_size=20):
 
 class ArtistMetadataWorker(QThread):
     """Fetch artist display name and avatar URL without touching UI."""
-    finished = Signal(str, str, str, str)  # profile, name, avatar_url, error
+    result = Signal(str, str, str, str)  # profile, name, avatar_url, error
 
     def __init__(self, profile, parent=None):
         super().__init__(parent); self.profile = normalize_profile(profile)
 
     def run(self):
         if not self.profile:
-            self.finished.emit('', 'Unknown Artist', '', 'invalid_profile'); return
+            self.result.emit('', 'Unknown Artist', '', 'invalid_profile'); return
         try:
             response = requests.get(self.profile, headers={'User-Agent': 'PawchiveDownloader/1.3'}, timeout=(8, 20))
             response.raise_for_status()
@@ -186,9 +212,9 @@ class ArtistMetadataWorker(QThread):
             src = str(image.get('src') or '') if image else ''
             if src.startswith('/'):
                 src = 'https://pawchive.pw' + src
-            self.finished.emit(self.profile, name[:160] or 'Unknown Artist', src, '')
+            self.result.emit(self.profile, name[:160] or 'Unknown Artist', src, '')
         except Exception as error:
-            self.finished.emit(self.profile, 'Unknown Artist', '', str(error)[:120])
+            self.result.emit(self.profile, 'Unknown Artist', '', str(error)[:120])
 
 
 def list_cards(store):
@@ -229,7 +255,7 @@ def cleanup_cache(store):
 
 class AvatarFetchWorker(QThread):
     """Fetch one avatar with strict host, size and content checks."""
-    finished = Signal(str, str, str)  # profile, local path, error code
+    result = Signal(str, str, str)  # profile, local path, error code
 
     def __init__(self, data_dir, profile, parent=None):
         super().__init__(parent)
@@ -238,7 +264,7 @@ class AvatarFetchWorker(QThread):
 
     def run(self):
         if not self.profile:
-            self.finished.emit('', '', 'invalid_profile')
+            self.result.emit('', '', 'invalid_profile')
             return
         target_dir = self.data_dir / 'artist-cards'
         try:
@@ -275,7 +301,7 @@ class AvatarFetchWorker(QThread):
                 if total == 0:
                     raise ValueError('empty_avatar')
                 temporary.replace(target)
-                self.finished.emit(self.profile, str(target), '')
+                self.result.emit(self.profile, str(target), '')
             finally:
                 session.close()
         except (requests.RequestException, OSError, ValueError) as error:
@@ -283,4 +309,4 @@ class AvatarFetchWorker(QThread):
                 (target_dir / f'{hashlib.sha256(self.profile.encode("utf-8")).hexdigest()}.tmp').unlink(missing_ok=True)
             except (OSError, UnboundLocalError):
                 pass
-            self.finished.emit(self.profile, '', str(error)[:80])
+            self.result.emit(self.profile, '', str(error)[:80])

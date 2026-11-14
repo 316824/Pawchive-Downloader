@@ -111,7 +111,7 @@ class SubscriptionStore:
 
     def __init__(self, state_store):
         self.store = state_store
-        self._lock = threading.RLock()
+        self._lock = getattr(state_store,'_lock',None) or threading.RLock()
 
     def list(self):
         with self._lock:
@@ -179,7 +179,8 @@ class SubscriptionStore:
                 return None
             if latest_ts is not None:
                 latest_value = max(0.0, float(latest_ts))
-                record["latest_ts"] = latest_value
+                record["latest_ts"] = (max(record.get("latest_ts",0.0),latest_value)
+                                       if record.get("initialized",False) else latest_value)
                 # The first successful remote read establishes the real
                 # server-side baseline.  ``add`` uses a local timestamp only
                 # as a temporary placeholder while the network request is
@@ -196,7 +197,26 @@ class SubscriptionStore:
             if avatar_path:
                 record["avatar_path"] = str(avatar_path)[:512]
             if unread is not None:
-                record["unread"] = bool(unread)
+                record["unread"] = bool(record.get("latest_ts",0)>record.get("baseline_ts",0))
+            self._save(records)
+            return dict(record)
+
+    def advance_download(self,profile,timestamp):
+        """Advance only to a post actually downloaded, never an unselected update."""
+        normalized=normalize_profile(profile)
+        try: stamp=float(timestamp)
+        except (ValueError,TypeError,OverflowError): return None
+        import math
+        if not normalized or not math.isfinite(stamp) or stamp<0: return None
+        with self._lock:
+            records=self.list()
+            record=next((item for item in records if item['profile']==normalized),None)
+            if record is None: return None
+            record['baseline_ts']=(max(record.get('baseline_ts',0.0),stamp) if record.get('initialized') else stamp)
+            record['latest_ts']=(max(record.get('latest_ts',0.0),record['baseline_ts'])
+                                 if record.get('initialized') else stamp)
+            record['initialized']=True
+            record['unread']=record['latest_ts']>record['baseline_ts']
             self._save(records)
             return dict(record)
 
