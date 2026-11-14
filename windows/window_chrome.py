@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QEvent, QRect
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QRegion
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QWidget, QSizePolicy
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QToolButton, QWidget, QSizePolicy
+from ui_i18n import language_for, t
 
 
 class ChromeBorder(QWidget):
@@ -22,12 +23,10 @@ class ChromeBorder(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
 
     def eventFilter(self, obj, event):
-        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
-            self.setGeometry(obj.rect())
-            self.raise_()
-            chrome = getattr(obj, '_pawchive_window_chrome', None)
-            if chrome is not None:
-                chrome.setGeometry(0, 0, obj.width(), chrome.height())
+        if obj is self.parentWidget() and event.type() in (
+                QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest,
+                QEvent.Type.WindowStateChange, QEvent.Type.LanguageChange):
+            _sync_chrome_layout(obj)
             _apply_round_mask(obj)
         return super().eventFilter(obj, event)
 
@@ -49,9 +48,10 @@ class ChromeBorder(QWidget):
 class WindowChrome(QFrame):
     """Rounded caption bar with compact, recognizable window actions."""
 
-    def __init__(self, window: QWidget, title: str = ''):
+    def __init__(self, window: QWidget, title: str = '', *, controls='full'):
         super().__init__(window)
-        self.window = window
+        self.host_window = window
+        self.controls = controls
         self.setObjectName('windowChrome')
         self.setFixedHeight(42)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -82,14 +82,17 @@ class WindowChrome(QFrame):
         self.minimize.clicked.connect(window.showMinimized)
         self.maximize.clicked.connect(self.toggle_maximized)
         self.close.clicked.connect(window.close)
+        self.set_controls(controls)
         self._apply_style()
+        self.sync_window_state()
 
     def _button(self, text, tooltip, name):
         button = QToolButton(self)
         button.setObjectName(name)
         button.setText(text)
-        button.setToolTip(tooltip)
-        button.setAccessibleName(tooltip)
+        translated = t(language_for(self.host_window), tooltip)
+        button.setToolTip(translated)
+        button.setAccessibleName(translated)
         button.setFixedSize(30, 30)
         button.setAutoRaise(True)
         return button
@@ -114,24 +117,42 @@ class WindowChrome(QFrame):
 
     def set_title(self, title):
         self.title.setText(str(title or 'Pawchive'))
+        self.sync_window_state()
+
+    def refresh_language(self):
+        self.sync_window_state()
+
+    def set_controls(self, controls):
+        # Forms and confirmations have no useful minimized/maximized state.
+        # Image viewers may explicitly opt into resize controls without
+        # putting a modal tool window into the taskbar.
+        self.controls = controls if controls in {'full', 'resize', 'close'} else 'close'
+        self.minimize.setVisible(self.controls == 'full')
+        self.maximize.setVisible(self.controls in {'full', 'resize'})
 
     def sync_window_state(self):
-        portrait=bool(getattr(self.window,'portrait_mode',False))
-        expanded=self.window.isMaximized() or self.window.isFullScreen()
-        self.maximize.setEnabled(not portrait)
+        portrait=bool(getattr(self.host_window,'portrait_mode',False))
+        expanded=self.host_window.isMaximized() or self.host_window.isFullScreen()
+        language = language_for(self.host_window)
+        self.minimize.setToolTip(t(language,'最小化窗口'))
+        self.close.setToolTip(t(language,'关闭窗口'))
+        self.minimize.setAccessibleName(self.minimize.toolTip())
+        self.close.setAccessibleName(self.close.toolTip())
+        self.maximize.setEnabled(self.controls != 'close' and not portrait)
         self.maximize.setText('❐' if expanded else '□')
-        self.maximize.setToolTip('竖屏模式下请先切回窗口模式' if portrait else
-                                '还原窗口' if expanded else '最大化窗口')
+        self.maximize.setToolTip(t(language,'竖屏模式下请先切回窗口模式' if portrait else
+                                '还原窗口' if expanded else '最大化窗口'))
+        self.maximize.setAccessibleName(self.maximize.toolTip())
 
     def toggle_maximized(self):
-        if getattr(self.window,'portrait_mode',False):
+        if self.controls == 'close' or getattr(self.host_window,'portrait_mode',False):
             return
-        if self.window.isFullScreen() or self.window.isMaximized():
-            self.window.showNormal()
+        if self.host_window.isFullScreen() or self.host_window.isMaximized():
+            self.host_window.showNormal()
             self.maximize.setText('□')
             self.maximize.setToolTip('最大化窗口')
         else:
-            self.window.showMaximized()
+            self.host_window.showMaximized()
             self.maximize.setText('❐')
             self.maximize.setToolTip('还原窗口')
         self.sync_window_state()
@@ -139,7 +160,7 @@ class WindowChrome(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_origin = event.globalPosition().toPoint()
-            self._window_origin = self.window.pos()
+            self._window_origin = self.host_window.pos()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -147,7 +168,7 @@ class WindowChrome(QFrame):
     def mouseMoveEvent(self, event):
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
             delta = event.globalPosition().toPoint() - self._drag_origin
-            self.window.move(self._window_origin + delta)
+            self.host_window.move(self._window_origin + delta)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -165,42 +186,64 @@ class WindowChrome(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
-def install_window_chrome(window: QWidget, *, title: str | None = None) -> WindowChrome:
+def install_window_chrome(window: QWidget, *, title: str | None = None,
+                          controls: str | None = None) -> WindowChrome:
     """Apply shared rounded chrome once and return its caption widget."""
     existing = getattr(window, '_pawchive_window_chrome', None)
+    if controls is not None:
+        window.setProperty('pawchiveChromeControls', controls)
+    controls = controls or window.property('pawchiveChromeControls') or (
+        'close' if isinstance(window, QDialog) else 'full')
     if existing is not None:
         if title is not None:
             existing.set_title(title)
+        existing.set_controls(controls)
+        _sync_chrome_layout(window)
         return existing
     # Frameless windows remove the bright OS border while retaining normal
     # maximize/minimize semantics through the custom controls.
+    window.setProperty('pawchiveChromeInstalling', True)
     window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
     # Let the top-level stylesheet paint the themed surface.  A translucent
     # top-level window leaves the area below the cards black on light themes;
     # the rounded native mask below still clips all four corners without
     # requiring a transparent window surface.
     window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    if isinstance(window, QDialog):
+        # Child controls may ignore a press, but it must stop at this dialog
+        # instead of reaching a parent window's decorative interaction layer.
+        window.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
     window.setProperty('pawchiveChromeSurface', True)
-    bar = WindowChrome(window, title)
-    layout = window.layout()
-    if layout is not None:
-        # The content layouts intentionally keep their own horizontal margins,
-        # but the caption must span the complete window width.  Keep it as a
-        # top-level child and reserve exactly its height in the content area.
-        margins = layout.contentsMargins()
-        layout.setContentsMargins(margins.left(), margins.top() + bar.height(),
-                                   margins.right(), margins.bottom())
-    else:
-        bar.setGeometry(0, 0, window.width(), bar.height())
+    bar = WindowChrome(window, title, controls=controls)
     border = ChromeBorder(window)
     border.setGeometry(window.rect())
-    border.raise_()
-    bar.setGeometry(0, 0, window.width(), bar.height())
-    window.installEventFilter(border)
-    _apply_round_mask(window)
     window._pawchive_window_chrome = bar
     window._pawchive_chrome_border = border
+    window.installEventFilter(border)
+    _sync_chrome_layout(window)
+    _apply_round_mask(window)
+    window.setProperty('pawchiveChromeInstalling', False)
     return bar
+
+
+def _sync_chrome_layout(window):
+    """Reserve caption space once, including layouts created after Polish."""
+    bar = getattr(window, '_pawchive_window_chrome', None)
+    if bar is None:
+        return
+    layout = window.layout()
+    if layout is not None and not layout.property('pawchiveChromeReserved'):
+        margins = layout.contentsMargins()
+        layout.setContentsMargins(margins.left(), margins.top() + bar.height(),
+                                  margins.right(), margins.bottom())
+        layout.setProperty('pawchiveChromeReserved', True)
+    bar.setGeometry(0, 0, window.width(), bar.height())
+    bar.raise_()
+    bar.sync_window_state()
+    border = getattr(window, '_pawchive_chrome_border', None)
+    if border is not None:
+        border.setGeometry(window.rect())
+        border.raise_()
 
 
 def _apply_round_mask(window: QWidget, radius=13):
@@ -213,4 +256,16 @@ def _apply_round_mask(window: QWidget, radius=13):
     window.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
 
-__all__ = ['ChromeBorder', 'WindowChrome', 'install_window_chrome']
+def owns_window(owner, candidate):
+    """Qt's isAncestorOf stops at window boundaries; ownership does not."""
+    seen = set()
+    current = candidate
+    while isinstance(current, QWidget) and id(current) not in seen:
+        if current is owner:
+            return True
+        seen.add(id(current))
+        current = QWidget.parentWidget(current)
+    return False
+
+
+__all__ = ['ChromeBorder', 'WindowChrome', 'install_window_chrome', 'owns_window']

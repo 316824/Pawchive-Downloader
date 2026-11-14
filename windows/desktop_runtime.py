@@ -274,8 +274,9 @@ class DesktopRuntime(QObject):
 
     def request_exit(self):
         if self.window is not None and self.window.busy:
-            choice=QMessageBox.question(self.window,'退出 Pawchive',
-                '检测到当前下载任务正在进行，是否继续退出？',
+            from ui_i18n import t
+            choice=QMessageBox.question(self.window,t(self.language,'退出 Pawchive'),
+                t(self.language,'检测到当前下载任务正在进行，是否继续退出？'),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if choice != QMessageBox.StandardButton.Yes: return
