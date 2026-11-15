@@ -28,6 +28,7 @@ class SubscriptionDialog(QDialog):
         self.store = SubscriptionStore(state_store)
         self.worker = None
         self._shared_worker = False
+        self._check_result_received = False
         self._page = 0
         self._phase = 0
         self._loading_profiles = set()
@@ -178,6 +179,8 @@ class SubscriptionDialog(QDialog):
     def _poll_status(self):
         if not self.isVisible():
             return
+        if self._shared_worker and self._reconcile_finished_shared_check():
+            return
         self._phase += 1
         records = self._records()
         if self._signature(records) != self._data_signature:
@@ -238,6 +241,7 @@ class SubscriptionDialog(QDialog):
         if self.worker is not None and isValid(self.worker) and self.worker.isRunning():
             return
         self.refresh_button.setEnabled(False)
+        self._check_result_received = False
         self.info.setText(self.text('正在后台检查订阅…'))
         starter = getattr(self.parent_window, 'start_subscription_check', None)
         if callable(starter):
@@ -247,8 +251,7 @@ class SubscriptionDialog(QDialog):
             self.worker = getattr(self.parent_window, '_subscription_worker', None)
             self._shared_worker = True
             if self.worker is None or not isValid(self.worker):
-                self.refresh_button.setEnabled(True)
-                self.info.setText(self.text('检查完成。'))
+                self._reconcile_finished_shared_check()
                 return
             self._loading_profiles = set(getattr(self.parent_window, '_subscription_loading_profiles', ()))
         else:
@@ -261,19 +264,50 @@ class SubscriptionDialog(QDialog):
         if not self._shared_worker:
             self.worker.finished.connect(self.worker.deleteLater)
             self.worker.start()
+        else:
+            # The shared worker was started by the parent before the view
+            # could connect. Empty/very fast checks may already have emitted
+            # both result and finished; those past signals cannot be replayed.
+            self._reconcile_finished_shared_check()
+
+    def _reconcile_finished_shared_check(self):
+        from shiboken6 import isValid
+        if not self._shared_worker or self.refresh_button.isEnabled():
+            return False
+        if self.worker is not None and isValid(self.worker) and self.worker.isRunning():
+            return False
+        self.worker = None
+        self._loading_profiles.clear()
+        self.refresh_button.setEnabled(True)
+        if not self._check_result_received:
+            self.info.setText(self.text('检查完成。'))
+        # The worker writes its real results to the store before signaling.
+        # Rebuild from that store instead of depending on a missed UI signal.
+        self.refresh(); self._notify_parent()
+        return True
 
     def _check_finished(self, results):
+        if self.sender() is not None and self.sender() is not self.worker:
+            return
+        self._check_result_received = True
         self._loading_profiles.clear()
         errors = sum(1 for item in results if item.get('error'))
         self.info.setText(self.text('检查完成。') + (' ' + self.text('{count} 位画师暂时无法访问。', count=errors) if errors else ''))
         self.refresh(); self._notify_parent()
 
     def _worker_stopped(self):
-        if self.worker is self.sender():
-            self.worker = None
+        if self.worker is not self.sender():
+            return
+        self.worker = None
+        self._loading_profiles.clear()
         self.refresh_button.setEnabled(True)
+        if not self._check_result_received:
+            self.info.setText(self.text('检查完成。'))
+            self.refresh(); self._notify_parent()
 
     def _refresh_progress(self, profile, *_):
+        if self.sender() is not None and self.sender() is not self.worker:
+            return
         self._loading_profiles.discard(profile)
         self.refresh()
 

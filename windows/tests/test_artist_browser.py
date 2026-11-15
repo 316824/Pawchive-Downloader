@@ -214,6 +214,145 @@ class ArtistBrowserTests(unittest.TestCase):
         checker.finished.emit()
         self.window._subscription_worker = None
 
+    def test_shared_check_finished_before_view_connects_recovers_from_store(self):
+        class Checker(QObject):
+            progress = Signal(str, object)
+            finished_all = Signal(object)
+            finished = Signal()
+            stopped = False
+
+            def isRunning(self): return False
+            def stop(self): self.stopped = True
+
+        subscriptions = SubscriptionStore(self.state)
+        subscriptions.add(PROFILE, baseline_ts=100)
+        checker = Checker(self.window)
+        dialog = SubscriptionDialog(self.window, self.state); self.dialogs.append(dialog)
+
+        def finish_before_connect():
+            subscriptions.set_baseline(PROFILE, 200, unread=True)
+            self.window._subscription_worker = checker
+            self.window._subscription_loading_profiles = {PROFILE}
+            checker.finished_all.emit([dict(profile=PROFILE, error='')])
+            checker.finished.emit()
+
+        try:
+            with patch.object(self.window, 'start_subscription_check', side_effect=finish_before_connect):
+                dialog.check_updates()
+            self.assertIsNone(dialog.worker)
+            self.assertTrue(dialog.refresh_button.isEnabled())
+            self.assertFalse(dialog._loading_profiles)
+            self.assertEqual(dialog.info.text(), dialog.text('检查完成。'))
+            self.assertEqual(dialog._visible_records[PROFILE]['latest_ts'], 200)
+            self.assertTrue(dialog._visible_records[PROFILE]['unread'])
+            self.assertFalse(checker.stopped, 'Reconciliation must never cancel the shared check')
+        finally:
+            self.window._subscription_worker = None
+            self.window._subscription_loading_profiles.clear()
+
+    def test_running_shared_check_waits_for_results_and_native_finish(self):
+        class Checker(QObject):
+            progress = Signal(str, object)
+            finished_all = Signal(object)
+            finished = Signal()
+            running = True
+            stopped = False
+
+            def isRunning(self): return self.running
+            def stop(self): self.stopped = True
+
+        SubscriptionStore(self.state).add(PROFILE, baseline_ts=100)
+        checker = Checker(self.window)
+        self.window._subscription_worker = checker
+        self.window._subscription_loading_profiles = {PROFILE}
+        dialog = SubscriptionDialog(self.window, self.state); self.dialogs.append(dialog)
+        try:
+            dialog.check_updates()
+            self.assertIs(dialog.worker, checker)
+            self.assertFalse(dialog.refresh_button.isEnabled())
+            self.assertFalse(dialog._reconcile_finished_shared_check())
+            checker.finished_all.emit([dict(profile=PROFILE, error='offline')])
+            self.assertFalse(dialog._loading_profiles)
+            result_text = dialog.info.text()
+            self.assertIn(dialog.text('{count} 位画师暂时无法访问。', count=1), result_text)
+            self.assertFalse(dialog.refresh_button.isEnabled(), 'Wait for native finished, not just data')
+            checker.running = False
+            checker.finished.emit()
+            self.assertIsNone(dialog.worker)
+            self.assertTrue(dialog.refresh_button.isEnabled())
+            self.assertEqual(dialog.info.text(), result_text)
+            self.assertFalse(checker.stopped)
+        finally:
+            self.window._subscription_worker = None
+            self.window._subscription_loading_profiles.clear()
+
+    def test_early_shared_result_then_connected_native_finish_clears_loading(self):
+        class Checker(QObject):
+            progress = Signal(str, object)
+            finished_all = Signal(object)
+            finished = Signal()
+            running = True
+
+            def isRunning(self): return self.running
+            def stop(self): raise AssertionError('A view cannot stop a shared check')
+
+        checker = Checker(self.window)
+        dialog = SubscriptionDialog(self.window, self.state); self.dialogs.append(dialog)
+
+        def result_before_connect():
+            self.window._subscription_worker = checker
+            self.window._subscription_loading_profiles = {PROFILE}
+            checker.finished_all.emit([])
+
+        try:
+            with patch.object(self.window, 'start_subscription_check', side_effect=result_before_connect):
+                dialog.check_updates()
+            self.assertFalse(dialog.refresh_button.isEnabled())
+            self.assertEqual(dialog._loading_profiles, {PROFILE})
+            checker.running = False; checker.finished.emit()
+            self.assertTrue(dialog.refresh_button.isEnabled())
+            self.assertFalse(dialog._loading_profiles)
+            self.assertIsNone(dialog.worker)
+            self.assertEqual(dialog.info.text(), dialog.text('检查完成。'))
+        finally:
+            self.window._subscription_worker = None
+            self.window._subscription_loading_profiles.clear()
+
+    def test_poll_recovers_missing_shared_finished_and_ignores_late_old_signals(self):
+        class Checker(QObject):
+            progress = Signal(str, object)
+            finished_all = Signal(object)
+            finished = Signal()
+            running = True
+
+            def isRunning(self): return self.running
+            def stop(self): raise AssertionError('A view cannot stop a shared check')
+
+        old = Checker(self.window)
+        current = Checker(self.window)
+        self.window._subscription_worker = old
+        dialog = SubscriptionDialog(self.window, self.state); self.dialogs.append(dialog)
+        try:
+            dialog.check_updates()
+            old.running = False
+            dialog.show()
+            self.wait(20)
+            dialog._poll_status()
+            self.assertIsNone(dialog.worker)
+            self.assertTrue(dialog.refresh_button.isEnabled())
+            self.window._subscription_worker = current
+            dialog.check_updates()
+            self.assertIs(dialog.worker, current)
+            self.assertFalse(dialog.refresh_button.isEnabled())
+            old.finished_all.emit([dict(error='old failure')]); old.finished.emit()
+            self.assertIs(dialog.worker, current)
+            self.assertFalse(dialog.refresh_button.isEnabled())
+            self.assertEqual(dialog.info.text(), dialog.text('正在后台检查订阅…'))
+        finally:
+            current.running = False; current.finished.emit()
+            self.window._subscription_worker = None
+            self.window._subscription_loading_profiles.clear()
+
     def test_card_and_subscription_views_share_existing_cached_avatar(self):
         avatar = self.image()
         record_download(self.state, PROFILE, posts=1, files=1)
