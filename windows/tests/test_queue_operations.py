@@ -326,5 +326,71 @@ class QueueOperationsTests(unittest.TestCase):
         self.assertEqual(result['file_count'],3)
         self.assertEqual(self.journal.load(result['metadata']['job_id'])['config']['content_mode'],'images')
 
+    def test_initial_checkpoint_status_is_durable_and_default_remains_running(self):
+        running=self.journal.create(self.config)
+        paused=self.journal.create(self.config,status='paused')
+        for invalid in ('completed','failed','',None,[] ):
+            with self.assertRaises(ValueError):
+                self.journal.create(self.config,status=invalid)
+        self.journal.close()
+        self.journal=DownloadJournal(self.root/'journal')
+        records={job['id']:job for job in self.journal.list_recoverable()}
+        self.assertEqual(set(records),{running,paused})
+        self.assertEqual(records[running]['status'],'running')
+        self.assertEqual(records[paused]['status'],'paused')
+
+    def test_new_queue_checkpoints_use_one_full_sync_transaction_per_album(self):
+        statements=[]
+        self.journal._db.set_trace_callback(statements.append)
+        entries=[dict(url=PROFILE+'/post/'+str(index),title='Album '+str(index),
+            image_count=2,attachment_count=1,file_count=3,formats=['.jpg','.zip'],
+            content_mode='images') for index in range(12)]
+        try:
+            results=self.prepare(entries)
+        finally:
+            self.journal._db.set_trace_callback(None)
+        self.assertEqual(sum(sql.strip().upper()=='COMMIT' for sql in statements),len(entries))
+        self.assertEqual(self.journal._db.execute('PRAGMA synchronous').fetchone()[0],2)
+        self.assertEqual(self.journal._db.execute('PRAGMA journal_mode').fetchone()[0],'delete')
+        self.journal.close()
+        self.journal=DownloadJournal(self.root/'journal')
+        jobs=self.journal.list_recoverable()
+        self.assertEqual(len(jobs),len(entries))
+        for result in results:
+            job=self.journal.load(result['metadata']['job_id'])
+            self.assertEqual(job['status'],'paused')
+            self.assertEqual(job['config']['content_mode'],'images')
+            self.assertEqual(job['config']['task_file_count'],2)
+            self.assertTrue(job['config']['queue_rename_order'])
+            self.assertEqual(result['metadata']['_worker_config']['folder'],job['config']['folder'])
+
+    def test_abrupt_preparation_interruption_leaves_created_album_recoverable(self):
+        entries=[dict(url=PROFILE+'/post/'+str(index),title='Album '+str(index),
+            formats=['.jpg'],image_count=2,attachment_count=0,file_count=2) for index in range(2)]
+        create=self.journal.create
+        calls=[]
+
+        def interrupted(config,**options):
+            if calls:
+                # Simulate termination between albums, outside the normal
+                # Exception cleanup path, without terminating this test.
+                raise SystemExit('simulated interruption')
+            job_id=create(config,**options)
+            calls.append(job_id)
+            return job_id
+
+        worker=QueuePreparationWorker(self.journal,entries,self.config)
+        with patch.object(self.journal,'create',side_effect=interrupted),self.assertRaises(SystemExit):
+            worker.run()
+        self.journal.close()
+        self.journal=DownloadJournal(self.root/'journal')
+        jobs=self.journal.list_recoverable()
+        self.assertEqual([job['id'] for job in jobs],calls)
+        self.assertEqual(jobs[0]['status'],'paused')
+        self.assertEqual(jobs[0]['config']['task_file_count'],2)
+        resumed=self.prepare([{**entries[0],'metadata':{'job_id':calls[0]}}])[0]
+        self.assertEqual(resumed['metadata']['job_id'],calls[0])
+        self.assertEqual(len(self.journal.list_recoverable()),1)
+
 
 if __name__=='__main__': unittest.main()

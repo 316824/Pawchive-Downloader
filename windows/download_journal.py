@@ -74,11 +74,13 @@ class DownloadJournal:
         self._db.commit()
         self._post_objects={}
 
-    def create(self,config):
+    def create(self,config,*,status='running'):
+        if not isinstance(status,str) or status not in {'running','paused'}:
+            raise ValueError('Invalid initial checkpoint status.')
         config=dict(config)
         config['folder']=str(Path(config['folder']).resolve())
         if not PROFILE.fullmatch(str(config.get('profile',''))): raise ValueError('Invalid checkpoint profile.')
-        job={'id':uuid.uuid4().hex,'status':'running','config':config,'posts':None,'files':[],
+        job={'id':uuid.uuid4().hex,'status':status,'config':config,'posts':None,'files':[],
              'album':None,'updated':time.time(),'created':time.time(),'saved_count':0}
         self.save(job)
         return job['id']

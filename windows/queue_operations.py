@@ -78,13 +78,18 @@ class QueuePreparationWorker(QThread):
                 if attachment_count is not None: config['task_attachment_count']=attachment_count
                 if self.journal:
                     if job is None:
-                        job_id=self.journal.create(config)
+                        # Every final choice is known now. Persist this new
+                        # checkpoint as paused in one durable transaction,
+                        # rather than committing running and immediately
+                        # committing the same document again as paused.
+                        job_id=self.journal.create(config,status='paused')
                         created.append(job_id)
                         job=self.journal.load(job_id)
-                        job['status']='paused'
+                        config=job['config']
                         meta['job_id']=job_id
-                    job['config']=config
-                    self.journal.save(job,dirty_records=[])
+                    else:
+                        job['config']=config
+                        self.journal.save(job,dirty_records=[])
                     meta['_journal_records']=job['files']
                     meta['completed_records']=[dict(r) for r in job['files']
                                                if r.get('status') in ('complete','ready')]
