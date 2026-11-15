@@ -128,6 +128,64 @@ class SnakeGameTests(unittest.TestCase):
         self.assertTrue({(5, 7), (6, 7)} <= game._occupied())
         self.assertFalse(game.fragments & game._occupied())
 
+    def _body_at_length(self, length):
+        game = self.game
+        # Leave the next head cell free, with a non-overlapping long tail.
+        game.body = [(10, 10)] + [(x, y) for y in range(game.GRID)
+                                 for x in range(game.GRID)
+                                 if (x, y) != (10, 10)][:length - 1]
+        game.direction = game.next_direction = (1, 0)
+        game._invincible_until = 200.0
+
+    def test_regular_fragments_grow_to_sixty_then_keep_scoring(self):
+        game = self.game
+        self._body_at_length(59)
+        for index in range(100):
+            x, y = game.body[0]
+            game.fragments = {((x + 1) % game.GRID, y)}
+            game._move_snake()
+            self.assertEqual(60, len(game.body))
+            self.assertEqual(11 + index, game._score)
+            self.assertFalse(game.fragments)
+
+    def test_special_fragments_still_activate_at_length_cap(self):
+        game = self.game
+        for kind, effect in (('ghost', '_ghost_until'), ('magnet', '_magnet_until'),
+                             ('overclock', '_overclock_until'), ('pulse', None)):
+            with self.subTest(kind=kind):
+                self._body_at_length(60)
+                game._score = 10
+                game.fragments = {(11, 10)}
+                game.fragment_buffs = {(11, 10): kind}
+                game.obstacles = [[18.0, 18]]
+                game._move_snake()
+                self.assertEqual(60, len(game.body))
+                self.assertEqual(11, game._score)
+                self.assertFalse(game.fragments)
+                if effect:
+                    self.assertGreater(getattr(game, effect), 100.0)
+                else:
+                    self.assertFalse(game.obstacles)
+
+    def test_magnet_and_pulse_batch_pickups_cannot_exceed_length_cap(self):
+        game = self.game
+        self._body_at_length(60)
+        game.fragments = {(11, 10), (11, 11), (10, 11)}
+        game._magnet_until = 200.0
+        game._apply_magnet(game.body[0])
+        self.assertEqual(60, len(game.body))
+        self.assertEqual(13, game._score)
+        self.assertFalse(game.fragments)
+        game.fragments = {(17, 17), (18, 18), (19, 19)}
+        game.fragment_buffs = {(17, 17): 'pulse', (18, 18): 'ghost'}
+        game.obstacles = [[17.0, 19]]
+        game._activate_buff('pulse')
+        self.assertEqual(60, len(game.body))
+        self.assertEqual(16, game._score)
+        self.assertFalse(game.fragments)
+        self.assertFalse(game.obstacles)
+        self.assertGreater(game._ghost_until, 100.0)
+
     def test_canvas_renders_and_invincibility_visibly_blinks(self):
         game = self.game
         game.show()

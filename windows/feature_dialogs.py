@@ -558,6 +558,10 @@ class ArtistCardsDialog(QDialog):
         heading = label(reward_tr(self.lang, 'artist_cards')); heading.setStyleSheet('font-size:22px;font-weight:600')
         layout.addWidget(heading)
         self.cards = QListWidget(); self.cards.setIconSize(QPixmap(64, 64).size())
+        # Custom rows own their spacing; inherited delegate padding would
+        # subtract another 18 pixels from their usable height on Windows.
+        self.cards.setObjectName('artistCardsList')
+        self.cards.setStyleSheet('QListWidget#artistCardsList::item {padding:0px;}')
         self.cards.setSpacing(8); self.cards.itemClicked.connect(self.open_card); layout.addWidget(self.cards, 1)
         self.empty_hint=label(self.text('下载画师图集后会生成档案卡，也可以手动添加画师。'), True); layout.addWidget(self.empty_hint)
         actions=QHBoxLayout(); self.add_button=QPushButton(self.text('添加画师')); self.remove_button=QPushButton(self.text('删除选中')); self.prev_button=QPushButton(self.text('上一页')); self.next_button=QPushButton(self.text('下一页')); self.page_label=label('')
@@ -608,30 +612,38 @@ class ArtistCardsDialog(QDialog):
             status = reward_tr(self.lang, 'artist_card_master') if card.get('achievement') == 'master' else self.text('已记录')
             detail = reward_tr(self.lang, 'artist_card_progress', posts=card.get('posts', 0), files=card.get('files', 0))
             avatar_path = avatar_paths.get(card['profile'],'')
-            item = QListWidgetItem(f'✦ {title}  ·  ID {artist_id}\n{status}  ·  {detail}')
+            description_text=f'✦ {title}  ·  ID {artist_id}\n{status}\n{detail}'
+            # The item supplies selection/focus only. Its delegate must not
+            # paint the same avatar/text behind our transparent row widget.
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, f'{title} · ID {artist_id}')
+            item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, f'{status} · {detail}')
             item.setData(Qt.ItemDataRole.UserRole, card.get('profile',''))
             item.setToolTip(str(card.get('profile', '')))
+            avatar_icon=QIcon()
             if avatar_path:
                 pixmap = QPixmap(avatar_path)
                 if not pixmap.isNull():
-                    item.setIcon(QIcon(pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)))
+                    avatar_icon=QIcon(pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             elif card.get('avatar_status') == 'pending':
                 item.setToolTip(reward_tr(self.lang, 'artist_card_avatar_pending'))
             else:
                 item.setToolTip(reward_tr(self.lang, 'artist_card_avatar_missing'))
                 fallback=self.parent_window.windowIcon() if self.parent_window is not None else QIcon()
                 if not fallback.isNull():
-                    item.setIcon(fallback)
-            if item.icon().isNull():
+                    avatar_icon=fallback
+            if avatar_icon.isNull():
                 fallback=self.parent_window.windowIcon() if self.parent_window is not None else QIcon()
-                if not fallback.isNull(): item.setIcon(fallback)
+                if not fallback.isNull(): avatar_icon=fallback
             self.cards.addItem(item)
             from PySide6.QtWidgets import QWidget
             from PySide6.QtCore import QSize
-            row=QWidget(); row_layout=QHBoxLayout(row); row_layout.setContentsMargins(10,8,10,8)
+            row=QWidget(); row_layout=QHBoxLayout(row); row_layout.setContentsMargins(10,8,10,8); row_layout.setSpacing(12)
             avatar=QLabel(); avatar.setFixedSize(64,64)
-            if not item.icon().isNull(): avatar.setPixmap(item.icon().pixmap(64,64))
-            description=label(item.text()); description.setMinimumWidth(0)
+            avatar.setObjectName('artistCardAvatar')
+            if not avatar_icon.isNull(): avatar.setPixmap(avatar_icon.pixmap(64,64))
+            description=label(description_text); description.setMinimumWidth(0)
+            description.setObjectName('artistCardDescription')
             marker=QLabel(''); marker.setFixedWidth(24); marker.setAlignment(Qt.AlignmentFlag.AlignTop|Qt.AlignmentFlag.AlignRight)
             row_layout.addWidget(avatar); row_layout.addWidget(description,1); row_layout.addWidget(marker)
             row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
@@ -656,10 +668,28 @@ class ArtistCardsDialog(QDialog):
 
     def _load_visible_avatars(self):
         if not self.isVisible(): return
+        self._resize_card_rows()
         viewport=self.cards.viewport().rect()
         self._avatar_loader.request([self.cards.item(index).data(Qt.ItemDataRole.UserRole)
             for index in range(self.cards.count())
             if self.cards.visualItemRect(self.cards.item(index)).intersects(viewport)])
+
+    def _resize_card_rows(self):
+        """Use the real font/viewport width for long names and translated copy."""
+        from PySide6.QtCore import QSize
+        changed=False
+        for index in range(self.cards.count()):
+            item=self.cards.item(index)
+            row=self.cards.itemWidget(item)
+            if row is None: continue
+            description=row.findChild(QLabel,'artistCardDescription')
+            if description is None: continue
+            # Match row margins, avatar, marker and the two layout gaps.
+            width=max(60,min(row.width(),self.cards.viewport().width())-20-64-24-24)
+            height=max(90,description.heightForWidth(width)+16)
+            if item.sizeHint().height()!=height:
+                item.setSizeHint(QSize(0,height)); changed=True
+        if changed: self._schedule_visible()
 
     def _avatar_changed(self,*_):
         if self.isVisible(): self.refresh()

@@ -786,6 +786,7 @@ class SnakeGameWidget(QWidget):
     completionFinished = Signal()
 
     GRID = 20
+    MAX_BODY_LENGTH = 60
     IDLE_SECONDS = 30.0
     WAKE_PROTECTION_SECONDS = 5.0
 
@@ -1101,7 +1102,9 @@ class SnakeGameWidget(QWidget):
         fragment_hit = not self._idle and new_head in self.fragments
         if fragment_hit:
             self._collect_fragment(new_head)
-        else:
+        # Continue collecting score and activating buffs at the length cap;
+        # advancing the tail keeps the canvas readable during long scans.
+        if not fragment_hit or len(self.body) > self.MAX_BODY_LENGTH:
             self.body.pop()
         if body_hit:
             self._soft_collision()

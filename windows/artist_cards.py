@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import math
-from contextlib import nullcontext
-from functools import wraps
+from contextlib import nullcontext, contextmanager
+from functools import wraps, lru_cache
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from PySide6.QtCore import QObject, QThread, Signal, Slot, QTimer
+from PySide6.QtCore import QObject, QThread, Signal, Slot, QTimer, QFile, QIODevice
+from PySide6.QtGui import QImageReader
 
 
 PROFILE_RE = re.compile(
@@ -29,6 +31,10 @@ ACHIEVEMENTS = (
     ("master", 25),
 )
 MAX_AVATAR_BYTES = 4 * 1024 * 1024
+MAX_AVATAR_DIMENSION = 4096
+MAX_AVATAR_PIXELS = 4_000_000
+AVATAR_FORMAT_SUFFIXES = {'jpeg': '.jpg', 'jpg': '.jpg', 'png': '.png',
+                         'webp': '.webp', 'gif': '.gif', 'bmp': '.bmp', 'ico': '.ico'}
 ARTIST_ID_RE = re.compile(r"/user/([^/?#]+)", re.IGNORECASE)
 
 
@@ -221,6 +227,54 @@ def list_cards(store):
     return list(_safe_cards(store.get_setting('artist_cards', {})).values())
 
 
+@contextmanager
+def _avatar_reader(filename):
+    # Explicitly own the device: an exception traceback can retain the image
+    # reader until after cleanup, keeping a filename-backed reader's Windows
+    # handle open and preventing an invalid temporary file from being removed.
+    device=QFile(str(filename))
+    if not device.open(QIODevice.OpenModeFlag.ReadOnly):
+        raise OSError('unreadable_avatar_image')
+    try:
+        reader=QImageReader(device)
+        # Some existing caches have a .webp extension but contain JPEG bytes.
+        # The content is authoritative; do not invalidate a good legacy cache.
+        reader.setDecideFormatFromContent(True)
+        reader.setAutoTransform(True)
+        kind=bytes(reader.format()).decode('ascii','replace').lower()
+        size=reader.size()
+        if (kind not in AVATAR_FORMAT_SUFFIXES or not reader.canRead() or
+                not size.isValid() or min(size.width(),size.height())<=0 or
+                max(size.width(),size.height())>MAX_AVATAR_DIMENSION or
+                size.width()*size.height()>MAX_AVATAR_PIXELS):
+            raise ValueError('invalid_avatar_image')
+        yield reader, AVATAR_FORMAT_SUFFIXES[kind]
+    finally:
+        device.close()
+
+
+@lru_cache(maxsize=128)
+def _cached_avatar_header_valid(filename, size, modified_ns, changed_ns):
+    try:
+        with _avatar_reader(filename):
+            pass
+        return True
+    except (OSError,ValueError,RuntimeError):
+        return False
+
+
+def valid_avatar_path(filename):
+    """Check bounded cached-image headers once per stat key, without decoding."""
+    try:
+        path=Path(str(filename or ''))
+        if not filename or not path.is_file(): return False
+        info=path.stat()
+        if not 0<info.st_size<=MAX_AVATAR_BYTES: return False
+        return _cached_avatar_header_valid(str(path),info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    except (OSError,ValueError,RuntimeError):
+        return False
+
+
 def visible_avatar_paths(store, profiles):
     """Resolve already cached avatars for a small set of visible profiles."""
     from subscriptions import SubscriptionStore
@@ -231,12 +285,7 @@ def visible_avatar_paths(store, profiles):
         filename = str(record.get('avatar_path') or '')
         if profile not in wanted or not filename:
             continue
-        try:
-            candidate = Path(filename)
-            if candidate.is_file() and candidate.stat().st_size <= MAX_AVATAR_BYTES:
-                paths[profile] = filename
-        except (ValueError, OSError):
-            pass
+        if valid_avatar_path(filename): paths[profile] = filename
     return paths
 
 
@@ -287,29 +336,33 @@ class AvatarFetchWorker(QThread):
             self.result.emit('', '', 'invalid_profile')
             return
         target_dir = self.data_dir / 'artist-cards'
+        temporary = None
         try:
             if self.isInterruptionRequested(): raise OSError('cancelled')
             target_dir.mkdir(parents=True, exist_ok=True)
+            if target_dir.is_symlink() or (hasattr(target_dir,'is_junction') and target_dir.is_junction()):
+                raise ValueError('invalid_avatar_path')
+            target_dir=target_dir.resolve()
+            if target_dir.parent!=self.data_dir: raise ValueError('invalid_avatar_path')
             digest = hashlib.sha256(self.profile.encode('utf-8')).hexdigest()
             session = requests.Session()
-            session.headers['User-Agent'] = 'PawchiveDownloader/1.0'
+            session.headers['User-Agent'] = 'PawchiveDownloader/1.3'
+            session.headers['Referer'] = self.profile
+            response = None
             try:
                 response = session.get(avatar_url(self.profile), timeout=(8, 20), stream=True)
                 response.raise_for_status()
-                content_type = (response.headers.get('content-type') or '').lower()
-                if not content_type.startswith('image/'):
+                content_type = (response.headers.get('content-type') or '').split(';',1)[0].strip().lower()
+                # Pawchive serves some valid artist JPEGs as octet-stream.
+                # MIME alone cannot establish image safety: inspect the actual
+                # bounded bytes and fully decode off the GUI thread below.
+                if (not content_type.startswith('image/') and content_type not in
+                        {'', 'application/octet-stream', 'binary/octet-stream', 'application/binary'}):
                     raise ValueError('invalid_content_type')
                 length = int(response.headers.get('content-length') or 0)
                 if length < 0 or length > MAX_AVATAR_BYTES:
                     raise ValueError('avatar_too_large')
-                suffix = '.png' if 'png' in content_type else '.webp' if 'webp' in content_type else '.jpg'
-                target = (target_dir / f'{digest}{suffix}').resolve()
-                if target.parent != target_dir:
-                    raise ValueError('invalid_avatar_path')
-                for old in target_dir.glob(f'{digest}.*'):
-                    if old != target and old.is_file():
-                        old.unlink(missing_ok=True)
-                temporary = target.with_suffix('.tmp')
+                temporary = target_dir / f'{digest}.tmp'
                 total = 0
                 with temporary.open('wb') as stream:
                     for chunk in response.iter_content(64 * 1024):
@@ -322,14 +375,28 @@ class AvatarFetchWorker(QThread):
                         stream.write(chunk)
                 if total == 0:
                     raise ValueError('empty_avatar')
+                if length and not response.headers.get('content-encoding') and total!=length:
+                    raise ValueError('incomplete_avatar')
+                with _avatar_reader(temporary) as (reader,suffix):
+                    image=reader.read()
+                    if image.isNull(): raise ValueError('invalid_avatar_image')
+                target=(target_dir/f'{digest}{suffix}').resolve()
+                if target.parent!=target_dir: raise ValueError('invalid_avatar_path')
                 if self.isInterruptionRequested(): raise OSError('cancelled')
                 temporary.replace(target)
+                # Do not remove a previous image until its replacement has
+                # passed validation and been atomically published.
+                for old in target_dir.glob(f'{digest}.*'):
+                    if old!=target and old.is_file():
+                        try: old.unlink(missing_ok=True)
+                        except OSError: pass
                 self.result.emit(self.profile, str(target), '')
             finally:
+                if response is not None: response.close()
                 session.close()
         except (requests.RequestException, OSError, ValueError) as error:
             try:
-                (target_dir / f'{hashlib.sha256(self.profile.encode("utf-8")).hexdigest()}.tmp').unlink(missing_ok=True)
+                if temporary is not None: temporary.unlink(missing_ok=True)
             except (OSError, UnboundLocalError):
                 pass
             self.result.emit(self.profile, '', str(error)[:80])
@@ -344,6 +411,8 @@ class ArtistAvatarLoader(QObject):
     """
     changed = Signal(str, str, str)
     MAX_WORKERS = 3
+    MAX_ATTEMPTS = 3
+    RETRY_DELAY_SECONDS = 30
 
     def __init__(self,store,parent=None,*,worker_class=None):
         super().__init__(parent)
@@ -356,21 +425,22 @@ class ArtistAvatarLoader(QObject):
             if parent is not None: parent._cabinet_avatar_workers=registry
         self._registry=registry
         self._wanted=set(); self._queue=[]; self._failed=set(); self._closed=False
+        self._failure_counts={}; self._retry_after={}
         self._defer_timer=QTimer(self); self._defer_timer.setSingleShot(True)
         self._defer_timer.timeout.connect(self._pump)
 
     @staticmethod
     def _has_avatar(card):
-        filename=str(card.get('avatar_path') or '')
-        try: return bool(filename and Path(filename).is_file())
-        except (ValueError,OSError): return False
+        return valid_avatar_path(card.get('avatar_path'))
 
     def _records(self):
         # Subscribing does not unlock/create an achievement card. Both views
         # can still share the same bounded avatar cache and in-flight pool.
         from subscriptions import SubscriptionStore
-        records = {item['profile']: item for item in SubscriptionStore(self.store).list()}
+        records = {item['profile']: item for item in SubscriptionStore(self.store).list()
+                   if item['profile'] in self._wanted}
         for card in list_cards(self.store):
+            if card['profile'] not in self._wanted: continue
             previous = records.get(card['profile'], {})
             if not self._has_avatar(card) and self._has_avatar(previous):
                 card = dict(card, avatar_path=previous['avatar_path'])
@@ -400,6 +470,12 @@ class ArtistAvatarLoader(QObject):
             if self._queue: self._defer_timer.start(500)
             return
         self._defer_timer.stop()
+        now=time.monotonic()
+        for profile,deadline in list(self._retry_after.items()):
+            if profile in self._wanted and now>=deadline:
+                self._retry_after.pop(profile,None); self._failed.discard(profile)
+                if profile not in self._queue and profile not in self.workers:
+                    self._queue.append(profile)
         cards=self._records()
         pending=len(self._queue)
         while self._queue and len(self._registry)<self.MAX_WORKERS and pending:
@@ -416,11 +492,25 @@ class ArtistAvatarLoader(QObject):
             worker.result.connect(self._on_result)
             worker.finished.connect(self._on_finished)
             worker.start()
-        if self._queue: self._defer_timer.start(500)
+        if self._queue:
+            self._defer_timer.start(500)
+        else:
+            deadlines=[deadline for profile,deadline in self._retry_after.items()
+                       if profile in self._wanted and profile in cards]
+            if deadlines:
+                self._defer_timer.start(max(1,min(60_000,int((min(deadlines)-now)*1000))))
 
     @Slot(str,str,str)
     def _on_result(self,profile,path,error):
-        if error: self._failed.add(profile)
+        if error:
+            self._failed.add(profile)
+            count=self._failure_counts.get(profile,0)+1
+            self._failure_counts[profile]=count
+            if count<self.MAX_ATTEMPTS:
+                self._retry_after[profile]=time.monotonic()+self.RETRY_DELAY_SECONDS*2**(count-1)
+        else:
+            self._failed.discard(profile); self._failure_counts.pop(profile,None)
+            self._retry_after.pop(profile,None)
         # Explicit add/import creates cards. A deleted card stays deleted even
         # if an old in-flight avatar request succeeds a moment later.
         card=update_artist_metadata(self.store,profile,avatar_path=path or None,

@@ -7,6 +7,7 @@ import tempfile
 from PySide6 import __version__ as pyside_version
 from PySide6.QtCore import QSettings, QTimer, qVersion
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
+from PySide6.QtGui import QImage,QColor
 import requests
 from activation import load_public_key
 from app_state import AppState
@@ -73,12 +74,24 @@ def run(window_class, output):
                     buttons.deleteLater()
                 window.set_lang('简体中文')
                 load_public_key()
+                from artist_cards import record_download,update_artist_metadata
+                avatar_root=state.data_dir/'artist-cards'; avatar_root.mkdir(exist_ok=True)
+                avatar=QImage(64,64,QImage.Format.Format_RGB32); avatar.fill(QColor('#44cc88'))
+                avatar_path=avatar_root/'startup-avatar.png'; avatar.save(str(avatar_path))
+                artist='https://pawchive.pw/fanbox/user/1234567890'
+                record_download(state,artist,posts=30,files=2)
+                update_artist_metadata(state,artist,name='Offline artist',avatar_path=str(avatar_path))
                 for dialog in (ActivationDialog(state),ScheduleDialog(window,runtime),CheckInDialog(window,state),
                                ArtistCardsDialog(window,state),SubscriptionDialog(window,state)):
                     if isinstance(dialog,ActivationDialog):
                         if dialog.submit.isEnabled():raise RuntimeError('An empty invitation must not be submitted.')
                         dialog.languages.setCurrentText('English'); dialog.languages.setCurrentText('简体中文')
-                    dialog.grab(); dialog.close(); dialog.deleteLater()
+                    dialog.grab()
+                    if isinstance(dialog,ArtistCardsDialog):
+                        item=dialog.cards.item(0)
+                        if item is None or item.text() or not item.icon().isNull():
+                            raise RuntimeError('The artist card delegate duplicates its custom row.')
+                    dialog.close(); dialog.deleteLater()
                 window.theme.click()
                 app.processEvents()
                 window.grab()
@@ -106,7 +119,8 @@ def run(window_class, output):
                     'theme switching', 'rainbow progress painting',
                     'cover picker and local title search','QtNetwork and local lifecycle',
                     'pinned invitation public key','invitation, schedule and calendar dialogs',
-                    'artist cards and subscriptions dialogs','bundled four-language Qt controls'])
+                    'artist cards and subscriptions dialogs','single-paint populated artist cards',
+                    'bundled four-language Qt controls'])
             except Exception as error:
                 failures.append(str(error))
             finally:
