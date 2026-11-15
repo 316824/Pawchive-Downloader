@@ -39,6 +39,7 @@ def run(window_class,argv=None):
     args=parser.parse_args(argv)
     _set_windows_app_user_model_id()
     app=QApplication(sys.argv[:1]); app.setApplicationName('PawchiveDownloader')
+    from ui_i18n import install_qt_language
     # Keep Chinese glyph fallback and dialog metrics stable across Windows
     # locale/DPI combinations. Individual dialogs may still override sizes
     # for headings, but their body text now shares one predictable base font.
@@ -51,6 +52,7 @@ def run(window_class,argv=None):
     store=None; instance=None; runtime=None; window=None; language='简体中文'
     try:
         store=AppState(); language=store.get_setting('language','简体中文')
+        install_qt_language(language)
         instance=SingleInstance(store.data_dir)
         if not instance.acquire():
             sent=instance.forward({'command':'scheduled','id':args.scheduled} if args.scheduled else {'command':'show'})

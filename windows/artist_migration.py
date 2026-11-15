@@ -262,6 +262,7 @@ def import_code(store,code,subscription_store=None):
     return MigrationResult(added,updated)
 
 
+from ui_i18n import t
 from PySide6.QtCore import Signal,QTimer
 from PySide6.QtWidgets import (QApplication,QDialog,QLabel,QPlainTextEdit,QPushButton,
                               QTabWidget,QVBoxLayout,QHBoxLayout,QWidget)
@@ -272,27 +273,29 @@ class ArtistMigrationDialog(QDialog):
 
     def __init__(self,parent,store,subscription_store=None):
         super().__init__(parent)
+        from ui_i18n import language_for
+        self.lang=language_for(parent)
         self.store,self.subscription_store=store,subscription_store
-        self.setWindowTitle('画师档案数据迁移'); self.resize(660,460)
+        self.setWindowTitle(t(self.lang,'画师档案数据迁移')); self.resize(660,460)
         layout=QVBoxLayout(self)
-        intro=QLabel('迁移画师档案、成就统计与订阅时间记录。不会包含登录信息、设备码或本机文件路径。')
+        intro=QLabel(t(self.lang,'迁移画师档案、成就统计与订阅时间记录。不会包含登录信息、设备码或本机文件路径。'))
         intro.setWordWrap(True); layout.addWidget(intro)
         self.tabs=QTabWidget(); layout.addWidget(self.tabs,1)
         export=QWidget(); export_layout=QVBoxLayout(export)
-        export_layout.addWidget(QLabel('完整复制下方迁移代码，在另一台电脑的“输入恢复”中粘贴。'))
+        export_layout.addWidget(QLabel(t(self.lang,'完整复制下方迁移代码，在另一台电脑的“输入恢复”中粘贴。')))
         self.output=QPlainTextEdit(); self.output.setReadOnly(True); export_layout.addWidget(self.output,1)
-        self.copy_button=QPushButton('复制迁移代码'); self.copy_button.clicked.connect(self.copy_code)
-        export_layout.addWidget(self.copy_button); self.tabs.addTab(export,'导出 / 复制')
+        self.copy_button=QPushButton(t(self.lang,'复制迁移代码')); self.copy_button.clicked.connect(self.copy_code)
+        export_layout.addWidget(self.copy_button); self.tabs.addTab(export,t(self.lang,'导出 / 复制'))
         restore=QWidget(); restore_layout=QVBoxLayout(restore)
-        restore_layout.addWidget(QLabel('粘贴完整迁移代码。相同画师会自动合并，并保留较新的记录。'))
+        restore_layout.addWidget(QLabel(t(self.lang,'粘贴完整迁移代码。相同画师会自动合并，并保留较新的记录。')))
         self.input=QPlainTextEdit(); self.input.setPlaceholderText('PAWCHIVE_V1:…'); restore_layout.addWidget(self.input,1)
-        self.restore_button=QPushButton('恢复画师数据'); self.restore_button.clicked.connect(self.restore_code)
-        restore_layout.addWidget(self.restore_button); self.tabs.addTab(restore,'输入恢复')
+        self.restore_button=QPushButton(t(self.lang,'恢复画师数据')); self.restore_button.clicked.connect(self.restore_code)
+        restore_layout.addWidget(self.restore_button); self.tabs.addTab(restore,t(self.lang,'输入恢复'))
         self.status=QLabel(''); self.status.setWordWrap(True); layout.addWidget(self.status)
         self.input.textChanged.connect(self._validate_input_size)
         self._copy_timer=QTimer(self); self._copy_timer.setSingleShot(True)
         self._copy_timer.timeout.connect(self._reset_copy_label)
-        close=QPushButton('关闭'); close.clicked.connect(self.accept); layout.addWidget(close)
+        close=QPushButton(t(self.lang,'关闭')); close.clicked.connect(self.accept); layout.addWidget(close)
         self.refresh_export()
 
     def refresh_export(self):
@@ -300,28 +303,28 @@ class ArtistMigrationDialog(QDialog):
             self.output.setPlainText(export_code(self.store,self.subscription_store))
             self.copy_button.setEnabled(True)
         except (ValueError,OSError,RuntimeError) as error:
-            self.output.clear(); self.copy_button.setEnabled(False); self.status.setText(str(error))
+            self.output.clear(); self.copy_button.setEnabled(False); self.status.setText(t(self.lang,str(error)))
 
     def copy_code(self):
         if not self.output.toPlainText(): return
         QApplication.clipboard().setText(self.output.toPlainText())
-        self.copy_button.setText('已复制')
+        self.copy_button.setText(t(self.lang,'已复制'))
         self._copy_timer.start(1600)
 
     def _reset_copy_label(self):
-        self.copy_button.setText('复制迁移代码')
+        self.copy_button.setText(t(self.lang,'复制迁移代码'))
 
     def _validate_input_size(self):
         too_large=self.input.document().characterCount()>MAX_CODE_CHARS+1
         self.restore_button.setEnabled(not too_large)
-        if too_large: self.status.setText(INVALID_CODE)
+        if too_large: self.status.setText(t(self.lang,INVALID_CODE))
 
     def restore_code(self):
         try:
             result=import_code(self.store,self.input.toPlainText(),self.subscription_store)
         except MigrationError:
-            self.status.setText(INVALID_CODE); return
+            self.status.setText(t(self.lang,INVALID_CODE)); return
         except (ValueError,OSError,RuntimeError,sqlite3.Error):
-            self.status.setText('恢复失败，本机原有画师数据已保留，请稍后重试。'); return
-        self.status.setText(f'恢复成功：{result.added} 位新增，{result.updated} 位更新。')
+            self.status.setText(t(self.lang,'恢复失败，本机原有画师数据已保留，请稍后重试。')); return
+        self.status.setText(t(self.lang,'恢复成功：{added} 位新增，{updated} 位更新。',added=result.added,updated=result.updated))
         self.refresh_export(); self.changed.emit()

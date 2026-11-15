@@ -5,12 +5,17 @@ import sys
 directory = Path(SPECPATH)
 sys.path.insert(0, str(directory))
 from build_support import without_system_icu
+from PySide6.QtCore import QLibraryInfo
+
+translations=Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))
+translation_datas=[(str(translations/('qtbase_'+language+'.qm')), 'translations')
+                   for language in ('zh_CN','zh_TW','ja')]
 
 a = Analysis(
     [str(directory / 'download_pawchive_images.py')],
     pathex=[str(directory)],
     binaries=[],
-    datas=[(str(directory / '1.ico'), '.'),(str(directory/'activation_public.json'),'.')],
+    datas=[(str(directory / '1.ico'), '.'),(str(directory/'activation_public.json'),'.')]+translation_datas,
     # These modules are imported from menu/dialog callbacks, so keeping them
     # explicit makes the frozen build independent of PyInstaller's optional
     # function-scope import analysis.

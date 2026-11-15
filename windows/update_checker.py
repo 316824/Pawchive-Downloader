@@ -19,6 +19,7 @@ import weakref
 from urllib.parse import quote, unquote, urlsplit
 
 import requests
+from ui_i18n import t, language_for
 from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QTextDocument
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout
@@ -251,7 +252,8 @@ class UpdateDialog(QDialog):
     def __init__(self, parent, release):
         super().__init__(parent)
         self.release = release
-        self.setWindowTitle('发现 Pawchive 新版本')
+        self.lang=language_for(parent)
+        self.setWindowTitle(t(self.lang,'发现 Pawchive 新版本'))
         self.resize(650, 500)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 22, 22, 22)
@@ -265,15 +267,18 @@ class UpdateDialog(QDialog):
         title.setWordWrap(True)
         layout.addWidget(title)
         self.notes = ReleaseNotesBrowser(self)
-        self.notes.document().setMarkdown(release.body,
+        body=t(self.lang, release.body) if release.body==EMPTY_NOTES else release.body
+        suffix='\n\n（更新说明较长，其余内容请在发布页面查看。）'
+        if body.endswith(suffix): body=body[:-len(suffix)]+t(self.lang,suffix)
+        self.notes.document().setMarkdown(body,
             QTextDocument.MarkdownFeature.MarkdownDialectGitHub |
             QTextDocument.MarkdownFeature.MarkdownNoHTML)
         self.notes.anchorClicked.connect(self._open_notes_link)
         layout.addWidget(self.notes, 1)
         row = QHBoxLayout()
-        self.ignore_button = QPushButton('忽略该版本')
-        self.later_button = QPushButton('稍后再说')
-        self.download_button = QPushButton('前往下载')
+        self.ignore_button = QPushButton(t(self.lang,'忽略该版本'))
+        self.later_button = QPushButton(t(self.lang,'稍后再说'))
+        self.download_button = QPushButton(t(self.lang,'前往下载'))
         row.addWidget(self.ignore_button)
         row.addStretch(1)
         row.addWidget(self.later_button)
@@ -322,6 +327,14 @@ class UpdateController(QObject):
     @property
     def window(self):
         return self._window_ref()
+
+    def refresh_language(self):
+        button=getattr(self,'footer_button',None)
+        if button is not None:
+            language=language_for(self.window)
+            button.setToolTip(t(language,'查看新版本的更新说明和下载页面'))
+            if self.release is not None:
+                button.setText(t(language,'● 发现新版本 {tag}',tag=self.release.tag))
 
     def _get_ignored(self):
         if self.store is not None:
@@ -417,15 +430,16 @@ def install_update_checker(window, footer_button=None, store=None, *,
     controller = UpdateController(window, store, current_version=current_version)
     window.update_controller = controller
     if footer_button is not None:
+        controller.footer_button=footer_button
         footer_button.hide()
         footer_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        footer_button.setToolTip('查看新版本的更新说明和下载页面')
+        controller.refresh_language()
         footer_button.setStyleSheet('QPushButton {color:#f18491;background:transparent;'
             'border:0;padding:4px 7px;} QPushButton:hover {color:#ffa5af;}')
         footer_button.clicked.connect(controller.show_dialog)
 
         def update_button(release):
-            footer_button.setText(f'● 发现新版本 {release.tag}')
+            controller.refresh_language()
 
         controller.update_available.connect(update_button)
         controller.availability_changed.connect(footer_button.setVisible)

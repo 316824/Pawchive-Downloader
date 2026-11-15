@@ -949,7 +949,8 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     options.setContentsMargins(0, 5, 0, 0)
     options.setSpacing(14)
     content_row=QHBoxLayout()
-    content_row.addWidget(QLabel('下载内容'))
+    w.content_label=QLabel('下载内容')
+    content_row.addWidget(w.content_label)
     w.content_combo=QComboBox()
     for name,value in (('图片与附件','all'),('仅图片','images'),('仅直链附件','attachments')):
         w.content_combo.addItem(name,value)

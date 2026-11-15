@@ -187,6 +187,8 @@ class ActivationDialog(QDialog):
         value=label(tr(self.lang,key)); self._localized.append((value,key)); return value
 
     def change_language(self,language):
+        from ui_i18n import install_qt_language
+        install_qt_language(language)
         self.lang=language; self.store.set_setting('language',language)
         self.setWindowTitle(tr(language,'activation'))
         for widget,key in self._localized:widget.setText(tr(language,key))

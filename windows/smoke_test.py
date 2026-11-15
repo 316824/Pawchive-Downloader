@@ -1,20 +1,27 @@
 """Offline startup check shared by source runs and the frozen release."""
 import json
+import os
 from pathlib import Path
 import tempfile
 
 from PySide6 import __version__ as pyside_version
 from PySide6.QtCore import QSettings, QTimer, qVersion
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialogButtonBox
 import requests
 from activation import load_public_key
 from app_state import AppState
 from download_journal import DownloadJournal
 from desktop_runtime import DesktopRuntime
-from feature_dialogs import ActivationDialog, CheckInDialog, ScheduleDialog
+from feature_dialogs import ActivationDialog, CheckInDialog, ScheduleDialog, ArtistCardsDialog
+from subscription_ui import SubscriptionDialog
 
 
 def run(window_class, output):
+    if os.name == 'nt':
+        import ctypes
+        # A failed isolated build check must report an exit code rather than
+        # leave a Windows Error Reporting prompt on the publisher's desktop.
+        ctypes.windll.kernel32.SetErrorMode(0x8003)
     app = QApplication([])
     report = {'ok': False, 'pyside': pyside_version, 'qt': qVersion()}
     failures = []
@@ -57,8 +64,17 @@ def run(window_class, output):
                 window.theme.click()
                 app.processEvents()
                 window.grab()
+                for language, caption in (('简体中文','取消'),('繁體中文','取消'),
+                                          ('English','Cancel'),('日本語','キャンセル')):
+                    window.set_lang(language)
+                    buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+                    if buttons.button(QDialogButtonBox.StandardButton.Cancel).text().replace('&','') != caption:
+                        raise RuntimeError('The bundled Qt translation is missing: '+language)
+                    buttons.deleteLater()
+                window.set_lang('简体中文')
                 load_public_key()
-                for dialog in (ActivationDialog(state),ScheduleDialog(window,runtime),CheckInDialog(window,state)):
+                for dialog in (ActivationDialog(state),ScheduleDialog(window,runtime),CheckInDialog(window,state),
+                               ArtistCardsDialog(window,state),SubscriptionDialog(window,state)):
                     if isinstance(dialog,ActivationDialog):
                         if dialog.submit.isEnabled():raise RuntimeError('An empty invitation must not be submitted.')
                         dialog.languages.setCurrentText('English'); dialog.languages.setCurrentText('简体中文')
@@ -89,7 +105,8 @@ def run(window_class, output):
                     'bundled icon', 'input validation', 'language switching',
                     'theme switching', 'rainbow progress painting',
                     'cover picker and local title search','QtNetwork and local lifecycle',
-                    'pinned invitation public key','invitation, schedule and calendar dialogs'])
+                    'pinned invitation public key','invitation, schedule and calendar dialogs',
+                    'artist cards and subscriptions dialogs','bundled four-language Qt controls'])
             except Exception as error:
                 failures.append(str(error))
             finally:

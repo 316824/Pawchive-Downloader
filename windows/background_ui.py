@@ -7,6 +7,7 @@ then released; page switches never reopen the source file.
 from __future__ import annotations
 
 from pathlib import Path
+from ui_i18n import language_for, t
 
 from PySide6.QtCore import (QBuffer, QEvent, QObject, QPoint, QPointF, QRectF, Qt, QTimer,
                             Signal)
@@ -344,6 +345,7 @@ class CropWindowPreview(QWidget):
     def __init__(self, target_aspect=1.25, parent=None, *, target_window=None,
                  overlay=DEFAULT_OVERLAY):
         super().__init__(parent)
+        self.lang = language_for(parent or target_window)
         self.target_aspect = max(.2, min(5.0, float(target_aspect or 1.25)))
         self.source_image = QImage()
         self._source_key = None
@@ -420,7 +422,7 @@ class CropWindowPreview(QWidget):
             painter.restore()
             painter.setPen(QColor('#eaf0ff'))
             painter.setFont(QFont('Segoe UI', 9, QFont.Weight.DemiBold))
-            caption = '窗口实际预览' if not self.controls.isNull() else '背景效果预览'
+            caption = t(self.lang, '窗口实际预览' if not self.controls.isNull() else '背景效果预览')
             painter.drawText(QRectF(outer.left()+12, outer.top()+7, outer.width()-24, 18),
                              Qt.AlignmentFlag.AlignLeft, caption)
             painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
@@ -581,6 +583,7 @@ class BackgroundEditorDialog(QDialog):
                  initial_source='', initial_crop=None, target_window=None,
                  overlay=DEFAULT_OVERLAY):
         super().__init__(parent)
+        self.lang = language_for(parent)
         self.store = store
         self.page = str(page)
         self.target_aspect = target_aspect
@@ -588,11 +591,11 @@ class BackgroundEditorDialog(QDialog):
         self.source_path = None
         self.source_image = QImage()
         self.result_config = None
-        self.setWindowTitle('编辑背景图')
+        self.setWindowTitle(t(self.lang, '编辑背景图'))
         self.resize(1040, 720)
         self.setMinimumSize(760, 540)
         layout = QVBoxLayout(self)
-        self.path_label = QLabel('请选择 JPG、PNG、JPEG 或 WEBP 图片（最大 20 MB）')
+        self.path_label = QLabel(t(self.lang, '请选择 JPG、PNG、JPEG 或 WEBP 图片（最大 20 MB）'))
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
         editor_row = QHBoxLayout()
@@ -603,14 +606,14 @@ class BackgroundEditorDialog(QDialog):
             target_window=target_window, overlay=overlay)
         editor_row.addWidget(self.preview, 1)
         layout.addLayout(editor_row, 1)
-        self.coordinates = QLabel('拖动裁剪框，右下角手柄可调整大小；滚轮缩放，空白处拖动平移。')
+        self.coordinates = QLabel(t(self.lang, '拖动裁剪框，右下角手柄可调整大小；滚轮缩放，空白处拖动平移。'))
         self.coordinates.setWordWrap(True)
         layout.addWidget(self.coordinates)
         buttons = QHBoxLayout()
-        self.open_button = QPushButton('选择图片…')
-        self.reset_button = QPushButton('重置视图')
-        self.cancel_button = QPushButton('取消')
-        self.save_button = QPushButton('保存此裁剪')
+        self.open_button = QPushButton(t(self.lang, '选择图片…'))
+        self.reset_button = QPushButton(t(self.lang, '重置视图'))
+        self.cancel_button = QPushButton(t(self.lang, '取消'))
+        self.save_button = QPushButton(t(self.lang, '保存此裁剪'))
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.reset_button)
         buttons.addStretch(1)
@@ -632,13 +635,14 @@ class BackgroundEditorDialog(QDialog):
 
     def choose_source(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, '选择背景图片', str(Path.home()),
-            'Images (*.jpg *.jpeg *.png *.webp)')
+            self, t(self.lang, '选择背景图片'), str(Path.home()),
+            'JPG / PNG / WEBP (*.jpg *.jpeg *.png *.webp)',
+            options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             try:
                 self.load_source(path)
             except BackgroundError as error:
-                QMessageBox.warning(self, '无法使用这张图片', str(error))
+                QMessageBox.warning(self, t(self.lang, '无法使用这张图片'), t(self.lang,str(error)))
 
     def load_source(self, path):
         resolved, image = _read_source_image(path)
@@ -665,9 +669,8 @@ class BackgroundEditorDialog(QDialog):
 
     def update_coordinates(self):
         crop = self.view.normalized_crop()
-        self.coordinates.setText(
-            f"裁剪起点 {crop['x']:.3f}, {crop['y']:.3f} · "
-            f"范围 {crop['width']:.3f} × {crop['height']:.3f}")
+        self.coordinates.setText(t(self.lang,
+            '裁剪起点 {x:.3f}, {y:.3f} · 范围 {width:.3f} × {height:.3f}', **crop))
 
     def save_selection(self):
         if self.source_path is None or self.source_image.isNull():
@@ -685,7 +688,7 @@ class BackgroundEditorDialog(QDialog):
                 preview_size=preview_size,
                 aspect=preview_size[0] / max(1, preview_size[1]))
         except (BackgroundError, OSError, ValueError) as error:
-            QMessageBox.warning(self, '无法保存背景', str(error))
+            QMessageBox.warning(self, t(self.lang, '无法保存背景'), t(self.lang,str(error)))
             return
         self.result_config = config
         self.accept()
@@ -701,18 +704,20 @@ class BackgroundSettingsDialog(QDialog):
         super().__init__(parent)
         self.store = store
         self.language = language
+        L = lambda source: t(self.language, source)
         self.reward_available = bool(reward_available)
         self.page_names = {
-            'workspace': '下载工作台', 'calendar': '签到日历',
-            'schedules': '下载日程', 'activation': '邀请码窗口',
-            'picker': '图集选择窗口', 'close_choice': '退出提示',
-            'resume_choice': '续传提示', 'scan': '扫描窗口',
+            'workspace': L('下载工作台'), 'calendar': L('签到日历'),
+            'schedules': L('下载日程'), 'activation': L('邀请码窗口'),
+            'picker': L('图集选择窗口'), 'close_choice': L('退出提示'),
+            'resume_choice': L('续传提示'), 'scan': L('扫描窗口'),
+            'artist_cards': L('画师档案卡'), 'subscriptions': L('画师更新订阅'),
         }
-        self.setWindowTitle('背景与界面主题')
+        self.setWindowTitle(L('背景与界面主题'))
         self.resize(620, 560)
         self.setMinimumSize(500, 460)
         layout = QVBoxLayout(self)
-        intro = QLabel('每个界面可以使用不同的背景。原图只在裁剪时读取，运行时使用受限尺寸的缩略图。')
+        intro = QLabel(L('每个界面可以使用不同的背景。原图只在裁剪时读取，运行时使用受限尺寸的缩略图。'))
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = QFormLayout()
@@ -722,15 +727,15 @@ class BackgroundSettingsDialog(QDialog):
         index = self.page_combo.findData(current_page)
         if index >= 0:
             self.page_combo.setCurrentIndex(index)
-        form.addRow('编辑界面', self.page_combo)
+        form.addRow(L('编辑界面'), self.page_combo)
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem('默认主题', 'default')
-        self.mode_combo.addItem('自定义背景', 'custom')
-        self.mode_combo.addItem('签到奖励主题', 'reward')
+        self.mode_combo.addItem(L('默认主题'), 'default')
+        self.mode_combo.addItem(L('自定义背景'), 'custom')
+        self.mode_combo.addItem(L('签到奖励主题'), 'reward')
         if not self.reward_available:
             reward_index = self.mode_combo.findData('reward')
             self.mode_combo.model().item(reward_index).setEnabled(False)
-        form.addRow('当前来源', self.mode_combo)
+        form.addRow(L('当前来源'), self.mode_combo)
         self.opacity = QSlider(Qt.Orientation.Horizontal)
         self.opacity.setRange(15, 85)
         self.opacity.setSingleStep(1)
@@ -738,17 +743,17 @@ class BackgroundSettingsDialog(QDialog):
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(self.opacity, 1)
         opacity_row.addWidget(self.opacity_label)
-        form.addRow('遮罩深度', opacity_row)
+        form.addRow(L('遮罩深度'), opacity_row)
         layout.addLayout(form)
-        self.preview = QLabel('当前界面尚未设置自定义背景')
+        self.preview = QLabel(L('当前界面尚未设置自定义背景'))
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(170)
         self.preview.setWordWrap(True)
         layout.addWidget(self.preview, 1)
         buttons = QHBoxLayout()
-        self.edit_button = QPushButton('选择或编辑背景…')
-        self.remove_button = QPushButton('清除当前背景')
-        close = QPushButton('完成')
+        self.edit_button = QPushButton(L('选择或编辑背景…'))
+        self.remove_button = QPushButton(L('清除当前背景'))
+        close = QPushButton(L('完成'))
         buttons.addWidget(self.edit_button)
         buttons.addWidget(self.remove_button)
         buttons.addStretch(1)
@@ -786,10 +791,10 @@ class BackgroundSettingsDialog(QDialog):
                 self.preview.setPixmap(pixmap.scaled(360, 180, Qt.AspectRatioMode.KeepAspectRatio,
                                                      Qt.TransformationMode.SmoothTransformation))
             else:
-                self.preview.setText('当前缩略图不可用，将在下次编辑时重建。')
+                self.preview.setText(t(self.language, '当前缩略图不可用，将在下次编辑时重建。'))
         else:
             self.preview.setPixmap(QPixmap())
-            self.preview.setText('当前界面尚未设置自定义背景')
+            self.preview.setText(t(self.language, '当前界面尚未设置自定义背景'))
 
     def change_mode(self, *_):
         mode = self.mode_combo.currentData()
@@ -798,7 +803,7 @@ class BackgroundSettingsDialog(QDialog):
         try:
             self.store.set_mode(mode)
         except BackgroundError as error:
-            QMessageBox.warning(self, '无法切换主题', str(error))
+            QMessageBox.warning(self, t(self.language, '无法切换主题'), t(self.language,str(error)))
             self.refresh()
             return
         self.changed.emit()
@@ -850,6 +855,6 @@ class BackgroundSettingsDialog(QDialog):
 # still be configured without making the editor recursively preview itself.
 BACKGROUND_PAGES_FOR_SETTINGS = (
     'workspace', 'calendar', 'schedules', 'activation', 'picker',
-    'close_choice', 'resume_choice', 'scan')
+    'close_choice', 'resume_choice', 'scan', 'artist_cards', 'subscriptions')
 
 

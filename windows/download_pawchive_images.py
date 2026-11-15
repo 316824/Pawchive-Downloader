@@ -26,6 +26,7 @@ from download_scheduler import DownloadScheduler
 from recycle_bin import RecycleBin
 from windows_taskbar import TaskbarProgress
 from window_chrome import install_window_chrome
+from ui_i18n import language_for, t as ui_text
 
 BASE_URL = 'https://pawchive.pw'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36'
@@ -1180,7 +1181,7 @@ class SnakeGameWidget(QWidget):
             'ghost': QColor('#c3a5ff'), 'magnet': QColor('#ffe58a'),
             'overclock': QColor('#ffad6e'), 'pulse': QColor('#ff8fb3'),
         }
-        fragment_marks = {'ghost': '幽', 'magnet': '磁', 'overclock': '速', 'pulse': '脉'}
+        fragment_marks = {'ghost': '◇', 'magnet': 'M', 'overclock': '»', 'pulse': '◎'}
         for fx, fy in self.fragments:
             rect = QRectF(fx * cell_w + 3, fy * cell_h + 3, cell_w - 6, cell_h - 6)
             glow = QRadialGradient(rect.center(), max(rect.width(), rect.height()) * .8)
@@ -1230,19 +1231,19 @@ class SnakeGameWidget(QWidget):
             painter.setPen(QColor('#bfeaff'))
             painter.setFont(QFont('Segoe UI', 7, QFont.Weight.DemiBold))
             painter.drawText(QRectF(7, 20, self.width() - 14, 13),
-                             Qt.AlignmentFlag.AlignLeft, self._buff_label)
+                             Qt.AlignmentFlag.AlignLeft, ui_text(language_for(self),self._buff_label))
         if self._rebuild_until:
             painter.fillRect(self.rect(), QColor(24, 140, 255, 58))
             painter.setPen(QColor('#a8e8ff'))
             painter.setFont(QFont('Segoe UI', 10, QFont.Weight.DemiBold))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '核心受损，正在重组数据流...')
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, ui_text(language_for(self),'核心受损，正在重组数据流...'))
             painter.setBrush(QColor(122, 228, 255, 220))
             center = QPointF(self.width() / 2, self.height() / 2)
             painter.drawEllipse(center, 8 + 3 * math.sin(now * 6), 8 + 3 * math.sin(now * 6))
         elif self._paused:
             painter.fillRect(self.rect(), QColor(5, 10, 23, 150))
             painter.setPen(QColor('#b8c9e8'))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '扫描暂停')
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, ui_text(language_for(self),'扫描暂停'))
         elif self._finishing:
             progress = min(1.0, max(0.0, (self._finish_until - now) / .85))
             for px, py, _, _, life in self._dissolve_particles:
@@ -1255,7 +1256,7 @@ class SnakeGameWidget(QWidget):
             painter.setPen(QColor('#d8ecff'))
             painter.setFont(QFont('Segoe UI', 10, QFont.Weight.DemiBold))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                             f'扫描已完成，共获取 {self._finish_count} 个图集\n（点击窗口任意一处位置查看图集）')
+                             ui_text(language_for(self),'扫描已完成，共获取 {count} 个图集',count=self._finish_count)+'\n'+ui_text(language_for(self),'（点击窗口任意一处位置查看图集）'))
         if self._collision_flash:
             painter.fillRect(self.rect(), QColor(255, 107, 153, int(80 * self._collision_flash / .45)))
         painter.end()
@@ -1278,10 +1279,10 @@ class ScanCompletionOverlay(QWidget):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(9)
-        title = QLabel(f'扫描已完成，共获取 {int(count)} 个图集')
+        title = QLabel(ui_text(language_for(parent),'扫描已完成，共获取 {count} 个图集',count=int(count)))
         title.setObjectName('scanCompletionTitle')
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint = QLabel('（点击窗口任意一处位置查看图集）')
+        hint = QLabel(ui_text(language_for(parent),'（点击窗口任意一处位置查看图集）'))
         hint.setObjectName('scanCompletionHint')
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -1397,6 +1398,7 @@ class ScanAnimation(QDialog):
 
     def set_language(self,lang):
         self.lang=lang; t=AUX_TEXT[lang]
+        self.game_hint.setText(ui_text(lang,'方向键 / WASD 控制 · 点击游戏区域获取焦点'))
         self.setWindowTitle(t['scan_window']); self.pause_button.setText(t['pause']); self.resume_button.setText(t['resume']); self.finish_button.setText(t['finish'])
         message=t['scan_finishing'] if self.finish_requested else t['scan_paused'] if self.paused else t['scan_searching']
         self.message.setText(message); self.update_counts(self.pages,self.posts)
@@ -1505,8 +1507,13 @@ class ProfileScanWorker(QThread):
             session.close()
 
 class App(QWidget):
+    _INPUT_EVENTS=frozenset((QEvent.Type.MouseButtonPress,QEvent.Type.MouseButtonRelease,
+        QEvent.Type.MouseButtonDblClick,QEvent.Type.MouseMove,QEvent.Type.Wheel,
+        QEvent.Type.DragEnter,QEvent.Type.DragMove,QEvent.Type.Drop,QEvent.Type.KeyPress))
+    _DIALOG_EVENTS=frozenset((QEvent.Type.Polish,QEvent.Type.Show))
     def __init__(self,settings=None,services=None):
         super().__init__()
+        self.checkbox_factory=GlowCheckBox
         self.services=services
         self.setAcceptDrops(True)
         from desktop_design import build_interface
@@ -1707,7 +1714,9 @@ class App(QWidget):
         self.move(x,y)
 
     def set_lang(self,l):
+        from ui_i18n import install_qt_language, t as ui_text
         self.lang=l
+        install_qt_language(l)
         if self.services:
             self.services.store.set_setting('language',l); self.services.update_language()
         if self.language.currentText()!=l:
@@ -1716,6 +1725,19 @@ class App(QWidget):
         chrome=getattr(self,'_pawchive_window_chrome',None)
         if chrome is not None:
             chrome.set_title(t['title'])
+            refresh=getattr(chrome,'refresh_language',None)
+            if callable(refresh): refresh()
+        if hasattr(self,'content_label'):
+            self.content_label.setText(ui_text(l,'下载内容'))
+            blocked=self.content_combo.blockSignals(True)
+            for index,source in enumerate(('图片与附件','仅图片','仅直链附件')):
+                self.content_combo.setItemText(index,ui_text(l,source))
+            self.content_combo.blockSignals(blocked)
+        paused=self.queue_scheduler.has_paused_tasks if getattr(self,'queue_scheduler',None) else False
+        self.queue_pause_all_button.setText(ui_text(l,'全部继续' if paused else '全部暂停'))
+        failures=sum(task.state=='failed' or bool(task.metadata.get('failure_pinned')) for task in self.queue_scheduler.tasks) if getattr(self,'queue_scheduler',None) else 0
+        self.queue_failures_button.setText(ui_text(l,'失败任务 ({count})',count=failures))
+        if getattr(self,'update_controller',None): self.update_controller.refresh_language()
         self.open_folder_button.setText(t['open_folder'])
         en=l=='English'; ja=l=='日本語'
         self.profile_label.setText('请输入完整的 pawchive.pw 画师主页链接' if l=='简体中文' else '請輸入完整的 pawchive.pw 畫師首頁連結' if l=='繁體中文' else 'Enter the full Pawchive creator profile URL' if en else 'PawchiveのクリエイターページURLを入力')
@@ -2021,9 +2043,9 @@ class App(QWidget):
             frames=('◐','◓','◑','◒')
             self._subscription_spinner_phase=(self._subscription_spinner_phase+1)%4
             button.setText(frames[self._subscription_spinner_phase]+' '+('✦' if count==0 else f'✦ {count}'))
-            button.setToolTip('正在检查画师更新…'); return
+            button.setToolTip(ui_text(self.lang,'正在检查画师更新…')); return
         button.setText(('● ' if unread else '') + ('✦' if count == 0 else f'✦ {count}'))
-        button.setToolTip('有画师更新' if unread and self.lang=='简体中文' else ('画师档案卡' if self.lang=='简体中文' else 'Artist updates' if unread else 'Artist cards'))
+        button.setToolTip(ui_text(self.lang,'有画师更新' if unread else '画师档案卡'))
 
     def show_subscriptions(self):
         if not self.services:
@@ -2296,7 +2318,8 @@ class App(QWidget):
         self.percent_label.setText(str(max(0,min(100,int(received*100/total)))) if total else '—')
         self.percent_unit.setVisible(bool(total))
     def pick(self):
-        d=QFileDialog.getExistingDirectory(self,TEXT[self.lang]['choose'],self.path.text() or str(Path.home()))
+        d=QFileDialog.getExistingDirectory(self,TEXT[self.lang]['choose'],self.path.text() or str(Path.home()),
+            options=QFileDialog.Option.DontUseNativeDialog)
         if d:
             if not self.path.text() or Path(d)!=Path(self.path.text()): self.completed_path=None; self.open_folder_button.hide()
             self.path.setText(d)
@@ -2402,9 +2425,10 @@ class App(QWidget):
             return
         self.download_queue.set_items([task.public_copy() for task in scheduler.tasks])
         paused=scheduler.has_paused_tasks
-        self.queue_pause_all_button.setText('全部继续' if paused else '全部暂停')
+        from ui_i18n import t as ui_text
+        self.queue_pause_all_button.setText(ui_text(self.lang,'全部继续' if paused else '全部暂停'))
         failures=sum(t.state=='failed' or bool(t.metadata.get('failure_pinned')) for t in scheduler.tasks)
-        self.queue_failures_button.setText(f'失败任务 ({failures})')
+        self.queue_failures_button.setText(ui_text(self.lang,'失败任务 ({count})',count=failures))
         self.queue_count.setText(self.ui_text()['queue_count'].format(count=len(scheduler.tasks)))
 
     def _initialize_queue_task_progress(self, task):
@@ -2616,7 +2640,7 @@ class App(QWidget):
         worker=QueueFinalizeWorker(self.services.journal,ids,
             dict(unique_path=unique_path,safe_path_component=safe_path_component),self)
         self._queue_finalizer=worker; self._queue_finalizing=True
-        self.status.setText('正在整理图片编号…')
+        self.status.setText(ui_text(self.lang,'正在整理图片编号…'))
         worker.result.connect(self._queue_finalize_done)
         worker.failed.connect(self._queue_finalize_failed)
         worker.start()
@@ -2640,7 +2664,7 @@ class App(QWidget):
         if worker is not None: worker.deleteLater()
         self._queue_finalizing=False; self._queue_finalizer=None
         self._settle_queue_idle(finalization_error=True)
-        self.set_workflow('error'); self.status.setText('图片编号未完成，可重启后继续恢复')
+        self.set_workflow('error'); self.status.setText(ui_text(self.lang,'图片编号未完成，可重启后继续恢复'))
         self.log.append(str(message))
 
     def _start_queue(self, entries, profile):
@@ -2659,7 +2683,7 @@ class App(QWidget):
         self._queue_selected_ids=[]; self._queue_closing=False
         self.reset_dashboard(len(entries))
         self.set_busy_state(True); self.set_workflow('download')
-        self.status.setText('正在准备下载队列…')
+        self.status.setText(ui_text(self.lang,'正在准备下载队列…'))
         from queue_operations import QueuePreparationWorker
         config=dict(folder=str(Path(self.path.text()).expanduser().resolve()),
             profile=self._queue_profile, order='newest' if self.order_combo.currentIndex()==0 else 'oldest',
@@ -2682,7 +2706,7 @@ class App(QWidget):
         if worker is not None: worker.deleteLater()
         self._queue_preparation=None
         self.set_busy_state(False); self.set_workflow('error')
-        self.status.setText('准备下载失败'); self.log.append(str(message))
+        self.status.setText(ui_text(self.lang,'准备下载失败')); self.log.append(str(message))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
 
     def _queue_prepared(self, entries):
@@ -3243,7 +3267,7 @@ class App(QWidget):
                 if callable(stop): stop()
             self._close_when_worker_stops=True
             self._subscription_badge_timer.stop()
-            self.status.setText('正在等待后台请求结束并安全退出…')
+            self.status.setText(ui_text(self.lang,'正在等待后台请求结束并安全退出…'))
             self._background_exit_timer.start(100)
             event.ignore(); return
         QApplication.instance().removeEventFilter(self)
@@ -3261,17 +3285,51 @@ class App(QWidget):
         shutil.rmtree(self.cache_dir,ignore_errors=True); super().closeEvent(event)
         if self.services:self.services.finish_exit()
     def eventFilter(self,obj,event):
-        native_dialog = isinstance(obj, (QFileDialog, QInputDialog, QMessageBox))
-        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog) and obj is not self and not native_dialog:
-            # Modal dialogs are created by several feature modules. Applying
-            # the shared chrome here keeps their caption, border, and buttons
-            # visually consistent without duplicating layout code in each one.
-            install_window_chrome(obj, title=obj.windowTitle())
-            # Changing window flags during a Show event briefly hides the
-            # native widget. Re-show it on the next event turn so child
-            # controls keep reporting their real visibility to Qt and tests.
-            QTimer.singleShot(0, obj.show)
-        if isinstance(obj,QWidget) and (obj is self or self.isAncestorOf(obj)):
+        event_type=event.type()
+        if event_type not in self._INPUT_EVENTS and event_type not in self._DIALOG_EVENTS:
+            return super().eventFilter(obj,event)
+        if event_type in self._DIALOG_EVENTS and isinstance(obj,QDialog) and obj is not self:
+            from window_chrome import owns_window
+            if not owns_window(self,obj): return super().eventFilter(obj,event)
+            native_dialog = isinstance(obj, (QFileDialog, QInputDialog, QMessageBox))
+            from ui_i18n import language_for, localize_dialog
+            localize_dialog(obj, language_for(obj))
+            obj.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation, True)
+            if not native_dialog and not obj.property('pawchiveChromeInstalling'):
+                # Install before the native window is shown: changing flags
+                # in Show used to hide the dialog and queue a stale show()
+                # after it had already closed or left its modal exec loop.
+                if event.type() == QEvent.Type.Polish or hasattr(obj,'_pawchive_window_chrome'):
+                    install_window_chrome(obj, title=obj.windowTitle())
+        if event_type not in self._INPUT_EVENTS:
+            # Paint/destruction events do not need input hit testing. In
+            # particular don't inspect QWidget state midway through teardown.
+            return super().eventFilter(obj,event)
+        # A parented dialog is an ancestor's child in Qt, but it is still a
+        # different input surface. Never use isAncestorOf for main-window
+        # effects, wide theme hit testing, or URL drops.
+        # A few existing canvas/caption widgets keep an owner in .window;
+        # call the Qt base method so that attribute cannot shadow window().
+        main_surface = isinstance(obj, QWidget) and QWidget.window(obj) is self
+        application = QApplication.instance()
+        input_blocked = main_surface and (
+            application.activeModalWidget() not in (None, self) or
+            application.activePopupWidget() not in (None, self))
+        if main_surface and event.type() in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove,
+                QEvent.Type.Wheel):
+            hit = application.widgetAt(event.globalPosition().toPoint())
+            if hit is not None and QWidget.window(hit) is not self:
+                input_blocked = True
+        if input_blocked and event.type() in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove,
+                QEvent.Type.Wheel, QEvent.Type.DragEnter, QEvent.Type.DragMove,
+                QEvent.Type.Drop):
+            return True
+        main_input = main_surface and not input_blocked
+        if main_input:
             if event.type() in (QEvent.Type.DragEnter,QEvent.Type.DragMove):
                 if extract_link(self._mime_link_text(event.mimeData())) is not None:
                     event.acceptProposedAction()
@@ -3281,18 +3339,18 @@ class App(QWidget):
                 if info is not None:
                     event.acceptProposedAction()
                     return True
-        if obj is getattr(self,'profile',None):
+        if main_input and obj is getattr(self,'profile',None):
             if event.type()==QEvent.Type.KeyPress and event.key()==Qt.Key.Key_V and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self.paste_profile()
                 event.accept()
                 return True
-        if event.type()==event.Type.MouseMove:
+        if main_input and event.type()==event.Type.MouseMove:
             gp=event.globalPosition().toPoint(); local=self.mapFromGlobal(gp)
             dx=local.x()-self._last_particle.x(); dy=local.y()-self._last_particle.y()
             if self.rect().contains(local) and random.random()<.24 and abs(dx)+abs(dy)>8 and len(self.particles)<100:
                 self.particles.append(Particle(local.x(),local.y())); self._last_particle=QPointF(local)
                 if not self.fx.isActive(): self.fx.start(16)
-        elif event.type()==event.Type.MouseButtonPress:
+        elif main_input and event.type()==event.Type.MouseButtonPress:
             gp=event.globalPosition().toPoint(); local=self.mapFromGlobal(gp)
             theme_origin=self.theme.mapToGlobal(self.theme.rect().topLeft())
             theme_rect=QRect(theme_origin,self.theme.size())
