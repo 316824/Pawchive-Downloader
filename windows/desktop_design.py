@@ -967,8 +967,11 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     options.addLayout(ordering)
     w.title_check = GlowCheckBox()
     w.title_check.setChecked(True)
+    w.artist_folder_check = GlowCheckBox()
+    w.artist_folder_check.setChecked(True)
     w.select_posts_check = GlowCheckBox()
     w.select_posts_check.setChecked(True)
+    options.addWidget(w.artist_folder_check)
     options.addWidget(w.title_check)
     options.addWidget(w.select_posts_check)
     box.addWidget(w.options_panel)
@@ -1347,6 +1350,7 @@ def apply_style(w, dark, skin='default'):
         QScrollArea,QScrollArea>QWidget>QWidget {{background:transparent;border:0;}}
         QLineEdit {{background:{p['field']};border:1px solid {p['line']};border-radius:11px;padding:10px 13px;selection-background-color:{p['accent']};}}
         QLineEdit:focus {{border-color:{p['glow']};}}
+        QFileDialog QAbstractItemView QLineEdit {{padding:0px 3px;margin:0px;min-height:0px;border-radius:4px;}}
         QPushButton {{border:1px solid {p['line']};border-radius:11px;background:transparent;padding:9px 13px;font-size:13px;}}
         QPushButton:hover {{background:{p['hover']};border-color:{p['glow']};}}
         QPushButton:pressed {{background:{p['field']};}}

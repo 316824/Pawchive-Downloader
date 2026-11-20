@@ -48,11 +48,15 @@ def ask_download_plan(parent, profile, *, post=None, updates_after=None):
     row=QHBoxLayout(); folder=QLineEdit(parent.path.text()); folder.setReadOnly(True)
     browse=QPushButton(_copy(language,'browse'))
     def choose():
-        selected=QFileDialog.getExistingDirectory(dialog,_copy(language,'choose'),folder.text(),
+        initial=parent.browse_start_directory(folder.text()) if hasattr(parent,'browse_start_directory') else folder.text()
+        selected=QFileDialog.getExistingDirectory(dialog,_copy(language,'choose'),initial,
             options=QFileDialog.Option.DontUseNativeDialog)
         if selected: folder.setText(selected)
     browse.clicked.connect(choose); row.addWidget(folder,1); row.addWidget(browse)
     layout.addLayout(row)
+    artist_folder=_checkbox(parent,dialog,t(language,'按画师名创建主文件夹'),parent.title_check)
+    artist_folder.setChecked(getattr(parent,'artist_folder_check',parent.title_check).isChecked())
+    layout.addWidget(artist_folder)
     by_title=_checkbox(parent,dialog,_copy(language,'folders'),parent.title_check)
     by_title.setChecked(parent.title_check.isChecked()); layout.addWidget(by_title)
     rename=_checkbox(parent,dialog,_copy(language,'number'),parent.rename_check)
@@ -80,5 +84,5 @@ def ask_download_plan(parent, profile, *, post=None, updates_after=None):
     try:
         if dialog.exec()!=QDialog.DialogCode.Accepted: return None
         return dict(folder=folder.text().strip(),by_title=by_title.isChecked(),
-            rename_order=rename.isChecked(),content_mode=content.currentData())
+            rename_order=rename.isChecked(),content_mode=content.currentData(),artist_folder=artist_folder.isChecked())
     finally: dialog.deleteLater()

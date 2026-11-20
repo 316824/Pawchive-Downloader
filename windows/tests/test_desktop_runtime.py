@@ -146,7 +146,7 @@ class LifecycleTests(unittest.TestCase):
         self.window.profile.setText(self.config['profile'])
         self.window.path.setText(self.config['folder'])
         with patch.object(desktop,'Worker',side_effect=OSError('fixture checkpoint disk failure')):
-            self.window.launch_worker(self.config['profile'],None)
+            self.window.launch_worker(self.config['profile'],None,_destination=self.config['folder'])
         self.assertFalse(self.window.busy)
         self.assertTrue(self.window.profile.isEnabled())
         self.assertIn('fixture checkpoint disk failure',self.window.log.toPlainText())
@@ -160,7 +160,7 @@ class LifecycleTests(unittest.TestCase):
 
         self.window.path.setText(self.config['folder'])
         with patch.object(desktop,'Worker',side_effect=OSError('fixture checkpoint disk failure')):
-            self.window.launch_worker(self.config['profile'],None)
+            self.window.launch_worker(self.config['profile'],None,_destination=self.config['folder'])
         self.assertIsNone(self.window.worker)
         self.window.scanner=Scanner()
         self.window.busy=True
@@ -179,7 +179,7 @@ class LifecycleTests(unittest.TestCase):
             created.append(worker)
             raise OSError('fixture schedule binding failure')
         with patch.object(desktop.Worker,'start') as start,patch.object(self.runtime,'worker_created',side_effect=binding_failed):
-            self.window.launch_worker(self.config['profile'],None)
+            self.window.launch_worker(self.config['profile'],None,_destination=self.config['folder'])
         start.assert_not_called()
         self.assertEqual(len(created),1)
         job=self.journal.load(created[0].job_id)

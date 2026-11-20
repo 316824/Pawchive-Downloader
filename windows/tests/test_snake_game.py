@@ -72,11 +72,11 @@ class SnakeGameTests(unittest.TestCase):
         game.fragments = {(6, 5), (7, 5), (8, 5)}
         game.fragment_buffs = {(6, 5): 'pulse'}
         game._magnet_until = 200.0
-        before = (game._score, len(game.body), set(game.fragments))
+        before = (game._score, len(game.body), set(game.fragments), [list(item) for item in game.obstacles])
         game._move_snake()  # Hits its body, a glitch, and a shard together.
         game._soft_collision()
         game._apply_magnet(game.body[0])
-        self.assertEqual(before, (game._score, len(game.body), game.fragments))
+        self.assertEqual(before, (game._score, len(game.body), game.fragments, game.obstacles))
         self.assertFalse(game._rebuild_until)
 
     def test_vertical_moves_collide_across_fractional_obstacle_positions(self):
@@ -92,17 +92,61 @@ class SnakeGameTests(unittest.TestCase):
                 self.assertEqual(18, game._score)
                 self.assertEqual(3, len(game.body))
 
-    def test_moving_obstacle_hits_body_between_snake_steps(self):
+    def test_moving_obstacle_is_absorbed_by_body_without_damage(self):
         game = self.game
         game.body = [(10, 5), (9, 5), (8, 5), (7, 5), (6, 5)]
         game._score = 20
         game.obstacles = [[6.7, 5]]
         game._check_obstacle_collision([7.2])
+        self.assertEqual(20, game._score)
+        self.assertEqual(5, len(game.body))
+        self.assertFalse(game.obstacles)
+        game._check_obstacle_collision()
+        self.assertEqual(20, game._score)
+
+    def test_moving_obstacle_can_hit_head_between_snake_steps(self):
+        game = self.game
+        game.body = [(10, 5), (9, 5), (8, 5), (7, 5), (6, 5)]
+        game._score = 20
+        game.obstacles = [[9.8, 5]]
+        game._check_obstacle_collision([11.1])
         self.assertEqual(18, game._score)
         self.assertEqual(3, len(game.body))
-        # A single overlapping glitch must not remove a segment every frame.
+        # Head cooldown prevents repeated penalties from the same overlap.
         game._check_obstacle_collision()
         self.assertEqual(18, game._score)
+
+    def test_same_frame_body_hits_clear_all_touched_glitches_only(self):
+        game = self.game
+        game.body = [(10, 5), (9, 5), (8, 5), (7, 5), (6, 5)]
+        game.obstacles = [[8.4, 5], [6.5, 5], [14.0, 8]]
+        game._check_obstacle_collision([8.8, 7.2, 14.2])
+        self.assertEqual([[14.0, 8]], game.obstacles)
+        self.assertEqual(10, game._score)
+        self.assertEqual(5, len(game.body))
+
+    def test_simultaneous_head_hit_penalizes_once_and_body_hits_still_clear(self):
+        game = self.game
+        game.body = [(10, 5), (9, 5), (8, 5), (7, 5), (6, 5)]
+        game._score = 20
+        game.obstacles = [[10.1, 5], [6.2, 5], [10.7, 5]]
+        game._check_obstacle_collision()
+        self.assertEqual([[10.1, 5], [10.7, 5]], game.obstacles)
+        self.assertEqual(18, game._score)
+        self.assertEqual(3, len(game.body))
+
+    def test_protection_prevents_head_damage_while_body_keeps_absorbing(self):
+        game = self.game
+        for protected in ('_ghost_until', '_invincible_until', '_overclock_until'):
+            with self.subTest(protected=protected):
+                game._ghost_until = game._invincible_until = game._overclock_until = 0.0
+                setattr(game, protected, 101.0)
+                game.body = [(10, 5), (9, 5), (8, 5), (7, 5), (6, 5)]
+                game.obstacles = [[10.0, 5], [6.0, 5]]
+                game._check_obstacle_collision()
+                self.assertEqual([[10.0, 5]], game.obstacles)
+                self.assertEqual(10, game._score)
+                self.assertEqual(5, len(game.body))
 
     def test_timing_preserves_remainder_and_overclock_is_twice_as_fast(self):
         def movement_count(overclock):

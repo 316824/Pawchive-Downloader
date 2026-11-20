@@ -73,11 +73,13 @@ class RecommendationUiTests(unittest.TestCase):
                 self.assertIsInstance(dialog,QDialog)
                 self.assertEqual(download_plan._copy(language,'confirm'),dialog.windowTitle())
                 checks=dialog.findChildren(QCheckBox)
-                self.assertEqual(2,len(checks))
+                self.assertEqual(3,len(checks))
                 self.assertTrue(all(isinstance(check,GlowCheckBox) for check in checks))
                 self.assertTrue(all(check.property('lightTheme') for check in checks))
                 self.assertTrue(checks[0].isChecked())
-                self.assertFalse(checks[1].isChecked())
+                self.assertEqual(t(language,'按画师名创建主文件夹'),checks[0].text())
+                self.assertTrue(checks[1].isChecked())
+                self.assertFalse(checks[2].isChecked())
                 buttons=dialog.findChild(QDialogButtonBox)
                 localize_dialog(dialog,language) # same pass as the main App Show hook
                 self.assertEqual(t(language,'取消'),buttons.button(QDialogButtonBox.StandardButton.Cancel).text())
@@ -87,7 +89,7 @@ class RecommendationUiTests(unittest.TestCase):
                 self.assertEqual('images' if post else 'all',combo.currentData())
                 self.assertEqual(t(language,'图片与附件'),combo.itemText(0))
                 self.assertEqual(not bool(post),combo.isEnabled())
-                checks[1].setChecked(True)
+                checks[2].setChecked(True)
                 inspected.append(True)
                 (okay if accept else buttons.button(QDialogButtonBox.StandardButton.Cancel)).click()
             except BaseException as error:
@@ -105,6 +107,7 @@ class RecommendationUiTests(unittest.TestCase):
             with self.subTest(language=language):
                 plan=self._plan(language)
                 self.assertTrue(plan['by_title']);self.assertTrue(plan['rename_order'])
+                self.assertTrue(plan['artist_folder'])
                 self.assertEqual('all',plan['content_mode'])
                 self.assertEqual(self.temporary.name,plan['folder'])
 

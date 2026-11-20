@@ -6,6 +6,9 @@ from feature_text import LANGUAGES, TEXT, tr
 
 # The source text is Simplified Chinese; translations follow LANGUAGES[1:].
 COPY = {
+ '按画师名创建主文件夹': ('按畫師名建立主資料夾', 'Create a main folder named after the artist', '作家名のメインフォルダーを作成'),
+ '正在准备保存文件夹…': ('正在準備儲存資料夾…', 'Preparing the save folder…', '保存先フォルダーを準備中…'),
+ '准备保存文件夹失败，请选择可写且较短的保存路径': ('準備儲存資料夾失敗，請選擇可寫且較短的儲存路徑', 'Could not prepare the folder. Choose a writable, shorter save path.', 'フォルダーを準備できません。書き込み可能な短い保存先を選んでください。'),
  '有画师更新': ('有畫師更新', 'Artist updates', '作家の更新があります'),
  '画师数量超过单次迁移上限（1000位）。': ('畫師數量超過單次遷移上限（1000位）。', 'A transfer can contain at most 1,000 artists.', '一度に移行できる作家は1,000名までです。'),
  '画师数据超过单次迁移大小上限。': ('畫師資料超過單次遷移大小上限。', 'The artist data exceeds the transfer size limit.', '作家データが移行サイズの上限を超えています。'),

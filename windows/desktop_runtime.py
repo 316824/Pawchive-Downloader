@@ -386,6 +386,8 @@ class DesktopRuntime(QObject):
         w.profile.setText(config['profile']); w.path.setText(config['folder'])
         w.order_combo.setCurrentIndex(0 if config['order']=='newest' else 1)
         w.title_check.setChecked(bool(config['by_title']))
+        if hasattr(w,'artist_folder_check'):
+            w.artist_folder_check.setChecked(bool(config.get('artist_folder',False)))
         w.rename_check.setChecked(bool(config['rename_order'])); w.start_number.setValue(int(config['start_number']))
         self._old_selection=w.select_posts_check.isChecked()
         w.select_posts_check.setChecked(False)

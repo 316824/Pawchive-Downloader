@@ -114,6 +114,10 @@ def normalize_snapshot(value):
     # to the fixed starting number used by the desktop workflow.
     result = dict(profile=profile.strip().rstrip('/'), folder=str(Path(folder)), order=order,
                   by_title=by_title, rename_order=rename_order, start_number=1)
+    if 'artist_folder' in value:
+        if not isinstance(value['artist_folder'],bool):
+            raise ValueError('Invalid artist folder option.')
+        result['artist_folder']=value['artist_folder']
     if 'lang' in value:
         if value['lang'] not in ('简体中文', '繁體中文', 'English', '日本語'):
             raise ValueError('Unknown interface language.')

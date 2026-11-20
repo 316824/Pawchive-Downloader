@@ -6,7 +6,7 @@ from html import escape
 import random
 import re
 
-from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QIcon, QImageReader, QPainter, QPainterPath, QPixmap, QTransform
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget, QComboBox)
@@ -51,6 +51,7 @@ class _Cover(QWidget):
             self.cache.move_to_end(self.filename)
             return self.cache[self.filename]
         reader = QImageReader(self.filename)
+        reader.setDecideFormatFromContent(True)
         reader.setAutoTransform(True)
         size = reader.size()
         if size.isValid() and (size.width() > 420 or size.height() > 300):
@@ -213,6 +214,8 @@ class CoverCard(QFrame):
 
 
 class PostPicker(QDialog):
+    CARD_BATCH_SIZE = 16
+
     def __init__(self, parent, titles, checkbox_class, text):
         super().__init__(parent)
         install_background_host(self,getattr(parent,'background_store',None),'picker')
@@ -222,7 +225,12 @@ class PostPicker(QDialog):
         self.palette = parent.palette_tokens
         self.selected = set(range(len(self.titles)))
         self._cover_cache = OrderedDict()
-        self.cards, self.checks = [], []
+        # A long scan can contain hundreds of posts. Build only the first
+        # screen synchronously, then let the event loop paint between batches.
+        self.cards, self.checks = [None] * len(self.titles), [None] * len(self.titles)
+        self._checkbox_class = checkbox_class
+        self._closed = self._in_layout = False
+        self._positions = {}
         self._columns, self._visible = 0, []
         self.setObjectName('postPicker')
         self.setWindowTitle(text['choose_title'])
@@ -285,14 +293,17 @@ class PostPicker(QDialog):
         self.empty.setMinimumHeight(150)
         self.empty.setStyleSheet(f'color:{self.palette["muted"]};font-size:14px;')
         self.empty.hide()
-        for index, entry in enumerate(self.titles):
-            card = CoverCard(entry, checkbox_class, text, self.palette, self.dark, self.body,
-                             cover_cache=self._cover_cache)
-            mode=getattr(getattr(parent,'content_combo',None),'currentData',lambda:'all')()
-            card.content_choice.setCurrentIndex(max(0,card.content_choice.findData(mode)))
-            card.toggled.connect(lambda checked, n=index: self._set_selected(n, checked))
-            self.cards.append(card)
-            self.checks.append(card.check)
+        loading_copy = {
+            '简体中文': '正在载入图集卡片…', '繁體中文': '正在載入圖集卡片…',
+            'English': 'Loading collection cards…', '日本語': 'コレクションを読み込み中…',
+        }
+        self.loading = QLabel(loading_copy.get(getattr(parent, 'lang', ''), loading_copy['English']), self.body)
+        self.loading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.loading.setMinimumHeight(80)
+        self.loading.hide()
+        default_mode = getattr(getattr(parent,'content_combo',None),'currentData',lambda:'all')()
+        for entry in self.titles:
+            entry.setdefault('content_mode', default_mode)
         footer = QHBoxLayout()
         footer.addStretch(1)
         self.cancel_button = QPushButton(text['cancel'])
@@ -331,16 +342,55 @@ class PostPicker(QDialog):
         scrollbar.sliderPressed.connect(self.scroll_animation.stop)
         self.finished.connect(self.scroll_animation.stop)
         self.finished.connect(lambda *_: self._cover_cache.clear())
+        self._build_timer = QTimer(self)
+        self._build_timer.setSingleShot(True)
+        self._build_timer.timeout.connect(self._build_cards)
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.timeout.connect(lambda: self._layout_cards(force=True))
+        self.finished.connect(self._stop_building)
         self.scroll.viewport().installEventFilter(self)
-        self.search.textChanged.connect(lambda *_: self._layout_cards(force=True))
+        self.search.textChanged.connect(self._search_changed)
         self.all_button.clicked.connect(lambda: self._select_all(True))
         self.none_button.clicked.connect(lambda: self._select_all(False))
         self.cancel_button.clicked.connect(self.reject)
         self.confirm_button.clicked.connect(self.accept)
         for button in self.findChildren(QPushButton):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._layout_cards(force=True)
+        self._build_cards()
         self._update_count()
+
+    def _stop_building(self, *_):
+        self._closed = True
+        self._build_timer.stop()
+        self._layout_timer.stop()
+
+    def _build_cards(self):
+        if self._closed:
+            return
+        query = self.search.text().strip().casefold()
+        pending = [index for index, card in enumerate(self.cards) if card is None]
+        # A search may point at an as-yet unbuilt last post. It should appear
+        # in the next batch, without waiting for every earlier card first.
+        if query:
+            pending.sort(key=lambda index: query not in str(self.titles[index].get('title') or '').casefold())
+        for index in pending[:self.CARD_BATCH_SIZE]:
+            entry = self.titles[index]
+            card = CoverCard(entry, self._checkbox_class, self.text, self.palette, self.dark, self.body,
+                             cover_cache=self._cover_cache)
+            card.hide()
+            card.content_choice.setCurrentIndex(max(0, card.content_choice.findData(entry.get('content_mode', 'all'))))
+            card.set_selected(index in self.selected)
+            card.toggled.connect(lambda checked, n=index: self._set_selected(n, checked))
+            self.cards[index], self.checks[index] = card, card.check
+        self._layout_cards(force=True)
+        if len(pending) > self.CARD_BATCH_SIZE:
+            self._build_timer.start(0)
+
+    def _search_changed(self, *_):
+        self._layout_cards(force=True)
+        if any(card is None for card in self.cards) and not self._closed:
+            self._build_timer.start(0)
 
     def _set_selected(self, index, checked):
         self.selected.add(index) if checked else self.selected.discard(index)
@@ -349,7 +399,8 @@ class PostPicker(QDialog):
     def _select_all(self, checked):
         self.selected = set(range(len(self.titles))) if checked else set()
         for card in self.cards:
-            card.set_selected(checked)
+            if card is not None:
+                card.set_selected(checked)
         self._update_count()
 
     def _update_count(self):
@@ -358,6 +409,13 @@ class PostPicker(QDialog):
         self.confirm_button.setEnabled(bool(self.selected))
 
     def _layout_cards(self, force=False):
+        if self._closed:
+            return
+        # Changing the grid can resize the viewport immediately. Never enter
+        # a second remove/reinsert pass while the first pass is still active.
+        if self._in_layout:
+            self._layout_timer.start(0)
+            return
         query = self.search.text().strip().casefold()
         visible = [index for index, entry in enumerate(self.titles)
                    if query in str(entry.get('title') or '').casefold()]
@@ -365,20 +423,37 @@ class PostPicker(QDialog):
         if not force and visible == self._visible and columns == self._columns:
             return
         self._visible, self._columns = visible, columns
+        self._in_layout = True
         self.body.setUpdatesEnabled(False)
         try:
-            while self.grid.count():
-                self.grid.takeAt(0).widget().hide()
+            built = [index for index in visible if self.cards[index] is not None]
+            positions = {index: divmod(position, columns) for position, index in enumerate(built)}
+            for index in self._positions.keys() - positions.keys():
+                self.grid.removeWidget(self.cards[index])
+                self.cards[index].hide()
+            for indicator in (self.empty, self.loading):
+                self.grid.removeWidget(indicator)
+                indicator.hide()
             for column in range(4):
                 self.grid.setColumnStretch(column, 1 if column < columns else 0)
-            for position, index in enumerate(visible):
-                self.grid.addWidget(self.cards[index], position // columns, position % columns)
+            for index, position in positions.items():
+                if self._positions.get(index) != position:
+                    self.grid.addWidget(self.cards[index], *position)
                 self.cards[index].show()
+            self._positions = positions
             if not visible:
                 self.grid.addWidget(self.empty, 0, 0, 1, columns)
                 self.empty.show()
+            elif len(built) < len(visible):
+                self.grid.addWidget(self.loading, (len(built) + columns - 1) // columns, 0, 1, columns)
+                self.loading.show()
+            self.grid.invalidate()
+            self.grid.activate()
         finally:
             self.body.setUpdatesEnabled(True)
+            self._in_layout = False
+        self.body.updateGeometry()
+        self.body.update()
         self.visible_count.setText(self.copy['shown'].format(visible=len(visible), total=len(self.titles)))
 
     def _update_top_button(self, *_):
@@ -396,11 +471,17 @@ class PostPicker(QDialog):
     def eventFilter(self, watched, event):
         if watched is self.scroll.viewport():
             if event.type() == QEvent.Type.Resize:
-                self._layout_cards()
+                self._layout_timer.start(0)
                 self._update_top_button()
             elif event.type() == QEvent.Type.Wheel:
                 self.scroll_animation.stop()
         return super().eventFilter(watched, event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Hidden-dialog geometry is provisional. Reflow after Qt has applied
+        # the actual title bar, style sheet and viewport size for the first paint.
+        self._layout_timer.start(0)
 
 
 def choose_posts(parent, titles, checkbox_class, text):

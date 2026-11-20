@@ -250,6 +250,10 @@ class ScheduleDialog(QDialog):
         self.order=QComboBox(); self.order.addItems([parent.order_combo.itemText(0),parent.order_combo.itemText(1)])
         self.order.setCurrentIndex(parent.order_combo.currentIndex()); controls.addWidget(self.order)
         layout.addLayout(controls)
+        self.artist_folder=type(parent.title_check)(parent.artist_folder_check.text())
+        self.artist_folder.setProperty('lightTheme',not parent._dark)
+        self.artist_folder.setChecked(parent.artist_folder_check.isChecked())
+        layout.addWidget(self.artist_folder)
         self.by_title=type(parent.title_check)(parent.title_check.text()); self.by_title.setProperty('lightTheme',not parent._dark); self.by_title.setChecked(parent.title_check.isChecked())
         layout.addWidget(self.by_title)
         numbering=QHBoxLayout(); self.rename=type(parent.rename_check)(parent.rename_check.text()); self.rename.setProperty('lightTheme',not parent._dark); self.rename.setChecked(parent.rename_check.isChecked())
@@ -264,7 +268,9 @@ class ScheduleDialog(QDialog):
         self.refresh()
 
     def browse(self):
-        folder=QFileDialog.getExistingDirectory(self,tr(self.lang,'folder'),self.folder.text(),
+        parent=self.parent()
+        initial=parent.browse_start_directory(self.folder.text()) if hasattr(parent,'browse_start_directory') else self.folder.text()
+        folder=QFileDialog.getExistingDirectory(self,tr(self.lang,'folder'),initial,
                                                options=QFileDialog.Option.DontUseNativeDialog)
         if folder:self.folder.setText(folder)
 
@@ -275,7 +281,7 @@ class ScheduleDialog(QDialog):
             self.notice.setText(tr(self.lang,'schedule_invalid')); return
         snapshot=dict(profile=self.profile.text().strip(),folder=str(Path(self.folder.text()).resolve()),
             order='newest' if self.order.currentIndex()==0 else 'oldest',by_title=self.by_title.isChecked(),
-            rename_order=self.rename.isChecked(),start_number=1)
+            rename_order=self.rename.isChecked(),start_number=1,artist_folder=self.artist_folder.isChecked())
         try:self.runtime.add_schedule(normalize_snapshot(snapshot),due)
         except Exception as error:
             self.notice.setText(tr(self.lang,'schedule_error',error=str(error))); return

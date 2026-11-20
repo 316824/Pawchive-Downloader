@@ -57,6 +57,19 @@ def run(window_class, output):
                 window.validate_profile()
                 if not window.start.isEnabled():
                     raise RuntimeError('Download validation did not accept the test inputs.')
+                from download_settings import sanitize_artist_name,browse_directory
+                if not window.artist_folder_check.isChecked():
+                    raise RuntimeError('Artist folders must be enabled on a fresh profile.')
+                window.artist_folder_check.setChecked(False)
+                if settings.value('download/artist_folder',True,type=bool):
+                    raise RuntimeError('The download checkbox preference was not saved.')
+                window.artist_folder_check.setChecked(True)
+                settings.setValue('last_download_path',str(Path(directory)/'removed'/'child'))
+                if Path(browse_directory(settings)) != Path(directory):
+                    raise RuntimeError('Deleted browse history did not fall back to its parent.')
+                settings.remove('last_download_path')
+                if sanitize_artist_name('画师/ねこ:') != '画师_ねこ_':
+                    raise RuntimeError('The Unicode artist-folder sanitizer is missing.')
                 window.profile.clear()
                 window.language.setCurrentIndex(2)
                 window.language.setCurrentIndex(0)
@@ -120,6 +133,7 @@ def run(window_class, output):
                     'cover picker and local title search','QtNetwork and local lifecycle',
                     'pinned invitation public key','invitation, schedule and calendar dialogs',
                     'artist cards and subscriptions dialogs','single-paint populated artist cards',
+                    'download preferences, Unicode artist folders and deleted-path fallback',
                     'bundled four-language Qt controls'])
             except Exception as error:
                 failures.append(str(error))

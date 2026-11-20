@@ -342,7 +342,7 @@ class QueueUiRegressionTests(unittest.TestCase):
 
         try:
             with patch.object(self.window, '_queue_insert_batch', new=observed_batch):
-                self.assertTrue(self.window._start_queue(entries, profile))
+                self.assertTrue(self.window._start_queue(entries, profile,_destination=str(self.root)))
                 self.assertEqual({}, self.workers, 'download started before preparation yielded')
                 try:
                     self.wait_until(lambda: self.window.queue_scheduler is not None and

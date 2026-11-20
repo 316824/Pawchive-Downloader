@@ -444,7 +444,7 @@ class Worker(_LegacyWorker):
     # Python integers keep multi-gigabyte ZIP/video progress out of Qt's int32 range.
     progress = Signal(str,object,object)
     def __init__(self,folder,profile,order,by_title,selected_post_urls=None,rename_order=False,
-                 start_number=1,lang='简体中文',journal=None,resume_job_id=None,layout_version=0,content_mode='all',resume_config=None,record_artist=True):
+                 start_number=1,lang='简体中文',journal=None,resume_job_id=None,layout_version=0,content_mode='all',resume_config=None,record_artist=True,destination_options=None):
         self.journal=journal
         self.preserve_on_interrupt=False
         self.resume_saved_count=0
@@ -466,7 +466,8 @@ class Worker(_LegacyWorker):
             self.job_id=resume_job_id or journal.create(dict(folder=str(self.folder),profile=self.profile,
                 order=order,by_title=bool(by_title),selected_post_urls=sorted(self.selected_post_urls),
                 rename_order=bool(rename_order),start_number=start_number,lang=lang,
-                layout_version=int(layout_version or 0),content_mode=content_mode,record_artist=bool(record_artist)))
+                layout_version=int(layout_version or 0),content_mode=content_mode,record_artist=bool(record_artist),
+                **{k:v for k,v in (destination_options or {}).items() if k in {'base_folder','artist_folder','artist_name'}}))
     def run(self):
         if self.journal is None:
             return super().run()
@@ -1069,20 +1070,31 @@ class SnakeGameWidget(QWidget):
             self._score = 0
 
     def _check_obstacle_collision(self, previous_positions=None):
-        """Test moving rectangles, including every snake segment.
+        """Penalize head hits; body segments absorb and remove glitches.
 
-        Glitches move between snake steps. Checking only the head at the next
-        grid position missed vertical crossings and glitches passing a still
-        segment; testing the swept horizontal extent closes both gaps.
+        Test each glitch's swept rectangle so fractional movement cannot miss
+        a vertical head crossing or a glitch passing a stationary body segment.
+        Resolve all contacts against the same body before applying soft damage.
         """
-        if self._idle:
+        if self._idle or not self.body:
             return
+        head, body = self.body[0], self.body[1:]
+        survivors = []
+        head_hit = False
         for index, (x, y) in enumerate(self.obstacles):
             previous_x = previous_positions[index] if previous_positions is not None else x
             left, right = min(x, previous_x), max(x, previous_x) + 1.0
-            if any(y == sy and left < sx + 1.0 and right > sx for sx, sy in self.body):
-                self._soft_collision()
-                return
+            hx, hy = head
+            if y == hy and left < hx + 1.0 and right > hx:
+                # A shared head/body overlap is still a head hit. The existing
+                # cooldown and protection buffs decide whether damage applies.
+                head_hit = True
+                survivors.append([x, y])
+            elif not any(y == sy and left < sx + 1.0 and right > sx for sx, sy in body):
+                survivors.append([x, y])
+        self.obstacles = survivors
+        if head_hit:
+            self._soft_collision()
 
     def _move_snake(self):
         if self._idle:
@@ -1431,6 +1443,7 @@ class ProfileScanWorker(QThread):
     counts=Signal(int,int); result=Signal(object); failed=Signal(str)
     def __init__(self,profile,cache_dir,selected_urls=None,after_ts=None):
         super().__init__(); self.profile=profile.rstrip('/'); self.cache_dir=Path(cache_dir); self.paused=False; self.finish_requested=False
+        self.artist_name=''
         # Recovery scans can be limited to the albums that still have a
         # durable checkpoint.  The profile is still paged in order, but
         # unrelated cards do not trigger detail/cover requests or enter the
@@ -1447,6 +1460,9 @@ class ProfileScanWorker(QThread):
                 if self.finish_requested or self.isInterruptionRequested(): break
                 url=f'{self.profile}?o={offset}' if offset else self.profile
                 response=session.get(url,timeout=20); response.raise_for_status(); soup=BeautifulSoup(response.text,'html.parser'); cards=soup.select('article.post-card')
+                if not offset:
+                    from download_settings import artist_name_from_html
+                    self.artist_name=artist_name_from_html(response.text)
                 if self.isInterruptionRequested(): break
                 if not cards: break
                 page_post_count=len(titles)
@@ -1552,6 +1568,8 @@ class App(QWidget):
         self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
         self._queue_view_pending=False
         self._queue_preparation=None; self._queue_finalizer=None; self._queue_finalizing=False
+        self._destination_worker=None; self._destination_callback=None
+        self._active_download_folder=''; self._destination_options={}
         self._queue_insert_timer=QTimer(self)
         self._queue_insert_timer.setSingleShot(True)
         self._queue_insert_timer.timeout.connect(self._queue_insert_batch)
@@ -1599,6 +1617,8 @@ class App(QWidget):
         build_interface(self,ThemeSwitch=ThemeSwitch,SoftComboBox=SoftComboBox,
             GlowButton=GlowButton,GlowCheckBox=GlowCheckBox,RainbowProgress=RainbowProgress,
             RainbowCredit=RainbowCredit,languages=TEXT,icon_path=icon_path)
+        from download_settings import install_preferences
+        install_preferences(self)
         from update_checker import install_update_checker
         self.update_controller=install_update_checker(self,self.update_button,services.store if services else None,
             current_version='v1.3',delay_ms=None if QApplication.platformName()=='offscreen' else 1800)
@@ -1746,6 +1766,7 @@ class App(QWidget):
         self.profile_label.setText('请输入完整的 pawchive.pw 画师主页链接' if l=='简体中文' else '請輸入完整的 pawchive.pw 畫師首頁連結' if l=='繁體中文' else 'Enter the full Pawchive creator profile URL' if en else 'PawchiveのクリエイターページURLを入力')
         self.folder_label.setText('选择图片保存文件夹' if l=='简体中文' else '選擇圖片儲存資料夾' if l=='繁體中文' else 'Image save folder' if en else '画像の保存先フォルダー')
         self.default_path_check.setText('保存为默认路径' if l=='简体中文' else '設為預設路徑' if l=='繁體中文' else 'Save as default folder' if en else '既定の保存先にする')
+        self.artist_folder_check.setText(ui_text(l,'按画师名创建主文件夹'))
         self.order_label.setText('日期顺序' if l=='简体中文' else '日期順序' if l=='繁體中文' else 'Date order' if en else '日付順')
         self.order_combo.setItemText(0,'从新到旧' if l=='简体中文' else '從新到舊' if l=='繁體中文' else 'Newest first' if en else '新しい順')
         self.order_combo.setItemText(1,'从旧到新' if l=='简体中文' else '從舊到新' if l=='繁體中文' else 'Oldest first' if en else '古い順')
@@ -1902,7 +1923,7 @@ class App(QWidget):
         self.busy=busy
         if hasattr(self,'content_combo'): self.content_combo.setEnabled(not busy)
         if busy: self.completed_path=None; self.open_folder_button.hide()
-        controls=(self.profile,self.order_combo,self.title_check,self.select_posts_check,self.rename_check,self.start_number,self.default_path_check,self.browse,self.paste_button)
+        controls=(self.profile,self.order_combo,self.title_check,self.artist_folder_check,self.select_posts_check,self.rename_check,self.start_number,self.default_path_check,self.browse,self.paste_button)
         for widget in controls: widget.setEnabled(not busy)
         self.clear_cache.setEnabled(not busy)
         self.validate_profile()
@@ -1992,6 +2013,7 @@ class App(QWidget):
         self.handle_link_text(profile,prompt_post=False)
         self.path.setText(plan['folder'])
         self.title_check.setChecked(plan['by_title'])
+        self.artist_folder_check.setChecked(plan.get('artist_folder',self.artist_folder_check.isChecked()))
         self.rename_check.setChecked(plan['rename_order'])
         self.content_combo.setCurrentIndex(max(0,self.content_combo.findData(plan['content_mode'])))
 
@@ -2269,6 +2291,9 @@ class App(QWidget):
         self.focus_button.setProperty('selected',self.logs_hidden)
         self.focus_button.style().unpolish(self.focus_button); self.focus_button.style().polish(self.focus_button)
     def stop_download(self):
+        if self._destination_worker is not None:
+            self.stop_requested=True; self._destination_worker.requestInterruption()
+            self.set_workflow('stopping'); return
         if self.queue_scheduler is not None and self.busy:
             for task in list(self.queue_scheduler.active_tasks):
                 self.queue_scheduler.pause(task.id)
@@ -2305,6 +2330,8 @@ class App(QWidget):
             self._album_current,self._album_total=map(int,match.groups())
             self.album_value.setText(f'{self._album_current} / {self._album_total}')
         if name.startswith('✓'):
+            worker=getattr(self,'worker',None)
+            self._remember_download_directory(self._active_download_folder or getattr(worker,'folder',None))
             self.files_saved+=1; self.files_value.setText(str(self.files_saved)); self.percent_label.setText('100')
             self.percent_unit.show(); self._transfer_sample=None; self._speed=0.; self.speed_value.setText('—')
             return
@@ -2321,7 +2348,8 @@ class App(QWidget):
         self.percent_label.setText(str(max(0,min(100,int(received*100/total)))) if total else '—')
         self.percent_unit.setVisible(bool(total))
     def pick(self):
-        d=QFileDialog.getExistingDirectory(self,TEXT[self.lang]['choose'],self.path.text() or str(Path.home()),
+        from download_settings import browse_directory
+        d=QFileDialog.getExistingDirectory(self,TEXT[self.lang]['choose'],browse_directory(self.settings,self.path.text()),
             options=QFileDialog.Option.DontUseNativeDialog)
         if d:
             if not self.path.text() or Path(d)!=Path(self.path.text()): self.completed_path=None; self.open_folder_button.hide()
@@ -2331,6 +2359,67 @@ class App(QWidget):
     def save_default_path_setting(self,checked):
         if checked and self.path.text(): self.settings.setValue('default_save_path',self.path.text())
         elif not checked: self.settings.remove('default_save_path')
+    def browse_start_directory(self,current=''):
+        from download_settings import browse_directory
+        return browse_directory(self.settings,current or self.path.text())
+
+    def _prepare_download_destination(self,profile,callback,artist_name=''):
+        from download_settings import DestinationPreparationWorker
+        if self._destination_worker is not None: return False
+        scanner=getattr(self,'scanner',None)
+        if scanner is not None and getattr(scanner,'profile','').rstrip('/')==profile.rstrip('/'):
+            artist_name=artist_name or getattr(scanner,'artist_name','')
+        if not artist_name and getattr(self.services,'store',None) is not None:
+            from artist_cards import list_cards
+            artist_name=next((card.get('name','') for card in list_cards(self.services.store)
+                              if card['profile'].rstrip('/')==profile.rstrip('/')),'')
+        self.set_busy_state(True); self.set_workflow('download')
+        self.status.setText(ui_text(self.lang,'正在准备保存文件夹…'))
+        self.stop_requested=False
+        self._destination_callback=callback
+        worker=DestinationPreparationWorker(self.path.text(),profile,self.artist_folder_check.isChecked(),artist_name,self)
+        self._destination_worker=worker
+        worker.result.connect(self._destination_ready)
+        worker.failed.connect(self._destination_failed)
+        worker.start()
+        return True
+
+    def _destination_ready(self,result):
+        worker=self._destination_worker
+        if worker is not None and worker.isRunning():
+            QTimer.singleShot(10,lambda:self._destination_ready(result)); return
+        if worker is not None: worker.deleteLater()
+        callback=self._destination_callback
+        self._destination_worker=None; self._destination_callback=None
+        self._destination_options=dict(result)
+        self._active_download_folder=result['folder']
+        self.set_busy_state(False)
+        if self._close_when_worker_stops:
+            QTimer.singleShot(0,self.close); return
+        if self.stop_requested:
+            self.set_workflow('stopped'); self.status.setText(AUX_TEXT[self.lang]['cancelled'])
+            if self.services:self.services.task_finished(False,paused=True)
+            return
+        if callable(callback): callback(result['folder'])
+
+    def _destination_failed(self,message):
+        worker=self._destination_worker
+        if worker is not None and worker.isRunning():
+            QTimer.singleShot(10,lambda:self._destination_failed(message)); return
+        if worker is not None: worker.deleteLater()
+        self._destination_worker=None; self._destination_callback=None
+        self.set_busy_state(False); self.set_workflow('stopped' if self.stop_requested else 'error')
+        self.status.setText(AUX_TEXT[self.lang]['cancelled'] if self.stop_requested else
+                           ui_text(self.lang,'准备保存文件夹失败，请选择可写且较短的保存路径'))
+        self.log.append(str(message))
+        if self.services: self.services.task_finished(False,error=message,paused=self.stop_requested)
+        if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
+
+    def _remember_download_directory(self,folder=None):
+        from download_settings import writable_directory
+        folder=str(folder or self._active_download_folder or self.path.text())
+        if self.settings.value('last_download_path','',type=str)!=folder and writable_directory(folder):
+            self.settings.setValue('last_download_path',folder)
     def copy_log_text(self):
         if not self.log.toPlainText():
             self.status.setText(self.ui_text()['copy_empty']); return
@@ -2401,7 +2490,7 @@ class App(QWidget):
         order='newest' if self.order_combo.currentIndex()==0 else 'oldest'
         # Queue tasks are numbered once, after every album settles. Running a
         # per-album renamer here would make priority changes affect filenames.
-        worker=Worker(self.path.text(), self._queue_profile or self.profile.text().strip(),
+        worker=Worker(self._active_download_folder or self.path.text(), self._queue_profile or self.profile.text().strip(),
                       order, self.title_check.isChecked(), selected,
                       False, 1, self.lang, content_mode=(task.metadata or {}).get('content_mode','all'), **extra)
         if getattr(worker,'job_id',None):
@@ -2487,6 +2576,8 @@ class App(QWidget):
         scheduler=self.queue_scheduler
         if scheduler is None:
             return
+        if task.completed_files:
+            self._remember_download_directory((task.metadata or {}).get('_worker_config',{}).get('folder'))
         job_id=self._queue_job_ids.get(task.id)
         actual=scheduler.task(task.id)
         if actual is not None and job_id:
@@ -2511,7 +2602,9 @@ class App(QWidget):
 
     def _queue_payload_path(self, task):
         """Find a private album/partial path which can be moved to recycle bin."""
-        folder=Path(self.path.text()).expanduser() if self.path.text().strip() else None
+        saved=(task.metadata or {}).get('_worker_config',{})
+        folder_text=saved.get('folder') or self._active_download_folder or self.path.text()
+        folder=Path(folder_text).expanduser() if folder_text else None
         by_title=bool((task.metadata or {}).get('by_title',self.title_check.isChecked()))
         if folder and by_title:
             try:
@@ -2583,7 +2676,8 @@ class App(QWidget):
         self.set_workflow('complete' if completed else 'stopped' if paused or cancelled else 'error' if failed else 'complete')
         if completed:
             self.status.setText(f"{TEXT[self.lang]['done']} · {self._queue_completed_files}")
-            self.completed_path=str(Path(self.path.text()).resolve())
+            self.completed_path=str(Path(self._active_download_folder or self.path.text()).resolve())
+            if self._queue_completed_files: self._remember_download_directory(self.completed_path)
             self.open_folder_button.setVisible(Path(self.completed_path).is_dir())
             self.file_name.set_full_text(self.ui_text()['settled'])
             self.files_saved=self._queue_completed_files
@@ -2670,7 +2764,7 @@ class App(QWidget):
         self.set_workflow('error'); self.status.setText(ui_text(self.lang,'图片编号未完成，可重启后继续恢复'))
         self.log.append(str(message))
 
-    def _start_queue(self, entries, profile):
+    def _start_queue(self, entries, profile, _destination=None):
         if self.busy:
             return False
         if not self.path.text().strip():
@@ -2678,6 +2772,12 @@ class App(QWidget):
             if not self.path.text().strip(): return False
         entries=[dict(entry) for entry in entries if isinstance(entry,dict) and entry.get('url')]
         if not entries: return False
+        resuming=all((entry.get('metadata') or {}).get('job_id') for entry in entries)
+        if _destination is None and not resuming:
+            name=next((str(entry.get('artist_name') or '') for entry in entries if entry.get('artist_name')),'')
+            return self._prepare_download_destination(profile,
+                lambda folder:self._start_queue(entries,profile,_destination=folder),name)
+        self._active_download_folder=str(_destination or self.path.text())
         self._queue_insert_timer.stop()
         self._selected_content_mode=self.content_combo.currentData()
         self._queue_profile=str(profile).strip().rstrip('/')
@@ -2688,12 +2788,15 @@ class App(QWidget):
         self.set_busy_state(True); self.set_workflow('download')
         self.status.setText(ui_text(self.lang,'正在准备下载队列…'))
         from queue_operations import QueuePreparationWorker
-        config=dict(folder=str(Path(self.path.text()).expanduser().resolve()),
+        config=dict(folder=str(Path(self._active_download_folder).expanduser().resolve()),
             profile=self._queue_profile, order='newest' if self.order_combo.currentIndex()==0 else 'oldest',
             by_title=bool(self.title_check.isChecked()), rename_order=False, start_number=1,
             lang=self.lang, queue_task=True, queue_rename_order=bool(self.rename_check.isChecked()),
             queue_start_number=1,layout_version=2,record_artist=bool(self._next_record_artist),
             content_mode=getattr(self,'_selected_content_mode','all'))
+        if not resuming:
+            config.update({key:value for key,value in self._destination_options.items()
+                           if key in {'base_folder','artist_folder','artist_name'}})
         worker=QueuePreparationWorker(self.services.journal if self.services else None,entries,config,self)
         self._queue_preparation=worker
         worker.result.connect(self._queue_prepared)
@@ -2730,6 +2833,17 @@ class App(QWidget):
         # Show the queue in small batches so a large selection does not block
         # the first paint or allocate all thumbnail widgets in one event.
         self._queue_pending_entries=list(entries)
+        # Restoring from the bin first resolves the destination and persists
+        # a fresh checkpoint. Failed/cancelled preparation must leave the old
+        # restore link and payload intact.
+        if self.recycle_bin is not None:
+            for item in entries:
+                metadata=item.get('metadata') or {}
+                identifier=metadata.get('recycled_from')
+                if identifier and metadata.get('job_id'):
+                    try:self.recycle_bin.take(identifier)
+                    except (OSError,ValueError,RuntimeError):pass
+            self.refresh_recycle_bin()
         self._queue_insert_batch()
 
     def _queue_insert_batch(self):
@@ -2784,6 +2898,8 @@ class App(QWidget):
             return False
         self.profile.setText(profile)
         self.path.setText(str(first.get('folder', '')))
+        self._active_download_folder=str(first.get('folder',''))
+        self.artist_folder_check.setChecked(bool(first.get('artist_folder',False)))
         self.order_combo.setCurrentIndex(0 if first.get('order', 'newest') == 'newest' else 1)
         self.title_check.setChecked(bool(first.get('by_title', True)))
         self.rename_check.setChecked(bool(first.get('queue_rename_order', first.get('rename_order', False))))
@@ -3018,10 +3134,6 @@ class App(QWidget):
         profile=entry.profile_url or self.profile.text().strip()
         if not self._start_queue([task],profile):
             return False
-        try:
-            self.recycle_bin.take(entry.id)
-        except (OSError,ValueError,RuntimeError):
-            pass
         self.refresh_recycle_bin()
         return True
 
@@ -3131,7 +3243,10 @@ class App(QWidget):
         if hasattr(self,'splash'): self.splash._allow_close=True; self.splash.close()
         self.set_busy_state(False); self.set_workflow('error'); self.status.setText(AUX_TEXT[self.lang]['scan_failed']); self.log.append(str(message))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
-    def launch_worker(self,profile,selected):
+    def launch_worker(self,profile,selected,_destination=None):
+        if _destination is None and not (self.services and self.services.resume_job_id):
+            return self._prepare_download_destination(profile,
+                lambda folder:self.launch_worker(profile,selected,_destination=folder))
         self.reset_dashboard(len(selected) if selected else 0)
         self.set_busy_state(True); self.set_workflow('download'); self.progress.setValue(0); self.log.clear()
         self.status.setText(TEXT[self.lang]['working'])
@@ -3142,10 +3257,12 @@ class App(QWidget):
                        layout_version=2)
         extra['content_mode']=self.content_combo.currentData()
         extra['record_artist']=bool(self._next_record_artist)
+        extra['destination_options']=self._destination_options if _destination is not None else {}
         self.worker=None
         try:
-            self.worker=Worker(self.path.text(),profile,order,self.title_check.isChecked(),selected,
+            self.worker=Worker(_destination or self.path.text(),profile,order,self.title_check.isChecked(),selected,
                 self.rename_check.isChecked(),1,self.lang,**extra)
+            self._active_download_folder=str(self.worker.folder)
             self._next_record_artist=True
             self.files_saved=getattr(self.worker,'resume_saved_count',0)
             self.files_value.setText(str(self.files_saved))
@@ -3205,7 +3322,8 @@ class App(QWidget):
     def done(self,n):
         worker=getattr(self,'worker',None)
         if worker and worker.isRunning(): worker.wait()
-        self.set_busy_state(False); self.status.setText(f"{TEXT[self.lang]['done']} · {n}"); folder=Path(self.path.text()) if self.path.text().strip() else None; self.completed_path=str(folder) if n>0 and folder and folder.is_dir() else None; self.open_folder_button.setVisible(bool(self.completed_path))
+        self.set_busy_state(False); self.status.setText(f"{TEXT[self.lang]['done']} · {n}"); folder=Path(self._active_download_folder or self.path.text()) if self._active_download_folder or self.path.text().strip() else None; self.completed_path=str(folder) if n>0 and folder and folder.is_dir() else None; self.open_folder_button.setVisible(bool(self.completed_path))
+        if n>0: self._remember_download_directory(self.completed_path)
         self.set_workflow('complete'); self.stop_requested=False; self.files_saved=n; self.files_value.setText(str(n)); self.speed_value.setText('—')
         self.progress.setValue(100 if n else 0); self.percent_label.setText('100' if n else '0'); self.percent_unit.show()
         self.taskbar_progress.set_value(100 if n else 0)
@@ -3240,10 +3358,11 @@ class App(QWidget):
                 self.status.setText(tr(self.lang,'saved_progress'))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def closeEvent(self,event):
+        self.settings.sync()
         if self.services and not self._close_when_worker_stops and not self.services.request_close():
             event.ignore(); return
         async_busy=any(w is not None and w.isRunning() for w in
-                       (getattr(self,'_queue_preparation',None),getattr(self,'_queue_finalizer',None)))
+                       (getattr(self,'_queue_preparation',None),getattr(self,'_queue_finalizer',None),getattr(self,'_destination_worker',None)))
         if self.busy or async_busy or getattr(self,'_queue_pending_entries',[]):
             event.ignore(); self._close_when_worker_stops=True; self.status.setText(AUX_TEXT[self.lang]['close_wait'])
             if self.services:
@@ -3260,6 +3379,9 @@ class App(QWidget):
             resume_scan=getattr(self,'_resume_scan_worker',None)
             if resume_scan is not None and resume_scan.isRunning():
                 resume_scan.requestInterruption()
+            destination_worker=getattr(self,'_destination_worker',None)
+            if destination_worker is not None and destination_worker.isRunning():
+                destination_worker.requestInterruption()
             return
         self.update_controller.close()
         background=[worker for worker in self.findChildren(QThread) if worker.isRunning()]
