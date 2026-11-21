@@ -193,7 +193,8 @@ class DownloadSettingsTests(unittest.TestCase):
         window=self.window(services=True)
         destination=create_destination(self.root,PROFILE,True,'秋宫 白晔')
         window._destination_options=destination
-        entries=[dict(url=PROFILE+'/post/1',title='Album',formats=['.jpg'],file_count=1)]
+        entries=[dict(url=PROFILE+'/post/1',title='Album',formats=['.jpg'],file_count=1,
+            assets=[dict(url='https://file.pawchive.pw/data/aa/bb/'+('a'*64)+'.jpg',name='1.jpg',direct=False,index=0)])]
         with patch.object(window,'_queue_insert_batch',return_value=None):
             self.assertTrue(window._start_queue(entries,PROFILE,_destination=destination['folder']))
             self.wait_until(lambda:window._queue_preparation is None)
@@ -215,14 +216,14 @@ class DownloadSettingsTests(unittest.TestCase):
         entry=window.recycle_bin.add(title='Album',profile_url=PROFILE,
             post_url=PROFILE+'/post/1',payload_path=original)
         payload=Path(entry.payload_path)
-        with patch('download_settings.fetch_artist_name',side_effect=OSError('offline')):
+        with patch('download_settings.fetch_artist_name',side_effect=OSError('offline')),patch('static_download_plan.ManifestFetchWorker.run',lambda worker:worker.result.emit([{**item,'assets':[]} for item in worker.entries])):
             self.assertTrue(window.restore_recycle_entry(entry.id))
-            self.wait_until(lambda:window._destination_worker is None)
+            self.wait_until(lambda:not window.busy and window._destination_worker is None and window._manifest_worker is None)
         self.assertIsNotNone(window.recycle_bin.get(entry.id))
         self.assertTrue(payload.exists())
         self.assertFalse(window.services.journal.list_recoverable())
         window.scanner=type('Scanned',(),{'profile':PROFILE,'artist_name':'Recovered Artist'})()
-        with patch.object(window,'_queue_insert_batch',return_value=None):
+        with patch.object(window,'_queue_insert_batch',return_value=None),patch('static_download_plan.ManifestFetchWorker.run',lambda worker:worker.result.emit([{**item,'assets':[]} for item in worker.entries])):
             self.assertTrue(window.restore_recycle_entry(entry.id))
             self.wait_until(lambda:bool(window._queue_scan_entries) and window._queue_preparation is None)
         self.assertIsNone(window.recycle_bin.get(entry.id))

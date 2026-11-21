@@ -336,10 +336,11 @@ class DesktopRuntime(QObject):
         for plan in plans:
             if plan.status=='running':
                 job_id=self.store.get_setting('journal_for_schedule:'+plan.id)
-                state='paused' if job_id in recoverable else 'failed'
-                if job_id:
+                job_ids=self.store.get_setting('journals_for_schedule:'+plan.id,[]) or ([job_id] if job_id else [])
+                state='paused' if any(value in recoverable for value in job_ids) else 'failed'
+                if job_ids:
                     try:
-                        if self.journal.load(job_id).get('status')=='completed':state='completed'
+                        if all(self.journal.load(value).get('status')=='completed' for value in job_ids):state='completed'
                     except (KeyError,ValueError,OSError):pass
                 self.store.set_schedule_status(plan.id,state)
             elif plan.status=='queued' or (plan.status=='pending' and plan.due_at<=time.time()):
@@ -392,7 +393,11 @@ class DesktopRuntime(QObject):
         self._old_selection=w.select_posts_check.isChecked()
         w.select_posts_check.setChecked(False)
         self.resume_job_id=resume_job_id
-        w.launch_worker(config['profile'],None)
+        if resume_job_id:
+            w.launch_worker(config['profile'],None)
+        else:
+            # New scheduled work shares the GUI-thread static manifest plan.
+            w.download()
 
     def restore_controls(self):
         if self._old_selection is not None:
@@ -491,7 +496,7 @@ class DesktopRuntime(QObject):
         self.window.path.setText(str(first.get('folder','')))
         self.window.order_combo.setCurrentIndex(0 if first.get('order','newest')=='newest' else 1)
         self.window.title_check.setChecked(bool(first.get('by_title',True)))
-        self.window.rename_check.setChecked(bool(first.get('queue_rename_order',False)))
+        self.window.rename_check.setChecked(bool(first.get('static_numbering',first.get('queue_rename_order',False))))
         self.window.start_number.setValue(int(first.get('queue_start_number',first.get('start_number',1))))
         entries=[]
         for job in jobs:

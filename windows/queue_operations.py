@@ -24,6 +24,7 @@ class QueuePreparationWorker(QThread):
             entries=[]
             batch_id=self.config.get('batch_id') or uuid.uuid4().hex
             for sequence, entry in enumerate(self.entries):
+                if self.isInterruptionRequested():raise RuntimeError('cancelled')
                 item=dict(entry)
                 meta=dict(item.get('metadata') or {})
                 config=dict(self.config)
@@ -76,6 +77,15 @@ class QueuePreparationWorker(QThread):
                               task_attachment_formats=attachment_formats)
                 if image_count is not None: config['task_image_count']=image_count
                 if attachment_count is not None: config['task_attachment_count']=attachment_count
+                if job is None and 'static_plan' in item:
+                    config.update(static_plan=item['static_plan'],static_numbering=bool(item.get('static_numbering')),
+                        image_only_layout=bool(item.get('image_only_layout')),layout_version=3,queue_rename_order=False)
+                    root=Path(config['folder'])
+                    for asset in config['static_plan']:
+                        target=inside(root,root/asset['relative_dir']/asset['save_name'])
+                        if target.exists():
+                            raise ValueError('The preassigned destination already exists; choose another save folder: '+str(target))
+                    item['file_count']=len(config['static_plan']);config['task_file_count']=item['file_count']
                 if self.journal:
                     if job is None:
                         # Every final choice is known now. Persist this new
@@ -100,6 +110,7 @@ class QueuePreparationWorker(QThread):
                 item['content_mode']=mode
                 item['metadata']=meta
                 entries.append(item)
+            if self.isInterruptionRequested():raise RuntimeError('cancelled')
             self.result.emit(entries)
         except Exception as error:
             for job_id in created:

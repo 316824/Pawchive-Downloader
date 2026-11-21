@@ -562,7 +562,9 @@ class ArtistCardsDialog(QDialog):
         self.setWindowTitle(reward_tr(self.lang, 'artist_cards')); self.resize(720, 560)
         layout = QVBoxLayout(self); layout.setContentsMargins(26, 24, 26, 24); layout.setSpacing(14)
         heading = label(reward_tr(self.lang, 'artist_cards')); heading.setStyleSheet('font-size:22px;font-weight:600')
-        layout.addWidget(heading)
+        heading_row=QHBoxLayout();heading_row.addWidget(heading,1)
+        self.total_label=label('');self.total_label.setWordWrap(False)
+        heading_row.addWidget(self.total_label);layout.addLayout(heading_row)
         self.cards = QListWidget(); self.cards.setIconSize(QPixmap(64, 64).size())
         # Custom rows own their spacing; inherited delegate padding would
         # subtract another 18 pixels from their usable height on Windows.
@@ -570,14 +572,26 @@ class ArtistCardsDialog(QDialog):
         self.cards.setStyleSheet('QListWidget#artistCardsList::item {padding:0px;}')
         self.cards.setSpacing(8); self.cards.itemClicked.connect(self.open_card); layout.addWidget(self.cards, 1)
         self.empty_hint=label(self.text('下载画师图集后会生成档案卡，也可以手动添加画师。'), True); layout.addWidget(self.empty_hint)
-        actions=QHBoxLayout(); self.add_button=QPushButton(self.text('添加画师')); self.remove_button=QPushButton(self.text('删除选中')); self.prev_button=QPushButton(self.text('上一页')); self.next_button=QPushButton(self.text('下一页')); self.page_label=label('')
+        self._batch_mode=False;self._batch_selected=set();self._row_checkboxes={}
+        self._lookup_operations=[];self._add_inputs=[];self._adding=False;self._closed=False
+        actions=QHBoxLayout(); self.add_button=QPushButton(self.text('添加画师')); self.remove_button=QPushButton(self.text('删除选中')); self.prev_button=QPushButton(self.text('上一页')); self.next_button=QPushButton(self.text('下一页')); self.page_label=label('');self.page_label.setWordWrap(False)
         self.add_button.clicked.connect(self.add_artist); self.remove_button.clicked.connect(self.remove_artist); self.prev_button.clicked.connect(self.previous_page); self.next_button.clicked.connect(self.next_page)
         self.cards.currentItemChanged.connect(lambda *_: self.remove_button.setEnabled(bool(self.cards.currentItem())))
-        actions.addWidget(self.add_button); actions.addWidget(self.remove_button); actions.addStretch(1); actions.addWidget(self.prev_button); actions.addWidget(self.page_label); actions.addWidget(self.next_button); layout.addLayout(actions)
+        self.batch_add_button=QPushButton(self.text('批量添加'));self.batch_add_button.clicked.connect(self.batch_add_artists)
+        self.batch_delete_button=QPushButton(self.text('批量删除'));self.batch_delete_button.clicked.connect(self.toggle_batch_delete)
+        actions.addWidget(self.add_button);actions.addWidget(self.batch_add_button);actions.addStretch(1);actions.addWidget(self.batch_delete_button)
+        layout.addLayout(actions)
+        pages=QHBoxLayout();pages.addWidget(self.remove_button)
+        self.select_page_button=QPushButton(self.text('全选本页'));self.select_page_button.clicked.connect(self.select_current_page)
+        self.cancel_batch_button=QPushButton(self.text('取消批删'));self.cancel_batch_button.clicked.connect(self.cancel_batch_delete)
+        pages.addWidget(self.select_page_button);pages.addWidget(self.cancel_batch_button)
+        pages.addStretch(1);pages.addWidget(self.prev_button);pages.addWidget(self.page_label);pages.addWidget(self.next_button)
+        layout.addLayout(pages)
         close = QPushButton(tr(self.lang, 'ok')); close.clicked.connect(self.accept); layout.addWidget(close)
         self.migration_button=QPushButton(self.text('数据迁移'))
         self.migration_button.clicked.connect(self.open_migration)
         actions.insertWidget(2,self.migration_button)
+        self.finished.connect(self._close_optional_work)
         self._status_labels={}; self._spinner_phase=0
         from artist_cards import ArtistAvatarLoader
         self._avatar_loader=ArtistAvatarLoader(self.store,self.parent_window)
@@ -594,6 +608,19 @@ class ArtistCardsDialog(QDialog):
 
     def text(self, source, **values):
         from artist_ui_text import artist_text
+        additions={
+            '批量添加':('批次新增','Batch add','一括追加'),
+            '批量删除':('批次刪除','Batch delete','一括削除'),
+            '确认删除':('確認刪除','Delete selected','選択を削除'),
+            '取消批删':('取消批次刪除','Cancel batch delete','一括削除を中止'),
+            '全选本页':('全選此頁','Select this page','このページを選択'),
+            '共 {count} 位画师':('共 {count} 位畫師','{count} artists','作家 {count} 名'),
+            '删除画师':('刪除畫師','Delete artist','作家を削除'),
+            '删除该画师档案及更新订阅？':('刪除此畫師檔案及更新訂閱？','Delete this artist card and its subscription?','作家のカードと更新購読を削除しますか？'),
+        }
+        if source in additions:
+            index=('简体中文','繁體中文','English','日本語').index(self.lang) if self.lang in ('简体中文','繁體中文','English','日本語') else 0
+            return (source if index==0 else additions[source][index-1]).format(**values)
         return artist_text(self.lang,source,**values)
 
     def refresh(self, cards=None):
@@ -601,15 +628,21 @@ class ArtistCardsDialog(QDialog):
         selected=self.cards.currentItem()
         selected_profile=selected.data(Qt.ItemDataRole.UserRole) if selected else None
         scroll=self.cards.verticalScrollBar().value()
-        self.cards.clear(); self._status_labels={}
+        self.cards.clear(); self._status_labels={};self._row_checkboxes={}
         from artist_cards import paged_cards
         page, total = paged_cards(self.store, self._page, self._page_size)
+        self.total_label.setText(self.text('共 {count} 位画师',count=total))
+        self.total_label.setMinimumWidth(self.total_label.sizeHint().width())
         self.empty_hint.setVisible(not bool(total))
         max_page=max(0,(total-1)//self._page_size)
         if self._page>max_page:
             self._page=max_page; page,total=paged_cards(self.store,self._page,self._page_size)
         self._page=min(self._page,max_page); self.page_label.setText(f'{self._page+1}/{max_page+1}' if total else '0/0')
         self.prev_button.setEnabled(self._page>0); self.next_button.setEnabled(self._page<max_page); self.remove_button.setEnabled(bool(self.cards.currentItem()))
+        self.remove_button.setVisible(not self._batch_mode)
+        self.select_page_button.setVisible(self._batch_mode);self.cancel_batch_button.setVisible(self._batch_mode)
+        self.batch_delete_button.setText(self.text('确认删除' if self._batch_mode else '批量删除'))
+        self.batch_delete_button.setEnabled(bool(self._batch_selected) if self._batch_mode else bool(total))
         from artist_cards import visible_avatar_paths
         avatar_paths=visible_avatar_paths(self.store,[item['profile'] for item in page])
         for card in page:
@@ -650,9 +683,18 @@ class ArtistCardsDialog(QDialog):
             if not avatar_icon.isNull(): avatar.setPixmap(avatar_icon.pixmap(64,64))
             description=label(description_text); description.setMinimumWidth(0)
             description.setObjectName('artistCardDescription')
-            marker=QLabel(''); marker.setFixedWidth(24); marker.setAlignment(Qt.AlignmentFlag.AlignTop|Qt.AlignmentFlag.AlignRight)
-            row_layout.addWidget(avatar); row_layout.addWidget(description,1); row_layout.addWidget(marker)
-            row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,True)
+            marker=QLabel(''); marker.setObjectName('artistCardUpdateBadge');marker.setFixedSize(20,20)
+            marker.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if self._batch_mode:
+                factory=getattr(self.parent_window,'checkbox_factory',QCheckBox)
+                check=factory();check.setFixedWidth(26);check.setChecked(card['profile'] in self._batch_selected)
+                check.setProperty('lightTheme',not getattr(self.parent_window,'_dark',True))
+                check.setAccessibleName(f"{title} · ID {artist_id}")
+                check.toggled.connect(lambda checked,profile=card['profile']:self._set_batch_selected(profile,checked))
+                self._row_checkboxes[card['profile']]=check;row_layout.addWidget(check)
+            row_layout.addWidget(avatar); row_layout.addWidget(description,1)
+            row_layout.addWidget(marker,0,Qt.AlignmentFlag.AlignTop|Qt.AlignmentFlag.AlignRight)
+            row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,not self._batch_mode)
             item.setSizeHint(QSize(0,90)); self.cards.setItemWidget(item,row)
             self._status_labels[str(card.get('profile',''))]=marker
             if card.get('profile')==selected_profile: self.cards.setCurrentItem(item)
@@ -691,7 +733,7 @@ class ArtistCardsDialog(QDialog):
             description=row.findChild(QLabel,'artistCardDescription')
             if description is None: continue
             # Match row margins, avatar, marker and the two layout gaps.
-            width=max(60,min(row.width(),self.cards.viewport().width())-20-64-24-24)
+            width=max(60,min(row.width(),self.cards.viewport().width())-20-64-20-24-(38 if self._batch_mode else 0))
             height=max(90,description.heightForWidth(width)+16)
             if item.sizeHint().height()!=height:
                 item.setSizeHint(QSize(0,height)); changed=True
@@ -746,7 +788,12 @@ class ArtistCardsDialog(QDialog):
 
     def open_card(self,item):
         profile=str(item.data(Qt.ItemDataRole.UserRole) or '')
+        if self._batch_mode:
+            self._set_batch_selected(profile,profile not in self._batch_selected);return
         record=self._subscriptions().get(profile) or {}
+        opener=getattr(self.parent_window,'open_artist_profile',None)
+        if callable(opener) and profile:
+            self.accept();opener(profile);return
         callback=getattr(self.parent_window,'confirm_artist_download',None)
         if callable(callback) and profile:
             self.accept()
@@ -762,31 +809,101 @@ class ArtistCardsDialog(QDialog):
                 if callable(start): start()
 
     def add_artist(self):
-        from artist_cards import artist_profile_url
         value,ok=QInputDialog.getText(self,self.text('添加画师'),self.text('输入 Pawchive 画师主页或数字 ID'))
         if not ok:return
-        profile=artist_profile_url(value)
-        if not profile:return
+        self._resolve_add(value)
+
+    def batch_add_artists(self):
+        from batch_artists import BatchArtistDialog
+        dialog=BatchArtistDialog(self)
         try:
-            from artist_cards import record_download, update_artist_metadata
+            if dialog.exec()!=QDialog.DialogCode.Accepted:return
+            self._add_inputs.extend(dialog.inputs)
+        finally:dialog.deleteLater()
+        self._add_next()
+
+    def _resolve_add(self,value,after=None):
+        if self._closed:return
+        from artist_lookup import resolve_artist_input
+        from shiboken6 import isValid
+        self._adding=True;self.add_button.setEnabled(False);self.batch_add_button.setEnabled(False)
+        holder=[]
+        def selected(profile):
+            if self._closed or not isValid(self):return
+            operation=holder[0] if holder else None
+            self._commit_artist(profile,getattr(operation,'selected_record',None) or {})
+        def finished(profile):
+            operation=holder[0] if holder else None
+            if operation in self._lookup_operations:self._lookup_operations.remove(operation)
+            if self._closed or not isValid(self):return
+            self._adding=False;self.add_button.setEnabled(True);self.batch_add_button.setEnabled(True)
+            if callable(after):QTimer.singleShot(0,after)
+        operation=resolve_artist_input(self,value,selected,finished);holder.append(operation)
+        self._lookup_operations.append(operation)
+
+    def _add_next(self):
+        if self._closed or self._adding:return
+        if self._add_inputs:self._resolve_add(self._add_inputs.pop(0),self._add_next)
+
+    def _commit_artist(self,profile,record):
+        from artist_cards import record_download, update_artist_metadata
+        try:
             with self.store._lock:
-                record_download(self.store,profile,posts=0,files=0); update_artist_metadata(self.store,profile)
-                self._subscriptions().add(profile)
-        except Exception:return
+                record_download(self.store,profile,posts=0,files=0)
+                update_artist_metadata(self.store,profile,name=record.get('name'))
+                self._subscriptions().add(profile,name=record.get('name') or 'Unknown Artist')
+        except (OSError,ValueError,RuntimeError):return
         self._page=0; self.refresh()
+        badge=getattr(self.parent_window,'refresh_reward_badge',None)
+        if callable(badge):badge()
         check=getattr(self.parent_window,'start_subscription_check',None)
         if callable(check): check()
+
+    def _close_optional_work(self,*_):
+        self._closed=True;self._add_inputs.clear()
+        for operation in list(self._lookup_operations):operation.cancel()
+        self._lookup_operations.clear()
 
     def remove_artist(self):
         item=self.cards.currentItem()
         if not item:return
-        from artist_cards import remove_card
         profile=str(item.data(Qt.ItemDataRole.UserRole) or '')
+        from PySide6.QtWidgets import QMessageBox
+        result=QMessageBox.question(self,self.text('删除画师'),self.text('删除该画师档案及更新订阅？'),
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+        if result!=QMessageBox.StandardButton.Yes:return
+        self._remove_profiles([profile])
+
+    def _remove_profiles(self,profiles):
+        from artist_cards import remove_card
         with self.store._lock:
-            remove_card(self.store,profile); self._subscriptions().remove(profile)
+            for profile in profiles:
+                remove_card(self.store,profile);self._subscriptions().remove(profile)
+        self._batch_selected.difference_update(profiles)
         self.refresh()
-        callback=getattr(self.parent_window,'refresh_subscription_badge',None)
-        if callable(callback): callback()
+        for name in ('refresh_subscription_badge','refresh_reward_badge'):
+            callback=getattr(self.parent_window,name,None)
+            if callable(callback):callback()
+
+    def _set_batch_selected(self,profile,checked):
+        if checked:self._batch_selected.add(profile)
+        else:self._batch_selected.discard(profile)
+        check=self._row_checkboxes.get(profile)
+        if check is not None and check.isChecked()!=bool(checked):check.setChecked(bool(checked))
+        self.batch_delete_button.setEnabled(bool(self._batch_selected))
+
+    def toggle_batch_delete(self):
+        if not self._batch_mode:
+            self._batch_mode=True;self._batch_selected.clear();self.refresh();return
+        if not self._batch_selected:return
+        profiles=set(self._batch_selected);self._batch_mode=False;self._remove_profiles(profiles)
+
+    def cancel_batch_delete(self):
+        self._batch_mode=False;self._batch_selected.clear();self.refresh()
+
+    def select_current_page(self):
+        for index in range(self.cards.count()):
+            self._set_batch_selected(str(self.cards.item(index).data(Qt.ItemDataRole.UserRole) or ''),True)
 
     def previous_page(self):
         self._page=max(0,self._page-1); self.refresh()

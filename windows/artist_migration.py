@@ -5,6 +5,7 @@ import base64
 import binascii
 from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import date
 import json
 import math
 import re
@@ -22,6 +23,8 @@ INVALID_CODE='无效迁移代码，请完整复制后重试。'
 PROFILE_RE=re.compile(r'^https://pawchive\.pw/(fanbox|patreon|subscribestar|discord|boosty)/user/([^/?#\\\s]{1,128})/?$',re.I)
 CARD_KEYS={'profile','artist_id','name','avatar_url','posts','files','download_ts','subscription'}
 SUB_KEYS={'baseline_ts','latest_ts','last_checked_ts','enabled','initialized','unread'}
+SUB_UPDATE_KEYS={'last_check_date','pending_posts','downloaded_post_urls','update_count'}
+POST_KEYS={'url','title','date','timestamp','image_url'}
 
 
 class MigrationError(ValueError):
@@ -80,9 +83,30 @@ def _download_ts(card):
                 ('download_ts','last_download_ts','latest_download_ts','downloaded_ts')),default=0.0)
 
 
-def _subscription(value, *, strict=False):
+def _portable_posts(values, profile, *, strict=False):
+    from subscriptions import MAX_UPDATE_POSTS, _post_url, _safe_posts
+    if not isinstance(values, list) or len(values)>MAX_UPDATE_POSTS:
+        if strict: raise MigrationError(INVALID_CODE)
+        values=values[:MAX_UPDATE_POSTS] if isinstance(values,list) else []
+    if strict:
+        for item in values:
+            if (not isinstance(item,dict) or set(item)!=POST_KEYS
+                    or item['url']!=_post_url(item['url'],profile)
+                    or not item['url'] or not isinstance(item['title'],str)
+                    or not 0<len(item['title'])<=500 or not isinstance(item['date'],str)
+                    or len(item['date'])>64 or not isinstance(item['image_url'],str)):
+                raise MigrationError(INVALID_CODE)
+            if not _timestamp(item['timestamp'],True): raise MigrationError(INVALID_CODE)
+            clean=_safe_posts([item],profile)
+            if not clean or clean[0]['image_url']!=item['image_url']:
+                raise MigrationError(INVALID_CODE)
+    return [{key:item[key] for key in POST_KEYS} for item in _safe_posts(values,profile)]
+
+
+def _subscription(value, profile, *, strict=False):
     if value is None: return None
-    if not isinstance(value,dict) or (strict and set(value)!=SUB_KEYS):
+    if (not isinstance(value,dict) or
+            (strict and (not SUB_KEYS.issubset(value) or set(value)-SUB_KEYS-SUB_UPDATE_KEYS))):
         if strict: raise MigrationError(INVALID_CODE)
         return None
     result={key:_timestamp(value.get(key,0),strict) for key in ('baseline_ts','latest_ts','last_checked_ts')}
@@ -90,6 +114,28 @@ def _subscription(value, *, strict=False):
         raw=value.get(key,default)
         if strict and type(raw) is not bool: raise MigrationError(INVALID_CODE)
         result[key]=bool(raw)
+    from subscriptions import MAX_UPDATE_POSTS, _post_url
+    check_date=value.get('last_check_date','')
+    try:
+        if check_date: check_date=date.fromisoformat(check_date).isoformat()
+    except (TypeError,ValueError):
+        if strict: raise MigrationError(INVALID_CODE)
+        check_date=''
+    if strict and not isinstance(check_date,str): raise MigrationError(INVALID_CODE)
+    downloaded=value.get('downloaded_post_urls',[])
+    if (not isinstance(downloaded,list) or len(downloaded)>MAX_UPDATE_POSTS
+            or (strict and any(not isinstance(url,str) or not _post_url(url,profile)
+                               or _post_url(url,profile)!=url for url in downloaded))):
+        if strict: raise MigrationError(INVALID_CODE)
+        downloaded=downloaded[-MAX_UPDATE_POSTS:] if isinstance(downloaded,list) else []
+    downloaded=list(dict.fromkeys(_post_url(url,profile) for url in downloaded if _post_url(url,profile)))
+    posts=_portable_posts(value.get('pending_posts',[]),profile,strict=strict)
+    completed=set(downloaded)
+    posts=[item for item in posts if item['url'] not in completed]
+    if strict and 'update_count' in value: _count(value['update_count'],MAX_UPDATE_POSTS,True)
+    result.update(last_check_date=check_date or '',pending_posts=posts,downloaded_post_urls=downloaded)
+    result['unread']=bool(posts or result['unread'])
+    result['update_count']=len(posts) or int(result['unread'])
     return result
 
 
@@ -114,7 +160,20 @@ def _merge_portable(old,new):
         sub={**latest}
         for key in ('baseline_ts','latest_ts','last_checked_ts'): sub[key]=max(a[key],b[key])
         sub['initialized']=a['initialized'] or b['initialized']
-        sub['unread']=bool(sub['initialized'] and sub['latest_ts']>sub['baseline_ts'])
+        sub['last_check_date']=max(a.get('last_check_date',''),b.get('last_check_date',''))
+        from subscriptions import MAX_UPDATE_POSTS
+        sub['downloaded_post_urls']=list(dict.fromkeys(
+            [*a.get('downloaded_post_urls',[]),*b.get('downloaded_post_urls',[])]))[-MAX_UPDATE_POSTS:]
+        completed=set(sub['downloaded_post_urls'])
+        posts={}
+        for source in (a,b):
+            for item in source.get('pending_posts',[]):
+                previous=posts.get(item['url'])
+                if item['url'] not in completed and (previous is None or item['timestamp']>=previous['timestamp']):
+                    posts[item['url']]=item
+        sub['pending_posts']=_portable_posts(list(posts.values()),result['profile'])
+        sub['unread']=bool(sub['pending_posts'] or (sub['initialized'] and sub['latest_ts']>sub['baseline_ts']))
+        sub['update_count']=len(sub['pending_posts']) or int(sub['unread'])
         result['subscription']=sub
     else: result['subscription']=a or b
     return result
@@ -139,7 +198,7 @@ def _snapshot(store):
         if not profile: continue
         item=dict(profile=profile,artist_id=profile.rsplit('/',1)[-1],name=_name(sub.get('name')),
             avatar_url=_avatar(profile),posts=0,files=0,download_ts=_timestamp(sub.get('baseline_ts',0)),
-            subscription=_subscription(sub))
+            subscription=_subscription(sub,profile))
         result[profile]=_merge_portable(result[profile],item) if profile in result else item
     return result
 
@@ -198,7 +257,7 @@ def decode_code(code):
             clean=dict(profile=profile,artist_id=profile.rsplit('/',1)[-1],name=_name(item['name'],True),
                 avatar_url=_avatar(profile),posts=_count(item['posts'],1_000_000,True),
                 files=_count(item['files'],10_000_000,True),download_ts=_timestamp(item['download_ts'],True),
-                subscription=_subscription(item['subscription'],strict=True))
+                subscription=_subscription(item['subscription'],profile,strict=True))
             unique[profile]=_merge_portable(unique[profile],clean) if profile in unique else clean
         return list(unique.values())
     except (ValueError,TypeError,KeyError,UnicodeError,binascii.Error,zlib.error,RecursionError,OverflowError):

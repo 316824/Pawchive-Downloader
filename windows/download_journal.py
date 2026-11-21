@@ -15,6 +15,15 @@ import uuid
 
 PROFILE = re.compile(r'https://pawchive\.pw/(?:fanbox|patreon|subscribestar|discord|boosty)/user/[^/?#\s]+/?')
 JOB_ID = re.compile(r'[a-f0-9]{32}')
+WINDOWS_COMPONENT = re.compile(r'[<>:"/\\|?*\x00-\x1f\ud800-\udfff]')
+WINDOWS_DEVICE = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[ .]|$)',re.I)
+
+
+def valid_manifest_component(value):
+    """Immutable paths must be normal files, never NTFS streams/devices."""
+    return (isinstance(value,str) and bool(value) and value not in {'.','..'}
+            and value==value.rstrip(' .') and not WINDOWS_COMPONENT.search(value)
+            and not WINDOWS_DEVICE.match(value))
 
 
 def original_url(value):
@@ -99,6 +108,27 @@ class DownloadJournal:
         if not folder.is_absolute(): raise ValueError('Invalid checkpoint folder.')
         if config.get('order','newest') not in ('newest','oldest'): raise ValueError('Invalid checkpoint order.')
         if type(config.get('start_number',1)) is not int or not 0<=config.get('start_number',1)<=999999999: raise ValueError('Invalid checkpoint numbering.')
+        plan=config.get('static_plan')
+        if plan is not None:
+            if not isinstance(plan,list) or len(plan)>100000:
+                raise ValueError('Invalid immutable file manifest.')
+            targets=set()
+            for asset in plan:
+                if not isinstance(asset,dict) or not original_url(asset.get('url')):
+                    raise ValueError('Invalid immutable original URL.')
+                if not str(asset.get('post_url','')).startswith(config['profile'].rstrip('/')+'/post/'):
+                    raise ValueError('Invalid immutable post owner.')
+                name=asset.get('save_name')
+                if not valid_manifest_component(name) or Path(name).name!=name:
+                    raise ValueError('Invalid immutable filename.')
+                relative=asset.get('relative_dir')
+                if (not isinstance(relative,str) or Path(relative).is_absolute()
+                        or Path(relative).drive or Path(relative).root
+                        or any(not valid_manifest_component(part) for part in Path(relative).parts)):
+                    raise ValueError('Invalid immutable directory.')
+                target=str(inside(folder,folder/relative/name)).casefold()
+                if target in targets:raise ValueError('Duplicate immutable destination.')
+                targets.add(target)
         if check_posts and job.get('posts') is not None:
             if not isinstance(job['posts'],list): raise ValueError('Invalid checkpoint posts.')
             for post in job['posts']:

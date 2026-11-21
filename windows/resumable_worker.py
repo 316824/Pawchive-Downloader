@@ -249,15 +249,40 @@ class DownloadEngine:
         records.append(record); self._records_by_url[(post_url, url)] = record; self.save(record)
         return record
 
+    def planned_record(self,asset):
+        """A worker consumes its immutable target; it never allocates a number."""
+        post_url,url=asset['post_url'],asset['url']
+        name=asset['save_name']
+        if not name or Path(name).name!=name or '/' in name or chr(92) in name:
+            raise ValueError('Invalid preassigned filename.')
+        target=inside(self.w.folder,self.w.folder/asset['relative_dir']/name)
+        existing=self._records_by_url.get((post_url,url))
+        if existing is not None:
+            if Path(existing['target'])!=target:raise ValueError('The saved download plan changed.')
+            return existing
+        target.parent.mkdir(parents=True,exist_ok=True)
+        if target.exists():raise ValueError('The preassigned destination already exists: '+str(target))
+        key=hashlib.sha256((post_url+'\0'+url).encode()).hexdigest()[:20]
+        record=dict(url=url,name=asset.get('name') or name,target=str(target),
+            part=str(target.parent/f'.pawchive-{self.job["id"]}-{key}.part'),
+            post_url=post_url,date=asset.get('date',''),title=asset.get('title',''),
+            direct=bool(asset.get('direct')),status='pending',sequence=int(asset.get('index',0)),
+            number=asset.get('number'),preassigned=True,prefixed=False)
+        self.job['files'].append(record);self._records_by_url[(post_url,url)]=record;self.save(record)
+        return record
+
     def finalize(self,record):
         target=inside(self.w.folder,record['target']); part=inside(self.w.folder,record['part'])
         if target.exists():
             if matches(record,target):
                 part.unlink(missing_ok=True); record['status']='complete'; self.job['saved_count']+=1; self.save(record); return
+            if record.get('preassigned'):raise ValueError('The preassigned destination was changed externally: '+str(target))
             target=self.h['unique_path'](target.parent,target.name)
             record['target']=str(target); self.save(record)
         try: move_exclusive(part,target)
-        except FileExistsError: return self.finalize(record)
+        except FileExistsError:
+            if record.get('preassigned'):raise
+            return self.finalize(record)
         record['status']='complete'; self.job['saved_count']+=1; self.save(record)
 
     def transfer(self,record,label):
@@ -350,6 +375,25 @@ class DownloadEngine:
         try: folder.rmdir()
         except OSError: pass  # A user-added file or an existing directory is never recursively removed.
 
+    def run_planned(self):
+        assets=self.job['config']['static_plan'];total=len(assets)
+        if hasattr(self.w,'file_progress'):self.w.file_progress.emit(0,total)
+        done_posts=set()
+        for index,asset in enumerate(assets,1):
+            self.interrupted();record=self.planned_record(asset)
+            if record.get('status')!='complete':
+                label=f'(1/1) {asset.get("title","")} / {asset["save_name"]}'
+                self.transfer(record,label);self.current=None
+                self.w.completed_records.append(dict(record))
+                self.w.progress.emit('✓  '+label,1,1)
+            if hasattr(self.w,'file_progress'):self.w.file_progress.emit(index,total)
+            done_posts.add(asset['post_url'])
+        for post_url in done_posts:
+            if post_url not in self.job.setdefault('done_posts',[]):self.job['done_posts'].append(post_url)
+            self.journal.mark_post_done(self.job['id'],post_url)
+        self.job.update(status='completed',error='',album=None);self.save(full=True)
+        self.w.finished_ok.emit(self.job['saved_count'])
+
     def run(self):
         try:
             self.w.folder.mkdir(parents=True,exist_ok=True)
@@ -357,6 +401,8 @@ class DownloadEngine:
             self.job['status']='running'; self.normalize()
             self.w.completed_records=[dict(record) for record in self.job.get('files',[])
                                       if record.get('status') in ('complete','ready')]
+            if isinstance(self.job['config'].get('static_plan'),list):
+                self.run_planned();return
             posts=self.posts()
             done=self.job.setdefault('done_posts',[])
             for index,(date,post_url,title) in enumerate(posts,1):

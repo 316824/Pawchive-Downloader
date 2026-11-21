@@ -21,7 +21,8 @@ a = Analysis(
     # function-scope import analysis.
     hiddenimports=['artist_cards', 'popular_features', 'subscriptions', 'subscription_ui',
                    'queue_operations', 'queue_failure_ui','download_plan',
-                   'update_checker','artist_migration','download_settings'],
+                   'update_checker','artist_migration','download_settings',
+                   'static_download_plan','artist_lookup','batch_artists','subscription_preview'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(directory / 'runtime_windows_icu.py')],

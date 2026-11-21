@@ -230,6 +230,10 @@ class DownloadScheduler(QObject):
         self._retry_timer = QTimer(self)
         self._retry_timer.setSingleShot(True)
         self._retry_timer.timeout.connect(self._run_auto_retry)
+        self._scheduling = False
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setSingleShot(True)
+        self._schedule_timer.timeout.connect(self._schedule_or_idle)
 
     @property
     def tasks(self) -> tuple[DownloadTask, ...]:
@@ -285,6 +289,7 @@ class DownloadScheduler(QObject):
         self._closing = True
         self._started = False
         self._cancel_auto_retry()
+        self._schedule_timer.stop()
         self._resume_pending.clear()
         for task in self.active_tasks:
             task.intent = 'cancel'
@@ -541,6 +546,20 @@ class DownloadScheduler(QObject):
         self.task_updated.emit(task.public_copy())
 
     def _schedule(self) -> None:
+        if self._scheduling:
+            # A factory/start error (or a synchronous worker) can finish in
+            # _start_task itself. Advancing recursively over a large artist's
+            # queue exhausts the Python stack; let the event loop advance the
+            # next bounded batch instead.
+            if not self._schedule_timer.isActive(): self._schedule_timer.start(0)
+            return
+        self._scheduling = True
+        try:
+            self._schedule_pass()
+        finally:
+            self._scheduling = False
+
+    def _schedule_pass(self) -> None:
         if not self._started or self._closing or self._suspended or self._all_paused:
             return
         # Terminal callbacks can arrive before QThread.finished. These native
@@ -597,6 +616,15 @@ class DownloadScheduler(QObject):
                 if signal is not None: signal.connect(slot)
             worker.start()
         except Exception as exc:
+            # A worker whose start() raised before the native thread launched
+            # cannot emit finished. Retaining that impossible expectation
+            # would permanently occupy its pool slot and block the queue.
+            worker = self._workers.get(task.id)
+            try:
+                running = bool(getattr(worker, 'isRunning', lambda: False)())
+            except (RuntimeError, TypeError):
+                running = False
+            if not running: self._finished_signals.discard(task.id)
             self._on_failure(task.id, str(exc))
 
     def _on_progress(self, task_id: str, label: str, current: Any, total: Any) -> None:
@@ -822,6 +850,7 @@ class DownloadScheduler(QObject):
 
     def _schedule_or_idle(self) -> None:
         self._schedule()
+        if self._scheduling or self._schedule_timer.isActive(): return
         if self._started and not self._closing and not self._suspended and not self._workers and not any(
                 task.is_active or task.state == 'queued' for task in self._tasks.values()):
             if self._auto_retry_failed(): return

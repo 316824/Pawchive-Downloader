@@ -2,10 +2,11 @@
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 from PySide6 import __version__ as pyside_version
-from PySide6.QtCore import QSettings, QTimer, qVersion
+from PySide6.QtCore import QSettings, QThread, QTimer, qVersion
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
 from PySide6.QtGui import QImage,QColor
 import requests
@@ -15,6 +16,45 @@ from download_journal import DownloadJournal
 from desktop_runtime import DesktopRuntime
 from feature_dialogs import ActivationDialog, CheckInDialog, ScheduleDialog, ArtistCardsDialog
 from subscription_ui import SubscriptionDialog
+from artist_lookup import input_profiles
+from batch_artists import BatchArtistDialog, split_batch_inputs
+from static_download_plan import assign_plans
+from subscription_preview import UpdatePreviewDialog
+
+
+def check_static_plans(app, directory):
+    """Exercise immutable naming on the GUI thread, without files or HTTP."""
+    if QThread.currentThread() != app.thread():
+        raise RuntimeError('Static filenames must be assigned on the GUI thread.')
+    profile='https://pawchive.pw/fanbox/user/offline-check'
+    def asset(name,index,direct=False):
+        return dict(url='https://file.pawchive.pw/data/offline/'+name,
+                    name=name,index=index,direct=direct)
+    entries=[dict(url=profile+'/post/new',title='New',date='2026-11-20',
+                  assets=[asset('second.webp',1),asset('first.png',0),asset('archive.zip',2,True)]),
+             dict(url=profile+'/post/old',title='Old',date='2026-10-9',assets=[asset('old.jpg',0)])]
+    original=json.dumps(entries,sort_keys=True)
+    folder=Path(directory)/'static-plan-downloads'
+    config=dict(folder=str(folder),order='newest',by_title=False,
+                queue_rename_order=True,content_mode='images')
+    flat=assign_plans(entries,config)
+    names=[[file['save_name'] for file in item['static_plan']] for item in flat]
+    if names != [['2.png','3.webp'],['1.jpg']]:
+        raise RuntimeError('Static image numbers must follow oldest-to-newest collection dates.')
+    if any(not item['image_only_layout'] or any(file['relative_dir'] not in ('','.')
+               or file['direct'] for file in item['static_plan']) for item in flat):
+        raise RuntimeError('Image-only downloads without title folders must use the selected folder.')
+    titled=assign_plans(entries,{**config,'by_title':True})
+    if [[file['save_name'] for file in item['static_plan']] for item in titled] != [['1.png','2.webp'],['1.jpg']]:
+        raise RuntimeError('Static image numbers must restart inside each collection folder.')
+    mixed=assign_plans(entries,{**config,'content_mode':'all'})
+    if any(file['relative_dir'] not in ('','.') for item in mixed for file in item['static_plan']):
+        raise RuntimeError('All files must use the selected folder when title folders are disabled.')
+    attachment=next(file for file in mixed[0]['static_plan'] if file['direct'])
+    if attachment['save_name'] != 'archive.zip' or attachment['number'] is not None:
+        raise RuntimeError('Direct attachments must retain their original names outside image numbering.')
+    if folder.exists() or json.dumps(entries,sort_keys=True) != original:
+        raise RuntimeError('Assigning static filenames must not mutate input manifests or create files.')
 
 
 def run(window_class, output):
@@ -50,6 +90,42 @@ def run(window_class, output):
                     raise RuntimeError('The bundled application icon is missing.')
                 if window.start.isEnabled():
                     raise RuntimeError('Download must be disabled without a profile and folder.')
+                if window.logs_hidden or window.logs_card.isHidden() or window.focus_button.text() != '收起日志':
+                    raise RuntimeError('Logs must be visible by default with the hide-logs control.')
+                window.toggle_logs()
+                if not window.logs_card.isHidden() or not window.focus_button.isVisible() or window.focus_button.text() != '显示日志':
+                    raise RuntimeError('The show-logs control must remain visible when logs are hidden.')
+                window.toggle_logs()
+                check_static_plans(app,directory)
+                ScanAnimation=sys.modules[window_class.__module__].ScanAnimation
+                for expected in (False,True):
+                    scan=ScanAnimation(window)
+                    try:
+                        scan.set_language(window.lang)
+                        if scan.auto_queue_check.isChecked() != expected:
+                            raise RuntimeError('The scan automatic-queue checkbox preference was not restored.')
+                        scan.auto_queue_check.setChecked(True)
+                        if not settings.value('download/scan_auto_confirm',False,type=bool):
+                            raise RuntimeError('The scan automatic-queue checkbox preference was not saved.')
+                        scan.grab()
+                    finally:
+                        scan._allow_close=True;scan.close();scan.deleteLater()
+                settings.remove('download/scan_auto_confirm')
+                candidates=input_profiles('123')
+                if candidates != ('https://pawchive.pw/fanbox/user/123','https://pawchive.pw/patreon/user/123'):
+                    raise RuntimeError('Numeric artist IDs must check both supported platforms.')
+                batch_text='123, '+candidates[1]+'\n123 456'
+                expected_batch=['123',candidates[1],'456']
+                if split_batch_inputs(batch_text) != expected_batch:
+                    raise RuntimeError('Batch artist input must preserve order and merge duplicate inputs.')
+                batch=BatchArtistDialog(window)
+                try:
+                    batch.editor.setPlainText(batch_text)
+                    if batch.inputs != expected_batch:
+                        raise RuntimeError('The batch artist dialog did not read the pasted inputs.')
+                    batch.grab()
+                finally:
+                    batch.close();batch.deleteLater()
                 window.profile.setText('https://pawchive.pw/fanbox/user/offline-check')
                 if window.start.isEnabled():
                     raise RuntimeError('Download must be disabled without a folder.')
@@ -94,6 +170,25 @@ def run(window_class, output):
                 artist='https://pawchive.pw/fanbox/user/1234567890'
                 record_download(state,artist,posts=30,files=2)
                 update_artist_metadata(state,artist,name='Offline artist',avatar_path=str(avatar_path))
+                window.subscription_store.add(artist,name='Offline artist',avatar_path=str(avatar_path),baseline_ts=1)
+                pending=[dict(url=artist+'/post/update',title='Offline update',timestamp=2)]
+                window.subscription_store.set_baseline(artist,2,posts=pending,unread=True)
+                window.refresh_subscription_badge()
+                archive=window.artist_cards_button
+                if archive.text() != '✦ 1' or archive.unread_badge.isHidden():
+                    raise RuntimeError('The artist archive must display its count and separate unread marker.')
+                if not archive.rect().contains(archive.unread_badge.geometry()):
+                    raise RuntimeError('The artist archive unread marker is clipped.')
+                preview=UpdatePreviewDialog(window,artist)
+                preview_root=preview.pool.root
+                try:
+                    if preview.picker is None or [entry['url'] for entry in preview.picker.titles] != [pending[0]['url']]:
+                        raise RuntimeError('The subscription preview must contain only pending update collections.')
+                    preview.grab()
+                finally:
+                    preview.reject();preview.deleteLater()
+                if preview_root.exists() or window.subscription_store.get(artist)['update_count'] != 1:
+                    raise RuntimeError('Closing the subscription preview must release its cache and retain unread updates.')
                 for dialog in (ActivationDialog(state),ScheduleDialog(window,runtime),CheckInDialog(window,state),
                                ArtistCardsDialog(window,state),SubscriptionDialog(window,state)):
                     if isinstance(dialog,ActivationDialog):
@@ -101,6 +196,8 @@ def run(window_class, output):
                         dialog.languages.setCurrentText('English'); dialog.languages.setCurrentText('简体中文')
                     dialog.grab()
                     if isinstance(dialog,ArtistCardsDialog):
+                        if dialog.total_label.text() != '共 1 位画师':
+                            raise RuntimeError('The artist cabinet total count is missing.')
                         item=dialog.cards.item(0)
                         if item is None or item.text() or not item.icon().isNull():
                             raise RuntimeError('The artist card delegate duplicates its custom row.')
@@ -134,7 +231,15 @@ def run(window_class, output):
                     'pinned invitation public key','invitation, schedule and calendar dialogs',
                     'artist cards and subscriptions dialogs','single-paint populated artist cards',
                     'download preferences, Unicode artist folders and deleted-path fallback',
-                    'bundled four-language Qt controls'])
+                    'bundled four-language Qt controls',
+                    'static oldest-to-newest image numbering on GUI thread',
+                    'flat mixed-content layout and per-collection image numbering',
+                    'unchanged direct attachment names',
+                    'numeric artist platform candidates and ordered batch dialog',
+                    'remembered automatic scan queue checkbox',
+                    'visible-by-default logs and persistent show control',
+                    'artist archive count and separate unread marker',
+                    'pending subscription preview and disposable cache'])
             except Exception as error:
                 failures.append(str(error))
             finally:

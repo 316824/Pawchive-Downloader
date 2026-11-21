@@ -6,6 +6,9 @@ from feature_text import LANGUAGES, TEXT, tr
 
 # The source text is Simplified Chinese; translations follow LANGUAGES[1:].
 COPY = {
+ '扫描结束后自动加入下载队列': ('掃描結束後自動加入下載佇列', 'Automatically queue all collections after scanning', 'スキャン完了後にすべてダウンロードキューへ追加'),
+ '收起日志': ('收起日誌', 'Hide log', 'ログを隠す'),
+ '显示日志': ('顯示日誌', 'Show log', 'ログを表示'),
  '按画师名创建主文件夹': ('按畫師名建立主資料夾', 'Create a main folder named after the artist', '作家名のメインフォルダーを作成'),
  '正在准备保存文件夹…': ('正在準備儲存資料夾…', 'Preparing the save folder…', '保存先フォルダーを準備中…'),
  '准备保存文件夹失败，请选择可写且较短的保存路径': ('準備儲存資料夾失敗，請選擇可寫且較短的儲存路徑', 'Could not prepare the folder. Choose a writable, shorter save path.', 'フォルダーを準備できません。書き込み可能な短い保存先を選んでください。'),
@@ -53,6 +56,12 @@ COPY = {
  '最大化或还原窗口': ('最大化或還原視窗', 'Maximize or restore window', '最大化または元に戻す'),
  '关闭窗口': ('關閉視窗', 'Close window', 'ウィンドウを閉じる'),
  '竖屏模式下请先切回窗口模式': ('直向模式下請先切回視窗模式', 'Return to window mode first', '縦画面モードを解除してください'),
+ '批量添加画师': ('批次新增畫師', 'Add multiple artists', '作家を一括追加'),
+ '取消剩余批量画师': ('取消剩餘批次畫師', 'Cancel remaining artists', '残りの作家をキャンセル'),
+ '请输入画师 ID 或完整的画师主页链接': ('請輸入畫師 ID 或完整的畫師首頁連結', 'Enter an artist ID or a complete profile URL', '作家IDまたは完全なプロフィールURLを入力'),
+ '请输入画师数字 ID 或完整的 Pawchive 画师链接。': ('請輸入畫師數字 ID 或完整的 Pawchive 畫師連結。', 'Enter a numeric artist ID or a complete Pawchive artist URL.', '数字の作家IDまたはPawchiveの作家URLを入力してください。'),
+ '✓ 画师 ID 格式有效，将检查 Fanbox 与 Patreon': ('✓ 畫師 ID 格式有效，將檢查 Fanbox 與 Patreon', '✓ Artist ID format is valid; Fanbox and Patreon will be checked', '✓ 作家IDの形式は有効です。FanboxとPatreonを確認します'),
+ '正在查找画师…': ('正在尋找畫師…', 'Finding artist…', '作家を検索中…'),
  '下载内容': ('下載內容', 'Download content', 'ダウンロード内容'),
  '图片与附件': ('圖片與附件', 'Images and attachments', '画像と添付ファイル'),
  '仅图片': ('僅圖片', 'Images only', '画像のみ'),

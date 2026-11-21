@@ -1319,16 +1319,28 @@ class ScanCompletionOverlay(QWidget):
 class ScanAnimation(QDialog):
     """A small playable Snake easter egg shown while profile pages are scanned."""
     def __init__(self,parent):
-        super().__init__(parent); self.setFixedSize(520,430); self.setModal(False); self._allow_close=False
+        super().__init__(parent); self.setFixedSize(560,470); self.setModal(False); self._allow_close=False
         from background_ui import install_background_host
         install_background_host(self,getattr(parent,'background_store',None),'scan')
         self.phase=0; self.pages=0; self.posts=0; self.paused=False; self.finish_requested=False; self.lang='简体中文'; self.scanner=None
         self._completion_overlay=None; self._completion_callback=None; self._completion_closing=False
+        self._automatic_completion=False
+        self._auto_completion_timer=QTimer(self); self._auto_completion_timer.setSingleShot(True)
+        self._auto_completion_timer.timeout.connect(self.finish_completion)
         layout=QVBoxLayout(self); layout.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.setSpacing(7)
         self.game=SnakeGameWidget(self); layout.addWidget(self.game,0,Qt.AlignmentFlag.AlignCenter)
         self.game_hint=QLabel('方向键 / WASD 控制 · 点击游戏区域获取焦点'); self.game_hint.setAlignment(Qt.AlignmentFlag.AlignCenter); self.game_hint.setStyleSheet('color:#91a7be;font-size:11px'); layout.addWidget(self.game_hint)
         self.message=QLabel(); self.message.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(self.message)
         self.counter=QLabel(); self.counter.setAlignment(Qt.AlignmentFlag.AlignCenter); self.counter.setStyleSheet('color:#91a7be'); layout.addWidget(self.counter)
+        factory=getattr(parent,'checkbox_factory',GlowCheckBox)
+        self.auto_queue_check=factory(ui_text(getattr(parent,'lang','简体中文'),'扫描结束后自动加入下载队列'))
+        self.auto_queue_check.setProperty('lightTheme',not getattr(parent,'_dark',True))
+        self.auto_queue_check.setObjectName('scanAutoQueue')
+        settings=getattr(parent,'settings',None)
+        if settings is not None:
+            self.auto_queue_check.setChecked(settings.value('download/scan_auto_confirm',False,type=bool))
+            self.auto_queue_check.toggled.connect(lambda checked:settings.setValue('download/scan_auto_confirm',bool(checked)))
+        layout.addWidget(self.auto_queue_check)
         actions=QHBoxLayout(); self.pause_button=QPushButton(); self.resume_button=QPushButton(); self.finish_button=QPushButton(); actions.addWidget(self.pause_button); actions.addWidget(self.resume_button); actions.addWidget(self.finish_button); layout.addLayout(actions)
         self.pause_button.clicked.connect(self.pause_scan); self.resume_button.clicked.connect(self.resume_scan); self.finish_button.clicked.connect(self.finish_scan); self.resume_button.setEnabled(False)
     def pause_scan(self):
@@ -1347,9 +1359,9 @@ class ScanAnimation(QDialog):
         self.pause_button.setEnabled(False); self.resume_button.setEnabled(False); self.finish_button.setEnabled(False)
         self.message.setText(AUX_TEXT[self.lang]['scan_finishing'])
 
-    def show_completion(self, count, callback):
-        """Freeze the game behind a soft overlay until the user continues."""
-        if self._completion_overlay is not None:
+    def show_completion(self, count, callback, automatic=False):
+        """Dissolve before selecting posts, or continue automatically when opted in."""
+        if self._completion_callback is not None or self._completion_closing:
             return
         if getattr(self.game,'_rebuild_until',0) > time.monotonic():
             self._allow_close=True; self.game.stop(); self.close(); callback(); return
@@ -1367,6 +1379,12 @@ class ScanAnimation(QDialog):
         else:
             self.game.stop()
         self._completion_callback = callback
+        self._automatic_completion=bool(automatic)
+        if automatic:
+            # Leave the particle dissolve visible, without a click-to-continue
+            # overlay. An owned timer survives a paused/temporarily hidden game.
+            self._auto_completion_timer.start(850)
+            return
         overlay = ScanCompletionOverlay(count, self)
         overlay.setGeometry(self.rect())
         overlay.clicked.connect(self.finish_completion)
@@ -1389,6 +1407,7 @@ class ScanAnimation(QDialog):
         if callback is None or self._completion_closing:
             return
         self._completion_closing = True
+        self._auto_completion_timer.stop()
         self._completion_callback = None
         if self._completion_overlay is not None:
             self._completion_overlay.deleteLater()
@@ -1414,6 +1433,7 @@ class ScanAnimation(QDialog):
     def set_language(self,lang):
         self.lang=lang; t=AUX_TEXT[lang]
         self.game_hint.setText(ui_text(lang,'方向键 / WASD 控制 · 点击游戏区域获取焦点'))
+        self.auto_queue_check.setText(ui_text(lang,'扫描结束后自动加入下载队列'))
         self.setWindowTitle(t['scan_window']); self.pause_button.setText(t['pause']); self.resume_button.setText(t['resume']); self.finish_button.setText(t['finish'])
         message=t['scan_finishing'] if self.finish_requested else t['scan_paused'] if self.paused else t['scan_searching']
         self.message.setText(message); self.update_counts(self.pages,self.posts)
@@ -1426,6 +1446,7 @@ class ScanAnimation(QDialog):
             event.ignore()
             return
         self.game.stop()
+        self._auto_completion_timer.stop()
         callback = self._completion_callback
         self._completion_callback = None
         self._completion_overlay = None
@@ -1496,9 +1517,11 @@ class ProfileScanWorker(QThread):
                                 ir=session.get(src,timeout=8); ir.raise_for_status(); suffix=Path(unquote(urlparse(src).path)).suffix.lower(); suffix=suffix if re.fullmatch(r'\.[a-z0-9]{1,8}',suffix) else '.img'; image_path=self.cache_dir/f'{len(titles):06}{suffix}'; image_path.write_bytes(ir.content)
                             except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    formats=[]; image_formats=[]; attachment_formats=[]; file_count=0; image_count=0; attachment_count=0
+                    formats=[]; image_formats=[]; attachment_formats=[]; file_count=0; image_count=0; attachment_count=0; assets=None
                     try:
                         detail=session.get(post_url,timeout=12); detail.raise_for_status(); ds=BeautifulSoup(detail.text,'html.parser')
+                        from static_download_plan import extract_assets
+                        assets=extract_assets(detail.text,post_url)
                         attachments=ds.select('.post__files a.fileThumb[href], a.post__attachment-link[href]')
                         file_count=len(attachments)
                         for number, attachment in enumerate(attachments, 1):
@@ -1512,7 +1535,7 @@ class ProfileScanWorker(QThread):
                                 if ext and ext not in image_formats: image_formats.append(ext)
                     except requests.RequestException: pass
                     if self.isInterruptionRequested(): break
-                    seen.add(post_key); titles.append({'date':post_date,'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'image_url':image_url,'formats':formats,'image_formats':image_formats,'attachment_formats':attachment_formats,'image_count':image_count,'attachment_count':attachment_count,'direct':bool(attachment_count),'file_count':file_count}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
+                    seen.add(post_key); titles.append({'date':post_date,'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'image_url':image_url,'formats':formats,'image_formats':image_formats,'attachment_formats':attachment_formats,'image_count':image_count,'attachment_count':attachment_count,'direct':bool(attachment_count),'file_count':file_count,'assets':assets,'artist_name':self.artist_name}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                     if self.finish_requested: break
                 repeated_page=page_signature and page_signature==previous_signature
                 if (self.finish_requested or len(cards)<PAGE_SIZE
@@ -1569,11 +1592,17 @@ class App(QWidget):
         self._queue_view_pending=False
         self._queue_preparation=None; self._queue_finalizer=None; self._queue_finalizing=False
         self._destination_worker=None; self._destination_callback=None
+        self._manifest_worker=None; self._manifest_destination=None
         self._active_download_folder=''; self._destination_options={}
         self._queue_insert_timer=QTimer(self)
         self._queue_insert_timer.setSingleShot(True)
         self._queue_insert_timer.timeout.connect(self._queue_insert_batch)
         self._selected_content_mode='all'
+        self._artist_lookup_operation=None; self._artist_lookup_generation=0
+        self._batch_artist_queue=[]; self._batch_artist_active=False; self._batch_artist_options={}
+        self._batch_artist_timer=QTimer(self)
+        self._batch_artist_timer.setInterval(150)
+        self._batch_artist_timer.timeout.connect(self._advance_batch_artists)
         self._next_record_artist=True; self._scan_after_timestamp=None
         self._artist_avatar_workers={}
         self._artist_metadata_workers={}
@@ -1866,6 +1895,8 @@ class App(QWidget):
         self.refresh_background()
 
     def refresh_background(self):
+        from shiboken6 import isValid
+        if not isValid(self):return
         store=self.background_store
         if store is None:
             self._set_custom_background_surface(False)
@@ -1928,17 +1959,26 @@ class App(QWidget):
         self.clear_cache.setEnabled(not busy)
         self.validate_profile()
     def validate_profile(self,text=None):
+        from artist_lookup import input_profiles
         value=(text if text is not None else self.profile.text()).strip()
-        valid=bool(PROFILE_URL_RE.fullmatch(value))
+        valid=bool(PROFILE_URL_RE.fullmatch(value) or len(input_profiles(value))>1)
         has_folder=bool(self.path.text().strip())
-        self.start.setEnabled(valid and has_folder and not self.busy)
+        batch=bool(getattr(self,'_batch_artist_active',False))
+        self.start.setEnabled(valid and has_folder and not self.busy and not batch)
+        batch_button=getattr(self,'batch_artist_button',None)
+        if batch_button is not None:
+            batch_button.setEnabled(batch or not self.busy)
+            batch_button.setText('×' if batch else '＋')
+            hint=ui_text(self.lang,'取消剩余批量画师' if batch else '批量添加画师')
+            batch_button.setToolTip(hint);batch_button.setAccessibleName(hint)
         t=AUX_TEXT[self.lang]
         if valid:
-            self.profile_hint.setText(t['profile_valid'] if has_folder else t['folder_needed']); self.profile_hint.setStyleSheet(('color:#83d5b1' if self._dark else 'color:#288160') if has_folder else ('color:#d7b77e' if self._dark else 'color:#9b7132'))
+            hint=ui_text(self.lang,'✓ 画师 ID 格式有效，将检查 Fanbox 与 Patreon') if value.isascii() and value.isdigit() else t['profile_valid']
+            self.profile_hint.setText(hint if has_folder else t['folder_needed']); self.profile_hint.setStyleSheet(('color:#83d5b1' if self._dark else 'color:#288160') if has_folder else ('color:#d7b77e' if self._dark else 'color:#9b7132'))
         elif value:
-            self.profile_hint.setText(t['profile_invalid']); self.profile_hint.setStyleSheet('color:#f3a6b1' if self._dark else 'color:#b84860')
+            self.profile_hint.setText(ui_text(self.lang,'请输入画师数字 ID 或完整的 Pawchive 画师链接。')); self.profile_hint.setStyleSheet('color:#f3a6b1' if self._dark else 'color:#b84860')
         else:
-            self.profile_hint.setText(t['profile_hint']); self.profile_hint.setStyleSheet('color:#99a6bb' if self._dark else 'color:#68758a')
+            self.profile_hint.setText(ui_text(self.lang,'请输入画师 ID 或完整的画师主页链接')); self.profile_hint.setStyleSheet('color:#99a6bb' if self._dark else 'color:#68758a')
         if not self.busy and self.workflow_state in {'setup','ready'}:
             self.set_workflow('ready' if valid and has_folder else 'setup')
     def apply_theme(self,dark):
@@ -1982,12 +2022,6 @@ class App(QWidget):
         badge.setText(f'✦ {name}' + (f' · {badge_name}' if badge_name else ''))
         badge.setToolTip(reward_tr(self.lang,'downloads',files=profile['downloaded_files'],sessions=profile['download_sessions'])
                          + (f' · {badge_name}' if badge_name else ''))
-        cards_button=getattr(self,'artist_cards_button',None)
-        if cards_button is not None:
-            from artist_cards import list_cards
-            count=len(list_cards(self.services.store))
-            cards_button.setText('✦' if count == 0 else f'✦ {count}')
-            cards_button.setToolTip(('画师档案卡' if self.lang=='简体中文' else '畫師檔案卡' if self.lang=='繁體中文' else 'Artist cards' if self.lang=='English' else 'アーティストカード') + (f' · {count}' if count else ''))
         # Reward refreshes happen on theme/check-in changes too; reapply the
         # subscription marker afterward so an unread update is never hidden.
         if hasattr(self, 'subscription_store'):
@@ -2005,9 +2039,12 @@ class App(QWidget):
             self.refresh_background()
 
     def open_artist_profile(self, profile):
+        if self.busy:return False
         record=self.subscription_store.get(profile) if self.subscription_store else None
-        baseline=record.get('baseline_ts') if record and record.get('unread') else None
-        return self.confirm_artist_download(profile,updates_after=baseline)
+        if record and record.get('unread'):
+            from subscription_preview import open_update_preview
+            return open_update_preview(self,profile)
+        return self.confirm_artist_download(profile)
 
     def _apply_download_plan(self, plan, profile):
         self.handle_link_text(profile,prompt_post=False)
@@ -2053,10 +2090,10 @@ class App(QWidget):
         """Update the tiny feed notification without touching worker UI."""
         store=getattr(self,'subscription_store',None)
         button=getattr(self,'artist_cards_button',None)
-        if store is None or button is None:
+        if button is None:
             return
         try:
-            unread=store.unread_count()
+            unread=store.unread_count() if store is not None else 0
         except Exception:
             unread=0
         try:
@@ -2064,13 +2101,14 @@ class App(QWidget):
             count=len(list_cards(self.services.store))
         except Exception:
             count=0
+        frame=None
         if self._subscription_check_running:
             frames=('◐','◓','◑','◒')
             self._subscription_spinner_phase=(self._subscription_spinner_phase+1)%4
-            button.setText(frames[self._subscription_spinner_phase]+' '+('✦' if count==0 else f'✦ {count}'))
-            button.setToolTip(ui_text(self.lang,'正在检查画师更新…')); return
-        button.setText(('● ' if unread else '') + ('✦' if count == 0 else f'✦ {count}'))
-        button.setToolTip(ui_text(self.lang,'有画师更新' if unread else '画师档案卡'))
+            frame=frames[self._subscription_spinner_phase]
+        button.set_archive_state(count,bool(unread),frame)
+        hint=ui_text(self.lang,'正在检查画师更新…' if frame else '有画师更新' if unread else '画师档案卡')
+        button.setToolTip(f'{hint} · {count}');button.setAccessibleName(button.toolTip())
 
     def show_subscriptions(self):
         if not self.services:
@@ -2124,7 +2162,7 @@ class App(QWidget):
             worker.deleteLater()
         self.refresh_subscription_badge()
 
-    def _maybe_artist_card(self, profile, posts=1, files=0, latest_download_ts=0):
+    def _maybe_artist_card(self, profile, posts=1, files=0, latest_download_ts=0, completed_post_urls=None):
         if not self.services:
             return
         try:
@@ -2146,7 +2184,7 @@ class App(QWidget):
             try:
                 self.subscription_store.add(profile, name=card.get('name') or 'Unknown Artist',
                     baseline_ts=latest_download_ts or None)
-                if latest_download_ts: self.subscription_store.advance_download(profile,latest_download_ts)
+                if latest_download_ts: self.subscription_store.advance_download(profile,latest_download_ts,post_urls=completed_post_urls)
             except Exception:
                 pass
         self.refresh_reward_badge(); self.refresh_subscription_badge()
@@ -2258,16 +2296,16 @@ class App(QWidget):
                 self.status.setText(AUX_TEXT[self.lang]['folder_needed'])
                 self.path.setFocus()
                 return
-        # The existing Worker already knows how to fetch one selected post;
-        # retain both slash variants because profile pages are inconsistent.
-        selected={info.post_url.rstrip('/'), info.post_url.rstrip('/')+'/' }
-        self.launch_worker(info.profile_url, selected)
+        # Resolve the selected post manifest before assigning immutable names.
+        self._start_queue([dict(url=info.post_url.rstrip('/'), title='', date='')],info.profile_url)
 
     def paste_profile(self):
         if self.busy: return
         value=QApplication.clipboard().text().strip()
         if value:
-            self.handle_link_text(value)
+            from artist_lookup import input_profiles
+            if len(input_profiles(value))>1:self.profile.setText(value)
+            else:self.handle_link_text(value)
         else: self.status.setText(self.ui_text()['paste_empty'])
 
     def dragEnterEvent(self,event):
@@ -2286,11 +2324,29 @@ class App(QWidget):
         self.logs_hidden=not self.logs_hidden
         self.logs_card.setVisible(not self.logs_hidden)
         self.focus_button.setToolTip(self.ui_text()['expand' if self.logs_hidden else 'focus'])
+        self.focus_button.setText(ui_text(self.lang,'显示日志' if self.logs_hidden else '收起日志'))
         self.focus_button.setAccessibleName(self.focus_button.toolTip())
         self.footer_hint.setText(self.ui_text()['expand' if self.logs_hidden else 'focus'])
         self.focus_button.setProperty('selected',self.logs_hidden)
         self.focus_button.style().unpolish(self.focus_button); self.focus_button.style().polish(self.focus_button)
+    def _cancel_lookup_and_batch(self):
+        self.cancel_batch_artists()
+        self._artist_lookup_generation+=1
+        operations=list(getattr(self,'_artist_lookup_operations',()))
+        was_lookup=self._artist_lookup_operation is not None
+        self._artist_lookup_operation=None
+        for operation in operations:
+            operation.cancel()
+        if was_lookup:self.set_busy_state(False)
+
     def stop_download(self):
+        self._cancel_lookup_and_batch()
+        if self._manifest_worker is not None:
+            self.stop_requested=True; self._manifest_worker.requestInterruption()
+            self.set_workflow('stopping'); return
+        if self._queue_preparation is not None:
+            self.stop_requested=True; self._queue_preparation.requestInterruption()
+            self.set_workflow('stopping'); return
         if self._destination_worker is not None:
             self.stop_requested=True; self._destination_worker.requestInterruption()
             self.set_workflow('stopping'); return
@@ -2425,8 +2481,70 @@ class App(QWidget):
             self.status.setText(self.ui_text()['copy_empty']); return
         QApplication.clipboard().setText(self.log.toPlainText())
         self.status.setText(AUX_TEXT[self.lang]['log_copied'])
+    def _workspace_has_live_threads(self):
+        """Conservatively protect native workers before releasing their row widgets."""
+        workers=list(self.findChildren(QThread))
+        for name in ('worker','scanner','_resume_scan_worker','_destination_worker',
+                     '_queue_preparation','_queue_finalizer','_manifest_worker'):
+            worker=getattr(self,name,None)
+            if worker is not None and worker not in workers:workers.append(worker)
+        for worker in workers:
+            try:
+                if worker.isRunning():return True
+            except (AttributeError,RuntimeError):
+                # A wrapper whose native object is gone cannot keep reading
+                # row state. Non-thread test doubles are harmless too.
+                continue
+        return False
+
+    def _can_reset_workspace(self):
+        if self.busy or self._workspace_has_live_threads():return False
+        if getattr(self,'_queue_finalizing',False) or getattr(self,'_queue_pending_entries',()):return False
+        if any(getattr(self,name,None) is not None for name in
+               ('_queue_preparation','_queue_finalizer','_destination_worker','_manifest_worker')):return False
+        if getattr(self,'_batch_artist_queue',()):return False
+        batch_timer=getattr(self,'_batch_artist_timer',None)
+        if batch_timer is not None and batch_timer.isActive():return False
+        scheduler=self.queue_scheduler
+        if scheduler is not None:
+            if scheduler.active_tasks or getattr(scheduler,'_workers',{}):return False
+            if any(task.state not in {'completed','cancelled'} for task in scheduler.tasks):return False
+            timer=getattr(scheduler,'_retry_timer',None)
+            if timer is not None and timer.isActive():return False
+        return True
+
+    def _reset_finished_workspace(self):
+        if not self._can_reset_workspace():return False
+        scheduler=self.queue_scheduler
+        self.queue_scheduler=None
+        self._queue_insert_timer.stop(); self._queue_pending_entries=[]
+        self._queue_view_pending=False
+        self.download_queue.clear_items()
+        if scheduler is not None:
+            scheduler._started=False; scheduler._closing=True
+            scheduler._retry_timer.stop()
+            scheduler.deleteLater()
+        # Completed thread wrappers retain file lists; no native thread is
+        # running now, so release only these owned, obsolete references.
+        for name in ('worker','scanner'):
+            worker=getattr(self,name,None)
+            if isinstance(worker,QThread):worker.deleteLater()
+            if hasattr(self,name):delattr(self,name)
+        self._queue_scan_entries=[]; self._queue_selected_ids=[]
+        self._queue_job_ids={}; self._queue_recycle_ids=set(); self._queue_rewarded_ids=set()
+        self._queue_profile=''; self._queue_completed_files=0
+        self._queue_closing=False
+        self.profile.clear(); self.log.clear(); self.reset_dashboard()
+        self.completed_path=None; self.open_folder_button.hide()
+        self.queue_count.setText(self.ui_text()['queue_count'].format(count=0))
+        self.queue_pause_all_button.setText(ui_text(self.lang,'全部暂停'))
+        self.queue_failures_button.setText(ui_text(self.lang,'失败任务 ({count})',count=0))
+        self.taskbar_progress.clear(); self.set_workflow('setup')
+        return True
+
     def clear_cache_files(self):
-        if self.busy: return
+        if self.busy or self._workspace_has_live_threads(): return
+        reset_workspace=self._can_reset_workspace()
         try:
             if self.cache_dir.is_dir() and not self.cache_dir.is_symlink():
                 for item in self.cache_dir.iterdir():
@@ -2466,6 +2584,7 @@ class App(QWidget):
                 except (OSError, ValueError, RuntimeError):
                     pass
             self.refresh_recycle_bin()
+            if reset_workspace:self._reset_finished_workspace()
             self.status.setText(AUX_TEXT[self.lang]['cache_cleared'])
         except (OSError, ValueError, RuntimeError) as exc:
             self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
@@ -2488,8 +2607,8 @@ class App(QWidget):
             extra=dict(journal=self.services.journal, resume_job_id=resume_id,
                        resume_config=(task.metadata or {}).get('_worker_config'))
         order='newest' if self.order_combo.currentIndex()==0 else 'oldest'
-        # Queue tasks are numbered once, after every album settles. Running a
-        # per-album renamer here would make priority changes affect filenames.
+        # New tasks already have immutable names; legacy checkpoints keep their
+        # saved finalizer. A worker never changes queue-assigned numbering.
         worker=Worker(self._active_download_folder or self.path.text(), self._queue_profile or self.profile.text().strip(),
                       order, self.title_check.isChecked(), selected,
                       False, 1, self.lang, content_mode=(task.metadata or {}).get('content_mode','all'), **extra)
@@ -2597,6 +2716,22 @@ class App(QWidget):
             current=max(0,int(task.completed_files or 0))
             self._queue_completed_files += max(0,current-counted)
             metadata['_counted_completed_files']=max(counted,current)
+            # Only actual successful posts acknowledge pending subscription
+            # items. Opening the preview or completing a newer sibling must
+            # never consume a different, still-unselected update.
+            store=getattr(self,'subscription_store',None)
+            config=metadata.get('_worker_config') or {}
+            if store is not None and current>0 and config.get('record_artist',True):
+                from subscriptions import parse_site_datetime
+                stamp=max((parse_site_datetime(record.get('date') if isinstance(record,dict) else record[0]) or 0
+                           for record in metadata.get('completed_records',[]) if record),default=0)
+                if not stamp:
+                    stamp=max((parse_site_datetime(asset.get('date')) or 0
+                               for asset in config.get('static_plan',[])),default=0)
+                if stamp:
+                    try:store.advance_download(config.get('profile') or self._queue_profile,stamp,post_urls=[task.url])
+                    except (OSError,ValueError,KeyError):pass
+                    self.refresh_subscription_badge()
         self._queue_view()
         self._update_queue_aggregate_progress()
 
@@ -2671,6 +2806,13 @@ class App(QWidget):
         paused=any(task.state=='paused' for task in tasks)
         failed=any(task.state=='failed' for task in tasks) or bool(finalization_error)
         cancelled=any(task.state=='cancelled' for task in tasks)
+        if (all(task.state in {'completed','cancelled'} for task in tasks)
+                and not finalization_error and not getattr(self,'_queue_finalizing',False)
+                and not scheduler.active_tasks and not getattr(scheduler,'_workers',{})
+                and not getattr(self,'_queue_pending_entries',())
+                and all(getattr(self,name,None) is None for name in
+                        ('_queue_preparation','_queue_finalizer','_destination_worker','_manifest_worker'))):
+            self.taskbar_progress.clear()
         self.set_busy_state(False)
         self.stop_button.hide()
         self.set_workflow('complete' if completed else 'stopped' if paused or cancelled else 'error' if failed else 'complete')
@@ -2701,7 +2843,8 @@ class App(QWidget):
                         records=[r for task in artist_tasks for r in task.metadata.get('completed_records',[])]
                         self._maybe_artist_card(self._queue_profile,posts=len(artist_tasks),
                             files=sum(max(0,int(task.completed_files or 0)) for task in artist_tasks),
-                            latest_download_ts=self._latest_download_timestamp(records))
+                            latest_download_ts=self._latest_download_timestamp(records),
+                            completed_post_urls=[task.url for task in artist_tasks if task.completed_files])
                 self.refresh_reward_badge()
                 self.services.task_finished(completed, paused=paused)
             except Exception:
@@ -2730,7 +2873,8 @@ class App(QWidget):
         if scheduler is None or getattr(self,'_queue_finalizing',False): return False
         tasks=scheduler.tasks
         if any(t.state not in ('completed','cancelled') for t in tasks): return False
-        ids=[(t.metadata or {}).get('job_id') for t in tasks if t.state=='completed']
+        ids=[(t.metadata or {}).get('job_id') for t in tasks if t.state=='completed'
+             and not isinstance(((t.metadata or {}).get('_worker_config') or {}).get('static_plan'),list)]
         ids=[i for i in ids if i]
         if not self.services or not ids: return False
         from queue_operations import QueueFinalizeWorker
@@ -2772,7 +2916,17 @@ class App(QWidget):
             if not self.path.text().strip(): return False
         entries=[dict(entry) for entry in entries if isinstance(entry,dict) and entry.get('url')]
         if not entries: return False
+        self.stop_requested=False
         resuming=all((entry.get('metadata') or {}).get('job_id') for entry in entries)
+        if not resuming and any(not isinstance(entry.get('assets'),list) for entry in entries):
+            from static_download_plan import ManifestFetchWorker
+            self.set_busy_state(True);self.set_workflow('scan')
+            self._manifest_destination=_destination
+            worker=ManifestFetchWorker(entries,self);self._manifest_worker=worker
+            worker.result.connect(lambda items:self._manifest_ready(items,profile))
+            worker.failed.connect(self._manifest_failed)
+            worker.progress.connect(lambda done,total:self.status.setText(ui_text(self.lang,'正在准备下载队列…')+f' {done}/{total}'))
+            worker.start();return True
         if _destination is None and not resuming:
             name=next((str(entry.get('artist_name') or '') for entry in entries if entry.get('artist_name')),'')
             return self._prepare_download_destination(profile,
@@ -2792,11 +2946,18 @@ class App(QWidget):
             profile=self._queue_profile, order='newest' if self.order_combo.currentIndex()==0 else 'oldest',
             by_title=bool(self.title_check.isChecked()), rename_order=False, start_number=1,
             lang=self.lang, queue_task=True, queue_rename_order=bool(self.rename_check.isChecked()),
-            queue_start_number=1,layout_version=2,record_artist=bool(self._next_record_artist),
+            queue_start_number=1,layout_version=3 if not resuming else 2,record_artist=bool(self._next_record_artist),
+            select_posts=bool(self.select_posts_check.isChecked()),
             content_mode=getattr(self,'_selected_content_mode','all'))
         if not resuming:
             config.update({key:value for key,value in self._destination_options.items()
                            if key in {'base_folder','artist_folder','artist_name'}})
+            from static_download_plan import assign_plans
+            # Every URL/name pair is frozen here on the GUI thread, before
+            # the journal or a download task is created.
+            try:entries=assign_plans(entries,config)
+            except (ValueError,TypeError,KeyError,OSError) as error:
+                self._queue_prepare_failed(str(error)); return False
         worker=QueuePreparationWorker(self.services.journal if self.services else None,entries,config,self)
         self._queue_preparation=worker
         worker.result.connect(self._queue_prepared)
@@ -2805,14 +2966,37 @@ class App(QWidget):
         self._next_record_artist=True
         return True
 
+    def _manifest_ready(self,entries,profile):
+        worker=self._manifest_worker
+        if worker is not None and worker.isRunning():
+            QTimer.singleShot(10,lambda:self._manifest_ready(entries,profile));return
+        if worker is not None:worker.deleteLater()
+        self._manifest_worker=None;self.set_busy_state(False)
+        if self._close_when_worker_stops:
+            QTimer.singleShot(0,self.close);return
+        if self.stop_requested:
+            self.set_workflow('stopped');return
+        self._start_queue(entries,profile,_destination=self._manifest_destination)
+
+    def _manifest_failed(self,message):
+        worker=self._manifest_worker
+        if worker is not None and worker.isRunning():
+            QTimer.singleShot(10,lambda:self._manifest_failed(message));return
+        if worker is not None:worker.deleteLater()
+        self._manifest_worker=None;self.set_busy_state(False);self.set_workflow('stopped' if self.stop_requested else 'error')
+        self.log.append(str(message));self.status.setText(ui_text(self.lang,'准备下载失败'))
+        if callable(getattr(self.services,'task_finished',None)):self.services.task_finished(False,error=message,paused=self.stop_requested)
+        if self._close_when_worker_stops:QTimer.singleShot(0,self.close)
+
     def _queue_prepare_failed(self, message):
         worker=self._queue_preparation
         if worker is not None and worker.isRunning():
             QTimer.singleShot(10,lambda:self._queue_prepare_failed(message)); return
         if worker is not None: worker.deleteLater()
         self._queue_preparation=None
-        self.set_busy_state(False); self.set_workflow('error')
+        self.set_busy_state(False); self.set_workflow('stopped' if self.stop_requested else 'error')
         self.status.setText(ui_text(self.lang,'准备下载失败')); self.log.append(str(message))
+        if callable(getattr(self.services,'task_finished',None)):self.services.task_finished(False,error=message,paused=self.stop_requested)
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
 
     def _queue_prepared(self, entries):
@@ -2823,7 +3007,19 @@ class App(QWidget):
         self._queue_preparation=None
         if self._close_when_worker_stops:
             self.set_busy_state(False); QTimer.singleShot(0,self.close); return
+        if self.stop_requested:
+            self.set_busy_state(False); self.set_workflow('stopped')
+            if callable(getattr(self.services,'task_finished',None)):self.services.task_finished(False,paused=True)
+            return
         self._queue_scan_entries=entries
+        if self.services and getattr(self.services,'active_schedule',None):
+            identifier=self.services.active_schedule
+            job_ids=[item.get('metadata',{}).get('job_id') for item in entries]
+            job_ids=[value for value in job_ids if value]
+            if job_ids:
+                self.services.store.set_setting('journals_for_schedule:'+identifier,job_ids)
+                self.services.store.set_setting('journal_for_schedule:'+identifier,job_ids[0])
+                for value in job_ids:self.services.store.set_setting('schedule_for_journal:'+value,identifier)
         self.queue_scheduler=DownloadScheduler(self._queue_worker_factory,self)
         self.queue_scheduler.task_updated.connect(self._queue_task_updated)
         self.queue_scheduler.task_finished.connect(self._queue_task_finished)
@@ -2902,7 +3098,8 @@ class App(QWidget):
         self.artist_folder_check.setChecked(bool(first.get('artist_folder',False)))
         self.order_combo.setCurrentIndex(0 if first.get('order', 'newest') == 'newest' else 1)
         self.title_check.setChecked(bool(first.get('by_title', True)))
-        self.rename_check.setChecked(bool(first.get('queue_rename_order', first.get('rename_order', False))))
+        self.rename_check.setChecked(bool(first.get('static_numbering', first.get('queue_rename_order', first.get('rename_order', False)))))
+        self.select_posts_check.setChecked(bool(first.get('select_posts',self.select_posts_check.isChecked())))
         self.start_number.setValue(int(first.get('queue_start_number', first.get('start_number', 1))))
         self._selected_content_mode=first.get('content_mode','all')
         self.content_combo.setCurrentIndex(max(0,self.content_combo.findData(self._selected_content_mode)))
@@ -3193,21 +3390,124 @@ class App(QWidget):
             selected.add(index); color=random.choice(colors); widget.setStyleSheet(f'QFrame#coverCard{{background:rgba(255,255,255,8);border:3px solid {color};border-radius:12px}}')
         else:
             selected.discard(index); widget.setStyleSheet('QFrame#coverCard{background:transparent;border:3px solid transparent;border-radius:12px}')
+    def _lookup_artist_input(self,value):
+        """Keep lookup completion separate from the scan it may start."""
+        from artist_lookup import resolve_artist_input
+        self._artist_lookup_generation+=1
+        generation=self._artist_lookup_generation
+        selected=[False]
+        self.set_busy_state(True)
+        self.status.setText(ui_text(self.lang,'正在查找画师…'))
+        def accepted(profile):
+            if generation!=self._artist_lookup_generation or self._close_when_worker_stops:return
+            selected[0]=True
+            self._artist_lookup_operation=None
+            self.set_busy_state(False)
+            self._handling_link_input=True
+            try:self.profile.setText(profile)
+            finally:self._handling_link_input=False
+            self.download()
+        def finished(profile):
+            if generation!=self._artist_lookup_generation or selected[0]:return
+            self._artist_lookup_operation=None
+            self.set_busy_state(False)
+            if not self._close_when_worker_stops:
+                self.set_workflow('ready');self.status.setText(TEXT[self.lang]['ready'])
+        self._artist_lookup_operation=resolve_artist_input(self,value,accepted,finished)
+        return self._artist_lookup_operation
+
+    def show_batch_artists(self):
+        if self._batch_artist_active:
+            self.cancel_batch_artists();return
+        if self.busy or not self._batch_artist_work_settled():return
+        from batch_artists import BatchArtistDialog
+        dialog=BatchArtistDialog(self)
+        try:
+            if dialog.exec()!=QDialog.DialogCode.Accepted:return
+            values=dialog.inputs
+        finally:dialog.deleteLater()
+        self.start_batch_artists(values)
+
+    def start_batch_artists(self,values):
+        """Take one preference snapshot for this ordered set of artists."""
+        from batch_artists import split_batch_inputs
+        values=split_batch_inputs('\n'.join(str(value) for value in values))
+        if not values or self.busy or self._batch_artist_active or not self._batch_artist_work_settled():return False
+        if not self.path.text().strip():self.pick()
+        if not self.path.text().strip():return False
+        self._batch_artist_options=dict(folder=self.path.text(),order=self.order_combo.currentIndex(),
+            by_title=self.title_check.isChecked(),artist_folder=self.artist_folder_check.isChecked(),
+            select_posts=self.select_posts_check.isChecked(),rename=self.rename_check.isChecked(),
+            content_mode=self.content_combo.currentData())
+        self._batch_artist_queue=list(values);self._batch_artist_active=True
+        self.set_workflow('ready')
+        self._batch_artist_timer.start();self.validate_profile()
+        return True
+
+    def cancel_batch_artists(self):
+        """Discard future artists without discarding the current download."""
+        self._batch_artist_queue=[];self._batch_artist_active=False
+        self._batch_artist_options={};self._batch_artist_timer.stop()
+        self.validate_profile()
+
+    def _batch_artist_work_settled(self):
+        if self._workspace_has_live_threads():return False
+        if self._artist_lookup_operation is not None:return False
+        if getattr(self,'_queue_finalizing',False) or getattr(self,'_queue_pending_entries',()):return False
+        if any(getattr(self,name,None) is not None for name in
+               ('_queue_preparation','_queue_finalizer','_destination_worker','_manifest_worker')):return False
+        scheduler=self.queue_scheduler
+        if scheduler is not None:
+            if scheduler.active_tasks or getattr(scheduler,'_workers',{}):return False
+            if any(task.state not in {'completed','cancelled'} for task in scheduler.tasks):return False
+            timer=getattr(scheduler,'_retry_timer',None)
+            if timer is not None and timer.isActive():return False
+        return True
+
+    def _advance_batch_artists(self):
+        if not self._batch_artist_active:return
+        if self._close_when_worker_stops:
+            self.cancel_batch_artists();return
+        if self.busy or QApplication.activeModalWidget() is not None or not self._batch_artist_work_settled():return
+        # Scan errors need attention too; a timer must never silently replace
+        # the failed artist with the next input.
+        if self.workflow_state in {'error','stopping','stopped'}:return
+        if not self._batch_artist_queue:
+            self.cancel_batch_artists();return
+        options=self._batch_artist_options
+        self.path.setText(options['folder']);self.order_combo.setCurrentIndex(options['order'])
+        self.title_check.setChecked(options['by_title']);self.artist_folder_check.setChecked(options['artist_folder'])
+        self.select_posts_check.setChecked(options['select_posts']);self.rename_check.setChecked(options['rename'])
+        index=self.content_combo.findData(options['content_mode'])
+        if index>=0:self.content_combo.setCurrentIndex(index)
+        self._next_record_artist=True;self._scan_after_timestamp=None
+        self._handling_link_input=True
+        try:self.profile.setText(self._batch_artist_queue.pop(0))
+        finally:self._handling_link_input=False
+        self.download()
+
     def download(self):
         if self.busy: return
         if not self.path.text(): self.pick()
         if not self.path.text():return
-        profile=self.profile.text().strip()
-        if not PROFILE_URL_RE.fullmatch(profile):
-            self.status.setText(AUX_TEXT[self.lang]['profile_invalid']); return
-        selected=None
-        if self.select_posts_check.isChecked():
-            self.reset_dashboard(); self.set_busy_state(True); self.set_workflow('scan'); self.status.setText(AUX_TEXT[self.lang]['scan_status'])
-            self.splash=ScanAnimation(self); self.splash.set_language(self.lang); self.splash.show()
-            self.scanner=ProfileScanWorker(profile,self.cache_dir,after_ts=self._scan_after_timestamp); self._scan_after_timestamp=None; self.splash.scanner=self.scanner
-            for button in (self.splash.pause_button,self.splash.resume_button,self.splash.finish_button): button.clicked.connect(self.reflect_scan_state)
-            self.scanner.counts.connect(self.on_scan_counts); self.scanner.counts.connect(self.splash.update_counts); self.scanner.result.connect(self.scan_finished); self.scanner.failed.connect(self.scan_failed); self.scanner.start(); return
-        self.launch_worker(profile,selected)
+        from artist_lookup import input_profiles
+        value=self.profile.text().strip();profiles=input_profiles(value)
+        if not profiles or (len(profiles)==1 and not PROFILE_URL_RE.fullmatch(value)):
+            self.status.setText(ui_text(self.lang,'请输入画师数字 ID 或完整的 Pawchive 画师链接。')); return
+        if len(profiles)>1:
+            self._lookup_artist_input(value);return
+        profile=profiles[0]
+        if value!=profile:
+            self._handling_link_input=True
+            try:self.profile.setText(profile)
+            finally:self._handling_link_input=False
+        # Every new download first discovers immutable file manifests. The
+        # preselection checkbox controls only the later post picker.
+        self.reset_dashboard(); self.set_busy_state(True); self.set_workflow('scan'); self.status.setText(AUX_TEXT[self.lang]['scan_status'])
+        self.splash=ScanAnimation(self); self.splash.set_language(self.lang); self.splash.show()
+        self.scanner=ProfileScanWorker(profile,self.cache_dir,after_ts=self._scan_after_timestamp); self._scan_after_timestamp=None; self.splash.scanner=self.scanner
+        for button in (self.splash.pause_button,self.splash.resume_button,self.splash.finish_button): button.clicked.connect(self.reflect_scan_state)
+        self.scanner.counts.connect(self.on_scan_counts); self.scanner.counts.connect(self.splash.update_counts); self.scanner.result.connect(self.scan_finished); self.scanner.failed.connect(self.scan_failed); self.scanner.start()
     def scan_finished(self,titles):
         if hasattr(self,'scanner') and self.scanner.isRunning(): self.scanner.wait()
         if self._close_when_worker_stops:
@@ -3220,9 +3520,12 @@ class App(QWidget):
             self.splash._allow_close=True
             self.splash.close()
             self.scan_failed(AUX_TEXT[self.lang]['empty_scan']); return
+        splash=getattr(self,'splash',None)
+        automatic=bool(getattr(getattr(splash,'auto_queue_check',None),'isChecked',lambda:False)()
+                       or not self.select_posts_check.isChecked())
         def continue_to_picker():
             self.set_workflow('choose')
-            selected=self.choose_titles(titles)
+            selected={str(entry.get('url','')) for entry in titles} if automatic else self.choose_titles(titles)
             if self._close_when_worker_stops:
                 self.busy=False
                 QTimer.singleShot(0,self.close)
@@ -3233,9 +3536,8 @@ class App(QWidget):
             self.set_busy_state(False)
             if not self._start_queue(selected_entries,self.profile.text().strip()):
                 self.set_busy_state(False); self.set_workflow('ready'); self.status.setText(TEXT[self.lang]['ready'])
-        splash=getattr(self,'splash',None)
         if splash is not None and hasattr(splash,'show_completion'):
-            splash.show_completion(len(titles),continue_to_picker)
+            splash.show_completion(len(titles),continue_to_picker,automatic=automatic)
         else:
             continue_to_picker()
     def scan_failed(self,message):
@@ -3326,7 +3628,7 @@ class App(QWidget):
         if n>0: self._remember_download_directory(self.completed_path)
         self.set_workflow('complete'); self.stop_requested=False; self.files_saved=n; self.files_value.setText(str(n)); self.speed_value.setText('—')
         self.progress.setValue(100 if n else 0); self.percent_label.setText('100' if n else '0'); self.percent_unit.show()
-        self.taskbar_progress.set_value(100 if n else 0)
+        self.taskbar_progress.clear()
         self.file_name.set_full_text(self.ui_text()['settled'])
         if self.services:
             try:
@@ -3334,7 +3636,8 @@ class App(QWidget):
                 job=worker.journal.load(worker.job_id) if worker and worker.journal and worker.job_id else {}
                 if n and job.get('config',{}).get('record_artist',True):
                     self._maybe_artist_card(self.profile.text().strip(),posts=len(job.get('done_posts',[])) or 1,files=n,
-                        latest_download_ts=self._latest_download_timestamp(job.get('files',[])))
+                        latest_download_ts=self._latest_download_timestamp(job.get('files',[])),
+                        completed_post_urls=job.get('done_posts',[]))
             except Exception:
                 # A transient local-state failure must not turn a completed
                 # download into a visible task error; rewards can catch up on
@@ -3361,8 +3664,9 @@ class App(QWidget):
         self.settings.sync()
         if self.services and not self._close_when_worker_stops and not self.services.request_close():
             event.ignore(); return
+        self._cancel_lookup_and_batch()
         async_busy=any(w is not None and w.isRunning() for w in
-                       (getattr(self,'_queue_preparation',None),getattr(self,'_queue_finalizer',None),getattr(self,'_destination_worker',None)))
+                       (getattr(self,'_queue_preparation',None),getattr(self,'_queue_finalizer',None),getattr(self,'_destination_worker',None),getattr(self,'_manifest_worker',None)))
         if self.busy or async_busy or getattr(self,'_queue_pending_entries',[]):
             event.ignore(); self._close_when_worker_stops=True; self.status.setText(AUX_TEXT[self.lang]['close_wait'])
             if self.services:
@@ -3382,6 +3686,8 @@ class App(QWidget):
             destination_worker=getattr(self,'_destination_worker',None)
             if destination_worker is not None and destination_worker.isRunning():
                 destination_worker.requestInterruption()
+            manifest_worker=getattr(self,'_manifest_worker',None)
+            if manifest_worker is not None and manifest_worker.isRunning():manifest_worker.requestInterruption()
             return
         self.update_controller.close()
         background=[worker for worker in self.findChildren(QThread) if worker.isRunning()]

@@ -62,7 +62,7 @@ class LifecycleTests(unittest.TestCase):
         launched=[]
         def launch(profile,selected):
             launched.append(profile); self.window.busy=True
-        with patch.object(self.window,'launch_worker',side_effect=launch),patch('desktop_runtime.boot_time',return_value=self.now-1000):
+        with patch.object(self.window,'launch_worker',side_effect=launch),patch.object(self.window,'download',side_effect=lambda:launch(self.window.profile.text(),None)),patch('desktop_runtime.boot_time',return_value=self.now-1000):
             with patch.object(self.app,'activeModalWidget',return_value=QDialog()):self.runtime.poll()
             self.assertEqual(launched,[])
             self.assertEqual(self.state.get_schedule(first.id).status,'queued')
@@ -103,7 +103,7 @@ class LifecycleTests(unittest.TestCase):
 
     def test_dispatch_failure_restores_ui_and_does_not_block_future_plans(self):
         plan=self.schedule()
-        with patch('desktop_runtime.boot_time',return_value=self.now-1000),patch.object(self.window,'launch_worker',side_effect=ValueError('bad checkpoint')):
+        with patch('desktop_runtime.boot_time',return_value=self.now-1000),patch.object(self.window,'download',side_effect=ValueError('bad checkpoint')):
             self.runtime.poll()
         self.assertEqual(self.state.get_schedule(plan.id).status,'failed')
         self.assertFalse(self.window.busy)
@@ -128,7 +128,7 @@ class LifecycleTests(unittest.TestCase):
             launched.append((profile,selected,self.runtime.resume_job_id))
             self.window.busy=True
 
-        with patch('feature_dialogs.ResumeChoice',ResumeChoice),patch.object(self.window,'launch_worker',side_effect=launch),patch('desktop_runtime.boot_time',return_value=self.now-1000):
+        with patch('feature_dialogs.ResumeChoice',ResumeChoice),patch.object(self.window,'launch_worker',side_effect=launch),patch.object(self.window,'download',side_effect=lambda:launch(self.window.profile.text(),None)),patch('desktop_runtime.boot_time',return_value=self.now-1000):
             self.runtime.offer_resume()
             self.assertEqual(launched,[(self.config['profile'],None,checkpoint)])
             self.assertIsNone(self.runtime.active_schedule)

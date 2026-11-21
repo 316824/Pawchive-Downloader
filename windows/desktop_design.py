@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (QByteArray, QEvent, QMimeData, QPoint, QRect, QRectF, QSize,
     Qt, QSignalBlocker, Signal, QTimer)
-from PySide6.QtGui import (QColor, QDrag, QIcon, QKeySequence, QPainter, QPainterPath,
+from PySide6.QtGui import (QColor, QDrag, QIcon, QImageReader, QKeySequence, QPainter, QPainterPath,
     QPixmap, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout,
     QLineEdit, QMenu, QComboBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
@@ -104,6 +104,30 @@ COPY = {
 }
 
 
+class ArtistArchiveButton(QPushButton):
+    """The count owns its width; unread state has its own corner marker."""
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.setObjectName('toolButton');self.setFixedHeight(40)
+        self.unread_badge=QLabel(self)
+        self.unread_badge.setObjectName('artistUpdateBadge')
+        self.unread_badge.setFixedSize(9,9)
+        self.unread_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.unread_badge.setStyleSheet('QLabel#artistUpdateBadge{background:#f05d75;border:0;border-radius:4px;padding:0;}')
+        self.set_archive_state(0,False)
+
+    def set_archive_state(self,count,unread,frame=None):
+        value=f'✦ {max(0,int(count))}'
+        self.setText(f'{frame} {value}' if frame else value)
+        self.setFixedWidth(max(64,self.fontMetrics().horizontalAdvance(self.text())+32))
+        self.unread_badge.move(self.width()-12,2)
+        self.unread_badge.setVisible(bool(unread));self.unread_badge.raise_()
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        self.unread_badge.move(self.width()-12,2)
+
+
 class ElidedLabel(QLabel):
     def __init__(self, text='', parent=None):
         super().__init__(parent)
@@ -145,6 +169,10 @@ class RoundedLogo(QWidget):
 
 
 class LogEditor(QTextEdit):
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.document().setMaximumBlockCount(2000)
+
     def sizeHint(self):
         hint=super().sizeHint()
         hint.setHeight(110)
@@ -161,7 +189,11 @@ class LogEditor(QTextEdit):
 
 
 class QueueThumbnail(QLabel):
-    """Small cover preview used by one download queue row."""
+    """Decode a bounded preview and retain exactly one small cover per row."""
+
+    DECODE_EDGE = 112
+    MAX_SOURCE_EDGE = 32768
+    MAX_SOURCE_PIXELS = 64_000_000
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -188,19 +220,46 @@ class QueueThumbnail(QLabel):
             pixmap = source
         elif source:
             try:
-                candidate = QPixmap(str(source))
-                if not candidate.isNull():
-                    pixmap = candidate
-            except (OSError, TypeError, ValueError):
+                reader = QImageReader(str(source))
+                reader.setDecideFormatFromContent(True)
+                reader.setAutoTransform(True)
+                size = reader.size()
+                # Invalid/hostile headers must not trigger a full-size decode.
+                if (size.isValid() and min(size.width(),size.height()) > 0
+                        and max(size.width(),size.height()) <= self.MAX_SOURCE_EDGE
+                        and size.width()*size.height() <= self.MAX_SOURCE_PIXELS):
+                    scaled = size.scaled(self.DECODE_EDGE,self.DECODE_EDGE,
+                                         Qt.AspectRatioMode.KeepAspectRatio)
+                    reader.setScaledSize(QSize(max(1,scaled.width()),max(1,scaled.height())))
+                    image = reader.read()
+                    if not image.isNull():
+                        # Some format plugins do not support scaled decoding.
+                        # Bound their image before making a GUI-owned pixmap.
+                        if max(image.width(),image.height()) > self.DECODE_EDGE:
+                            image = image.scaled(self.DECODE_EDGE,self.DECODE_EDGE,
+                                                 Qt.AspectRatioMode.KeepAspectRatio,
+                                                 Qt.TransformationMode.SmoothTransformation)
+                        pixmap = QPixmap.fromImage(image)
+            except (OSError, TypeError, ValueError, RuntimeError, MemoryError):
                 pixmap = None
         if pixmap is None or pixmap.isNull():
             self.clear()
             self.setText('◇')
         else:
+            # Draw the center crop directly into a fixed canvas. Expanding a
+            # panorama to fill the label would retain an enormous wide pixmap.
+            cover = QPixmap(self.size())
+            cover.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(cover)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                edge = min(pixmap.width(),pixmap.height())
+                crop = QRectF((pixmap.width()-edge)/2,(pixmap.height()-edge)/2,edge,edge)
+                painter.drawPixmap(QRectF(cover.rect()),pixmap,crop)
+            finally:
+                painter.end()
             self.setText('')
-            self.setPixmap(pixmap.scaled(
-                self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation))
+            self.setPixmap(cover)
         self.update()
 
     def set_failed(self, failed):
@@ -812,9 +871,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.reward_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
     w.reward_badge.setToolTip('')
     header.addWidget(w.reward_badge)
-    w.artist_cards_button = QPushButton('✦')
-    w.artist_cards_button.setObjectName('toolButton')
-    w.artist_cards_button.setFixedSize(40, 40)
+    w.artist_cards_button = ArtistArchiveButton()
     w.artist_cards_button.clicked.connect(lambda: getattr(w, 'show_artist_cards', lambda: None)())
     header.addWidget(w.artist_cards_button)
     w.tools_button=QPushButton()
@@ -836,9 +893,9 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     header.addWidget(w.tools_button)
     w.focus_button = QPushButton()
     w.focus_button.setObjectName('toolButton')
-    w.focus_button.setFixedSize(40, 40)
+    w.focus_button.setFixedHeight(40)
+    w.focus_button.setMinimumWidth(106)
     w.focus_button.clicked.connect(w.toggle_logs)
-    header.addWidget(w.focus_button)
     w.layout_button = QPushButton()
     w.layout_button.setObjectName('toolButton')
     w.layout_button.setFixedSize(40, 40)
@@ -916,6 +973,10 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.paste_button.setFixedSize(46, 54)
     w.paste_button.clicked.connect(w.paste_profile)
     profile_row.addWidget(w.paste_button)
+    w.batch_artist_button=GlowButton('＋')
+    w.batch_artist_button.setFixedSize(46,54)
+    w.batch_artist_button.clicked.connect(w.show_batch_artists)
+    profile_row.addWidget(w.batch_artist_button)
     box.addLayout(profile_row)
     w.profile_hint = text_label('', 'muted')
     w.profile_hint.setWordWrap(True)
@@ -1177,13 +1238,25 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.log.textChanged.connect(lambda: w.copy_log.setEnabled(not w.log.document().isEmpty()))
     w.copy_log.setEnabled(False)
     logs.addWidget(w.log, 1)
-    sidebar.addWidget(w.logs_card, 2)
+    # Logs are visible on first paint rather than below a long queue.
+    sidebar.insertWidget(0,w.logs_card, 2)
     w.activity_scroll=QScrollArea()
     w.activity_scroll.setWidgetResizable(True)
     w.activity_scroll.setFrameShape(QFrame.Shape.NoFrame)
     w.activity_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     w.activity_scroll.setWidget(w.activity_body)
-    content.addWidget(w.activity_scroll,2)
+    # Keep the labelled eye control visible when its log card is collapsed,
+    # without widening the compact window's main toolbar.
+    w.activity_panel=QWidget()
+    activity_panel_layout=QVBoxLayout(w.activity_panel)
+    activity_panel_layout.setContentsMargins(0,0,0,0)
+    activity_panel_layout.setSpacing(8)
+    activity_controls=QHBoxLayout()
+    activity_controls.addStretch(1)
+    activity_controls.addWidget(w.focus_button)
+    activity_panel_layout.addLayout(activity_controls)
+    activity_panel_layout.addWidget(w.activity_scroll,1)
+    content.addWidget(w.activity_panel,2)
     root.addLayout(content, 1)
 
     footer = QHBoxLayout()
@@ -1441,7 +1514,10 @@ def translate_interface(w, text, auxiliary):
     w.setWindowTitle(text['title'])
     w.workspace_heading.title_label.setText(t['workspace'])
     w.profile_label.setText(t['source'])
-    w.profile.setPlaceholderText(t['source_hint'])
+    from ui_i18n import t as ui_text
+    w.profile.setPlaceholderText(ui_text(w.lang,'请输入画师 ID 或完整的画师主页链接'))
+    batch_hint=ui_text(w.lang,'取消剩余批量画师' if getattr(w,'_batch_artist_active',False) else '批量添加画师')
+    w.batch_artist_button.setToolTip(batch_hint);w.batch_artist_button.setAccessibleName(batch_hint)
     w.folder_label.setText(t['destination'])
     w.path.setPlaceholderText(t['folder_hint'])
     w.activity_heading.setText(t['activity'])
@@ -1466,6 +1542,8 @@ def translate_interface(w, text, auxiliary):
     w.paste_button.setToolTip(t['paste'] + ' · Ctrl+Shift+V')
     w.paste_button.setAccessibleName(t['paste'])
     w.focus_button.setToolTip(t['expand'] if w.logs_hidden else t['focus'])
+    from ui_i18n import t as ui_text
+    w.focus_button.setText(ui_text(w.lang,'显示日志' if w.logs_hidden else '收起日志'))
     w.focus_button.setAccessibleName(w.focus_button.toolTip())
     w.copy_log.setToolTip(t['copy'])
     w.copy_log.setAccessibleName(t['copy'])

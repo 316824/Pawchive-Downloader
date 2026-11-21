@@ -313,7 +313,9 @@ class QueueUiRegressionTests(unittest.TestCase):
         profile = 'https://pawchive.pw/fanbox/user/offline-batch'
         entries = [dict(id=f'large-{index}', title=f'Album {index}',
             url=f'{profile}/post/{index}', formats=['.jpg'],
-            image_count=1, attachment_count=0, file_count=1) for index in range(total)]
+            image_count=1, attachment_count=0, file_count=1,assets=[dict(
+                url='https://file.pawchive.pw/data/aa/bb/'+str(index).zfill(64)+'.jpg',
+                name=f'{index}.jpg',direct=False,index=0)]) for index in range(total)]
         observed = set()
         heartbeat = QTimer(self.window)
         heartbeat.setInterval(5)

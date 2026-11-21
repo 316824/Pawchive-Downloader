@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, Slot
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -103,13 +103,15 @@ class SubscriptionDialog(QDialog):
 
     @staticmethod
     def _signature(records):
-        return tuple((r['profile'], r.get('name'), r.get('unread'), r.get('latest_ts'), r.get('avatar_path')) for r in records)
+        return tuple((r['profile'], r.get('name'), r.get('unread'), r.get('latest_ts'), r.get('avatar_path'),r.get('update_count')) for r in records)
 
     def _row_text(self, record):
         profile = record['profile']
         loading = self._loading_profiles | set(getattr(self.parent_window, '_subscription_loading_profiles', ()))
         marker = ('◐', '◓', '◑', '◒')[self._phase % 4] if profile in loading else '●' if record.get('unread') else ''
         status = self.text('正在检查画师更新…') if profile in loading else self.text('有更新') if record.get('unread') else ''
+        if profile not in loading and record.get('unread'):
+            status+=f" ({record.get('update_count',0)})"
         stamp = record.get('latest_ts', 0.0)
         date = self.text('未知')
         if stamp:
@@ -230,6 +232,11 @@ class SubscriptionDialog(QDialog):
         profile = item.data(Qt.ItemDataRole.UserRole)
         if not profile:
             return
+        record=self.store.get(profile)
+        if record and record.get('unread'):
+            from subscription_preview import open_update_preview
+            self.accept();open_update_preview(self.parent_window,profile)
+            return
         callback = getattr(self.parent_window, 'open_artist_profile', None)
         if callable(callback):
             self.accept(); callback(profile)
@@ -286,6 +293,7 @@ class SubscriptionDialog(QDialog):
         self.refresh(); self._notify_parent()
         return True
 
+    @Slot(object)
     def _check_finished(self, results):
         if self.sender() is not None and self.sender() is not self.worker:
             return
@@ -295,6 +303,7 @@ class SubscriptionDialog(QDialog):
         self.info.setText(self.text('检查完成。') + (' ' + self.text('{count} 位画师暂时无法访问。', count=errors) if errors else ''))
         self.refresh(); self._notify_parent()
 
+    @Slot()
     def _worker_stopped(self):
         if self.worker is not self.sender():
             return
@@ -305,6 +314,7 @@ class SubscriptionDialog(QDialog):
             self.info.setText(self.text('检查完成。'))
             self.refresh(); self._notify_parent()
 
+    @Slot(str,object)
     def _refresh_progress(self, profile, *_):
         if self.sender() is not None and self.sender() is not self.worker:
             return
