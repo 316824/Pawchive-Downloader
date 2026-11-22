@@ -36,7 +36,7 @@ PROFILE_URL_RE = re.compile(
     r'https://pawchive\.pw/(?:fanbox|patreon|subscribestar|discord|boosty)/user/[^/?#]+/?'
 )
 INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
+WINDOWS_RESERVED_NAMES = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10)), *(f'{prefix}{digit}' for prefix in ('COM','LPT') for digit in '¹²³')}
 IMAGE_EXTENSIONS = frozenset({
     '.avif', '.bmp', '.gif', '.heic', '.jpeg', '.jpg', '.png', '.tif',
     '.tiff', '.webp',
@@ -190,7 +190,7 @@ def safe_path_component(value, fallback='post', limit=180):
     value = INVALID_FILENAME_RE.sub('_', value).strip(' .')
     if not value:
         value = fallback
-    stem = value.split('.', 1)[0].upper()
+    stem = value.split('.', 1)[0].rstrip(' .').upper()
     if stem in WINDOWS_RESERVED_NAMES:
         value = f'_{value}'
     if len(value) > limit:
@@ -1472,6 +1472,7 @@ class ProfileScanWorker(QThread):
         self.after_ts=after_ts
         self.selected_urls={str(value).rstrip('/') for value in (selected_urls or ()) if str(value).strip()}
     def run(self):
+        from popular_features import _read_bytes,MAX_HTML_BYTES
         session=requests.Session()
         session.headers['User-Agent']=USER_AGENT
         try:
@@ -1480,10 +1481,11 @@ class ProfileScanWorker(QThread):
                 while self.paused and not self.finish_requested and not self.isInterruptionRequested(): time.sleep(.08)
                 if self.finish_requested or self.isInterruptionRequested(): break
                 url=f'{self.profile}?o={offset}' if offset else self.profile
-                response=session.get(url,timeout=20); response.raise_for_status(); soup=BeautifulSoup(response.text,'html.parser'); cards=soup.select('article.post-card')
+                payload,encoding=_read_bytes(session,url,self,MAX_HTML_BYTES,subdomains=False)
+                html=payload.decode(encoding,'replace');soup=BeautifulSoup(html,'html.parser'); cards=soup.select('article.post-card')
                 if not offset:
                     from download_settings import artist_name_from_html
-                    self.artist_name=artist_name_from_html(response.text)
+                    self.artist_name=artist_name_from_html(html)
                 if self.isInterruptionRequested(): break
                 if not cards: break
                 page_post_count=len(titles)
@@ -1498,7 +1500,7 @@ class ProfileScanWorker(QThread):
                     link=card.select_one('a[href*="/post/"]'); title=card.select_one('.post-card__header'); img=card.select_one('img.post-card__image')
                     if not link or not title: continue
                     post_url=absolute_post_url(link.get('href'))
-                    if not post_url: continue
+                    if not post_url or not post_url.startswith(self.profile+'/post/'): continue
                     post_key=post_url.rstrip('/')
                     if self.selected_urls and post_key not in self.selected_urls: continue
                     if post_key in seen: continue
@@ -1514,14 +1516,16 @@ class ProfileScanWorker(QThread):
                         if src:
                             image_url=str(src)
                             try:
-                                ir=session.get(src,timeout=8); ir.raise_for_status(); suffix=Path(unquote(urlparse(src).path)).suffix.lower(); suffix=suffix if re.fullmatch(r'\.[a-z0-9]{1,8}',suffix) else '.img'; image_path=self.cache_dir/f'{len(titles):06}{suffix}'; image_path.write_bytes(ir.content)
-                            except requests.RequestException: pass
+                                payload,_=_read_bytes(session,src,self,4*1024*1024)
+                                suffix=Path(unquote(urlparse(src).path)).suffix.lower(); suffix=suffix if re.fullmatch(r'\.[a-z0-9]{1,8}',suffix) else '.img'; image_path=self.cache_dir/f'{len(titles):06}{suffix}'; image_path.write_bytes(payload)
+                            except (requests.RequestException,ValueError): pass
                     if self.isInterruptionRequested(): break
                     formats=[]; image_formats=[]; attachment_formats=[]; file_count=0; image_count=0; attachment_count=0; assets=None
                     try:
-                        detail=session.get(post_url,timeout=12); detail.raise_for_status(); ds=BeautifulSoup(detail.text,'html.parser')
+                        payload,encoding=_read_bytes(session,post_url,self,MAX_HTML_BYTES,subdomains=False)
+                        detail_html=payload.decode(encoding,'replace');ds=BeautifulSoup(detail_html,'html.parser')
                         from static_download_plan import extract_assets
-                        assets=extract_assets(detail.text,post_url)
+                        assets=extract_assets(detail_html,post_url)
                         attachments=ds.select('.post__files a.fileThumb[href], a.post__attachment-link[href]')
                         file_count=len(attachments)
                         for number, attachment in enumerate(attachments, 1):
@@ -1533,7 +1537,7 @@ class ProfileScanWorker(QThread):
                             else:
                                 image_count += 1
                                 if ext and ext not in image_formats: image_formats.append(ext)
-                    except requests.RequestException: pass
+                    except (requests.RequestException,ValueError): pass
                     if self.isInterruptionRequested(): break
                     seen.add(post_key); titles.append({'date':post_date,'title':title.get_text(' ',strip=True),'url':post_url,'image':str(image_path) if image_path else None,'image_url':image_url,'formats':formats,'image_formats':image_formats,'attachment_formats':attachment_formats,'image_count':image_count,'attachment_count':attachment_count,'direct':bool(attachment_count),'file_count':file_count,'assets':assets,'artist_name':self.artist_name}); self.counts.emit(offset//PAGE_SIZE+1,len(titles))
                     if self.finish_requested: break
@@ -1590,6 +1594,9 @@ class App(QWidget):
         self._queue_completed_files=0; self._queue_recycle_ids=set(); self._queue_job_ids={}
         self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
         self._queue_view_pending=False
+        self._queue_view_timer=QTimer(self)
+        self._queue_view_timer.setSingleShot(True)
+        self._queue_view_timer.timeout.connect(self._flush_queue_view)
         self._queue_preparation=None; self._queue_finalizer=None; self._queue_finalizing=False
         self._destination_worker=None; self._destination_callback=None
         self._manifest_worker=None; self._manifest_destination=None
@@ -2518,12 +2525,12 @@ class App(QWidget):
         scheduler=self.queue_scheduler
         self.queue_scheduler=None
         self._queue_insert_timer.stop(); self._queue_pending_entries=[]
-        self._queue_view_pending=False
+        self._queue_view_pending=False;self._queue_view_timer.stop()
         self.download_queue.clear_items()
         if scheduler is not None:
             scheduler._started=False; scheduler._closing=True
-            scheduler._retry_timer.stop()
-            scheduler.deleteLater()
+            scheduler._retry_timer.stop();scheduler._schedule_timer.stop()
+            scheduler.blockSignals(True);scheduler.deleteLater()
         # Completed thread wrappers retain file lists; no native thread is
         # running now, so release only these owned, obsolete references.
         for name in ('worker','scanner'):
@@ -2627,7 +2634,7 @@ class App(QWidget):
         if self._queue_view_pending:
             return
         self._queue_view_pending=True
-        QTimer.singleShot(80,self._flush_queue_view)
+        self._queue_view_timer.start(80)
 
     def _flush_queue_view(self):
         self._queue_view_pending=False
@@ -2999,6 +3006,42 @@ class App(QWidget):
         if callable(getattr(self.services,'task_finished',None)):self.services.task_finished(False,error=message,paused=self.stop_requested)
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
 
+    def _retire_finished_queue(self):
+        scheduler=self.queue_scheduler
+        if scheduler is None:return True
+        if scheduler.active_tasks or getattr(scheduler,'_workers',{}):return False
+        self._queue_insert_timer.stop();self._queue_view_timer.stop()
+        self._queue_view_pending=False
+        scheduler.stop();scheduler.blockSignals(True)
+        for name,slot in (('task_updated',self._queue_task_updated),('task_finished',self._queue_task_finished),
+                          ('task_recycled',self._queue_task_recycled),('queue_changed',self._queue_view),
+                          ('became_idle',self._queue_worker_idle)):
+            try:getattr(scheduler,name).disconnect(slot)
+            except (RuntimeError,TypeError):pass
+        self.queue_scheduler=None
+        self.download_queue.clear_items()
+        scheduler.deleteLater()
+        return True
+
+    def _dispose_finished_scan(self):
+        from shiboken6 import isValid
+        # Closed dialogs are still Qt children unless explicitly destroyed.
+        # Their scanner/results and canvas can otherwise accumulate per artist.
+        scanner=getattr(self,'scanner',None)
+        if scanner is not None:
+            try:
+                if getattr(scanner,'isRunning',lambda:False)():return False
+            except RuntimeError:pass
+        splash=getattr(self,'splash',None)
+        if isinstance(splash,QWidget) and isValid(splash):
+            splash._completion_callback=None;splash._allow_close=True
+            if hasattr(splash,'scanner'):splash.scanner=None
+            splash.close();splash.deleteLater()
+        if hasattr(self,'splash'):del self.splash
+        if isinstance(scanner,QThread) and isValid(scanner):scanner.deleteLater()
+        if hasattr(self,'scanner'):del self.scanner
+        return True
+
     def _queue_prepared(self, entries):
         worker=self._queue_preparation
         if worker is not None and worker.isRunning():
@@ -3011,6 +3054,9 @@ class App(QWidget):
             self.set_busy_state(False); self.set_workflow('stopped')
             if callable(getattr(self.services,'task_finished',None)):self.services.task_finished(False,paused=True)
             return
+        if not self._retire_finished_queue():
+            self._queue_prepare_failed('Previous download threads have not finished.');return
+        self._dispose_finished_scan()
         self._queue_scan_entries=entries
         if self.services and getattr(self.services,'active_schedule',None):
             identifier=self.services.active_schedule
@@ -3103,6 +3149,7 @@ class App(QWidget):
         self.start_number.setValue(int(first.get('queue_start_number', first.get('start_number', 1))))
         self._selected_content_mode=first.get('content_mode','all')
         self.content_combo.setCurrentIndex(max(0,self.content_combo.findData(self._selected_content_mode)))
+        if not self._dispose_finished_scan():return False
         self._resume_jobs = list(jobs)
         self._resume_profile = profile
         self._resume_scan_worker = ProfileScanWorker(profile, self.cache_dir, selected_urls=selected)
@@ -3501,6 +3548,7 @@ class App(QWidget):
             self._handling_link_input=True
             try:self.profile.setText(profile)
             finally:self._handling_link_input=False
+        if not self._dispose_finished_scan():return
         # Every new download first discovers immutable file manifests. The
         # preselection checkbox controls only the later post picker.
         self.reset_dashboard(); self.set_busy_state(True); self.set_workflow('scan'); self.status.setText(AUX_TEXT[self.lang]['scan_status'])

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from contextlib import nullcontext, contextmanager
 from functools import wraps, lru_cache
 import re
 import time
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -208,17 +210,19 @@ class ArtistMetadataWorker(QThread):
         if not self.profile:
             self.result.emit('', 'Unknown Artist', '', 'invalid_profile'); return
         try:
-            response = requests.get(self.profile, headers={'User-Agent': 'PawchiveDownloader/1.3'}, timeout=(8, 20))
-            response.raise_for_status()
+            from popular_features import _read_bytes, MAX_HTML_BYTES
+            with requests.Session() as session:
+                payload, encoding = _read_bytes(session, self.profile, self, MAX_HTML_BYTES, subdomains=False)
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(payload.decode(encoding, 'replace'), 'html.parser')
             node = soup.select_one("a.user-header__profile [itemprop='name'], a.user-header__profile span[itemprop='name']")
             name = node.get_text(' ', strip=True) if node else 'Unknown Artist'
             image = soup.select_one('.user-header__profile-image img, img.fancy-image__image')
             src = str(image.get('src') or '') if image else ''
             if src.startswith('/'):
                 src = 'https://pawchive.pw' + src
-            self.result.emit(self.profile, name[:160] or 'Unknown Artist', src, '')
+            if not self.isInterruptionRequested():
+                self.result.emit(self.profile, name[:160] or 'Unknown Artist', src, '')
         except Exception as error:
             self.result.emit(self.profile, 'Unknown Artist', '', str(error)[:120])
 
@@ -291,8 +295,13 @@ def visible_avatar_paths(store, profiles):
 
 def cleanup_cache(store):
     """Remove interrupted or unreferenced avatar files without touching cards."""
-    root = (Path(store.data_dir).resolve() / 'artist-cards').resolve()
-    if not root.is_dir() or root.is_symlink():
+    data_dir = Path(store.data_dir).resolve()
+    root = data_dir / 'artist-cards'
+    if (not root.is_dir() or root.is_symlink()
+            or getattr(root, 'is_junction', lambda: False)()):
+        return 0
+    root = root.resolve()
+    if root.parent != data_dir:
         return 0
     referenced = set()
     from subscriptions import SubscriptionStore
@@ -350,8 +359,8 @@ class AvatarFetchWorker(QThread):
             session.headers['Referer'] = self.profile
             response = None
             try:
-                response = session.get(avatar_url(self.profile), timeout=(8, 20), stream=True)
-                response.raise_for_status()
+                from popular_features import _response
+                response = _response(session, avatar_url(self.profile), timeout=(8, 20))
                 content_type = (response.headers.get('content-type') or '').split(';',1)[0].strip().lower()
                 # Pawchive serves some valid artist JPEGs as octet-stream.
                 # MIME alone cannot establish image safety: inspect the actual
@@ -362,9 +371,10 @@ class AvatarFetchWorker(QThread):
                 length = int(response.headers.get('content-length') or 0)
                 if length < 0 or length > MAX_AVATAR_BYTES:
                     raise ValueError('avatar_too_large')
-                temporary = target_dir / f'{digest}.tmp'
+                descriptor, filename = tempfile.mkstemp(dir=target_dir, prefix=f'.{digest}-', suffix='.tmp')
+                temporary = Path(filename)
                 total = 0
-                with temporary.open('wb') as stream:
+                with os.fdopen(descriptor, 'wb') as stream:
                     for chunk in response.iter_content(64 * 1024):
                         if self.isInterruptionRequested(): raise OSError('cancelled')
                         if not chunk:

@@ -17,7 +17,7 @@ CHECKBOX_SETTINGS = {
     'default_path_check': ('download/default_path_enabled', False),
 }
 INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f\ud800-\udfff]')
-RESERVED_NAME = re.compile(r'^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)', re.I)
+RESERVED_NAME = re.compile(r'^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:[ .]|$)', re.I)
 
 
 def sanitize_artist_name(name, fallback='Unknown Artist', limit=50):
@@ -90,23 +90,16 @@ def artist_name_from_html(html):
 
 def fetch_artist_name(profile, interrupted=lambda: False):
     from artist_cards import normalize_profile
+    from popular_features import _read_bytes
     profile = normalize_profile(profile)
     if not profile:
         raise ValueError('invalid_profile')
     with requests.Session() as session:
         session.headers['User-Agent'] = 'PawchiveDownloader/1.3'
-        with session.get(profile, timeout=(8, 20), stream=True) as response:
-            response.raise_for_status()
-            chunks = []
-            size = 0
-            for chunk in response.iter_content(64*1024):
-                if interrupted():
-                    raise OSError('cancelled')
-                size += len(chunk)
-                if size > 2*1024*1024:
-                    break
-                chunks.append(chunk)
-            return artist_name_from_html(b''.join(chunks).decode('utf-8', 'replace'))
+        class Cancellation:
+            isInterruptionRequested = staticmethod(interrupted)
+        payload, encoding = _read_bytes(session, profile, Cancellation(), 2*1024*1024, subdomains=False)
+        return artist_name_from_html(payload.decode(encoding, 'replace'))
 
 
 def create_destination(base, profile, artist_folder, artist_name='', *, interrupted=lambda: False):

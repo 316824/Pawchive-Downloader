@@ -72,12 +72,13 @@ def lookup_profiles(profiles, *, interrupted=lambda:False, session=None):
     session.headers['User-Agent']='PawchiveDownloader/1.3'
     result=[]
     try:
+        from popular_features import _response
         for profile in profiles:
             if interrupted(): break
             profile=normalize_profile(profile)
             if not profile: continue
             try:
-                response=session.get(profile,timeout=(6,12),stream=True)
+                response=_response(session,profile,timeout=(6,12),subdomains=False)
                 try:
                     response.raise_for_status()
                     final=parse_url(getattr(response,'url','') or profile)
@@ -90,7 +91,7 @@ def lookup_profiles(profiles, *, interrupted=lambda:False, session=None):
                 if not name: continue
                 data=b''
                 try:
-                    response=session.get(avatar_url(profile),timeout=(4,8),stream=True)
+                    response=_response(session,avatar_url(profile),timeout=(4,8))
                     try:
                         response.raise_for_status()
                         data=_image_bytes(_body(response,MAX_AVATAR_BYTES,interrupted))

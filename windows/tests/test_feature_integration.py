@@ -63,7 +63,9 @@ class FeatureIntegrationTests(unittest.TestCase):
     def test_update_scan_filters_by_numeric_date_before_fetching_old_post_details(self):
         calls=[]
         class Response:
-            def __init__(self,text): self.text=text
+            def __init__(self,text):self.text=text;self.status_code=200;self.encoding='utf-8';self.headers={}
+            def iter_content(self,size):yield self.text.encode('utf-8')
+            def close(self):pass
             def raise_for_status(self): pass
         class Session:
             headers={}

@@ -25,7 +25,7 @@ PNG=b'\x89PNG\r\n\x1a\n'+b'local fixture payload'*15
 class Response:
     def __init__(self,body=b'',status=200,headers=None,interrupt=None):
         self.body=body; self.status_code=status; self.headers=CaseInsensitiveDict(headers or {})
-        self.interrupt=interrupt
+        self.interrupt=interrupt;self.encoding='utf-8'
     @property
     def text(self): return self.body.decode()
     def raise_for_status(self):

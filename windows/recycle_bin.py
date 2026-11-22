@@ -72,6 +72,8 @@ class RecycleBin:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.root = self.data_dir / 'recycle-bin'
+        if self.root.is_symlink() or getattr(self.root, 'is_junction', lambda: False)():
+            raise ValueError('The recycle-bin directory cannot be a reparse point.')
         self.root.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / 'recycle-bin.sqlite3'
         self._lock = threading.RLock()
@@ -146,6 +148,13 @@ class RecycleBin:
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
             raise ValueError('Recycle-bin paths must be absolute.')
+        current = candidate
+        while True:
+            if current.is_symlink() or getattr(current, 'is_junction', lambda: False)():
+                raise ValueError('Recycle-bin paths cannot traverse reparse points.')
+            if current == self.root or current.parent == current:
+                break
+            current = current.parent
         resolved = candidate.resolve()
         if resolved == self.root.resolve():
             if allow_root:
@@ -154,6 +163,11 @@ class RecycleBin:
         if not resolved.is_relative_to(self.root.resolve()):
             raise ValueError('Recycle-bin path escapes its private directory.')
         return resolved
+
+    def _entry_directory(self, identifier):
+        if not isinstance(identifier, str) or not ENTRY_ID.fullmatch(identifier):
+            raise ValueError('Invalid recycle-bin entry identifier.')
+        return self._inside(self.root / identifier)
 
     @staticmethod
     def _text(value, limit=4096):
@@ -258,7 +272,7 @@ class RecycleBin:
         if not math.isfinite(retention) or retention <= 0:
             retention = self.retention_seconds
         expires = now + retention
-        entry_dir = self.root / identifier
+        entry_dir = self._entry_directory(identifier)
         entry_dir.mkdir(parents=True, exist_ok=False)
         stored_cover = None
         stored_payload = None
@@ -287,7 +301,10 @@ class RecycleBin:
                         shutil.move(str(source), original)
                 except OSError:
                     pass
-            shutil.rmtree(entry_dir, ignore_errors=True)
+            # A failed rollback (for example, an occupied original path) must
+            # leave the moved user payload available for manual recovery.
+            if not stored_payload or not Path(stored_payload).exists():
+                shutil.rmtree(entry_dir, ignore_errors=True)
             raise
         return self.get(identifier)
 
@@ -310,6 +327,12 @@ class RecycleBin:
         return [self._entry(row) for row in rows]
 
     def _delete_entry(self, identifier):
+        # Expiry and purge read identifiers from a persisted database too.
+        # Validate those just as strictly as explicit UI remove requests.
+        try:
+            entry_dir = self._entry_directory(identifier)
+        except (ValueError, OSError, RuntimeError):
+            return None
         with self._lock:
             row = self._db.execute('SELECT * FROM entries WHERE id=?',
                                    (identifier,)).fetchone()
@@ -319,7 +342,7 @@ class RecycleBin:
             self._db.execute('DELETE FROM entries WHERE id=?', (identifier,))
             self._db.commit()
         try:
-            shutil.rmtree(self.root / identifier, ignore_errors=False)
+            shutil.rmtree(entry_dir, ignore_errors=False)
         except OSError:
             # Keep metadata if files could not be removed; the next cleanup can
             # retry without silently losing the user's recovery link.
@@ -366,6 +389,10 @@ class RecycleBin:
             return None
         payload = Path(entry.payload_path) if entry.payload_path else None
         if payload and payload.exists():
+            entry_dir = self._entry_directory(identifier)
+            payload = self._inside(payload)
+            if not payload.is_relative_to(entry_dir / 'payload'):
+                raise ValueError('The saved payload is outside its recycle-bin entry.')
             target = Path(destination).expanduser() if destination else Path(entry.original_path or '')
             if not target.is_absolute():
                 raise ValueError('Restore destination must be absolute.')

@@ -26,6 +26,7 @@ PATREON='https://pawchive.pw/patreon/user/123'
 
 class Response:
     def __init__(self,url,body,status=200):
+        self.status_code=status
         self.url=url;self.body=body;self.status=status
         self.headers={'content-length':str(len(body))};self.closed=False
     def raise_for_status(self):

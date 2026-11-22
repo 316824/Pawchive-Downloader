@@ -16,7 +16,7 @@ import uuid
 PROFILE = re.compile(r'https://pawchive\.pw/(?:fanbox|patreon|subscribestar|discord|boosty)/user/[^/?#\s]+/?')
 JOB_ID = re.compile(r'[a-f0-9]{32}')
 WINDOWS_COMPONENT = re.compile(r'[<>:"/\\|?*\x00-\x1f\ud800-\udfff]')
-WINDOWS_DEVICE = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[ .]|$)',re.I)
+WINDOWS_DEVICE = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:[ .]|$)',re.I)
 
 
 def valid_manifest_component(value):
@@ -27,17 +27,26 @@ def valid_manifest_component(value):
 
 
 def original_url(value):
-    parsed=urlparse(str(value))
-    host=parsed.hostname or ''
-    return (parsed.scheme=='https' and (host=='file.pawchive.pw' or re.fullmatch(r'n\d+\.pawchive\.pw',host))
-            and not parsed.username and not parsed.password and parsed.port in (None,443)
-            and parsed.path.startswith('/data/'))
+    try:
+        parsed=urlparse(str(value))
+        host=parsed.hostname or ''
+        return bool(parsed.scheme=='https' and (host=='file.pawchive.pw' or re.fullmatch(r'n\d+\.pawchive\.pw',host))
+                    and not parsed.username and not parsed.password and parsed.port in (None,443)
+                    and parsed.path.startswith('/data/'))
+    except ValueError:
+        return False
 
 
 def inside(folder, path, *, child=True):
     root=Path(folder).resolve()
     candidate=Path(path)
     if not candidate.is_absolute(): raise ValueError('Checkpoint path is not absolute.')
+    try:
+        relative=candidate.relative_to(root)
+    except ValueError:
+        relative=None
+    if relative is not None and any(not valid_manifest_component(part) for part in relative.parts):
+        raise ValueError('Checkpoint path contains an unsafe Windows component.')
     current=candidate
     while current!=root and current.parent!=current:
         if current.is_symlink() or getattr(current,'is_junction',lambda:False)():
@@ -46,6 +55,8 @@ def inside(folder, path, *, child=True):
     resolved=candidate.resolve()
     if not resolved.is_relative_to(root) or (child and resolved==root):
         raise ValueError('Checkpoint path is outside the download folder.')
+    if any(not valid_manifest_component(part) for part in resolved.relative_to(root).parts):
+        raise ValueError('Checkpoint path contains an unsafe Windows component.')
     return resolved
 
 

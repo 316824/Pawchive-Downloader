@@ -14,7 +14,7 @@ from subscriptions import parse_site_datetime
 
 def clean_component(value,fallback='file',limit=100):
     value=re.sub(r'[<>:"/\\|?*\x00-\x1f\ud800-\udfff]','_',str(value or '')).strip(' .') or fallback
-    if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)',value,re.I):value='_'+value
+    if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:[ .]|$)',value,re.I):value='_'+value
     suffix=Path(value).suffix
     return value[:max(1,limit-len(suffix))].rstrip(' .')+suffix if len(value)>limit else value
 
@@ -98,19 +98,23 @@ class ManifestFetchWorker(QThread):
 
     def run(self):
         try:
+            from link_utils import parse_url
+            from popular_features import _read_bytes, MAX_HTML_BYTES
             with requests.Session() as session:
                 session.headers['User-Agent']='PawchiveDownloader/1.3'
                 for index,entry in enumerate(self.entries):
                     if self.isInterruptionRequested():raise OSError('cancelled')
                     if not isinstance(entry.get('assets'),list):
-                        with session.get(entry['url'],timeout=(8,20)) as response:
-                            response.raise_for_status();html=response.text
-                            entry['assets']=extract_assets(html,entry['url'])
-                            soup=BeautifulSoup(html,'html.parser')
-                            title=soup.select_one('.post__title')
-                            stamp=soup.select_one('time[datetime]')
-                            if not entry.get('title'):entry['title']=title.get_text(' ',strip=True) if title else entry['url'].rstrip('/').rsplit('/',1)[-1]
-                            if not entry.get('date') and stamp:entry['date']=stamp.get('datetime','')
+                        link = parse_url(entry.get('url'))
+                        if link is None or not link.is_post:raise ValueError('Invalid collection URL.')
+                        payload,encoding=_read_bytes(session,link.post_url,self,MAX_HTML_BYTES,subdomains=False)
+                        html=payload.decode(encoding,'replace')
+                        entry['assets']=extract_assets(html,link.post_url)
+                        soup=BeautifulSoup(html,'html.parser')
+                        title=soup.select_one('.post__title')
+                        stamp=soup.select_one('time[datetime]')
+                        if not entry.get('title'):entry['title']=title.get_text(' ',strip=True) if title else entry['url'].rstrip('/').rsplit('/',1)[-1]
+                        if not entry.get('date') and stamp:entry['date']=stamp.get('datetime','')
                     self.progress.emit(index+1,len(self.entries))
             self.result.emit(self.entries)
         except Exception as error:self.failed.emit(str(error))

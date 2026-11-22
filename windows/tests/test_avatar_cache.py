@@ -22,6 +22,7 @@ PROFILE='https://pawchive.pw/fanbox/user/3439325'
 
 class Response:
     def __init__(self,body,content_type='application/octet-stream',**headers):
+        self.status_code=200
         self.body=body;self.headers={'content-type':content_type,'content-length':str(len(body)),**headers}
         self.closed=False
     def raise_for_status(self): pass

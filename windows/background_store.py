@@ -100,12 +100,22 @@ def normalize_overlay(value):
     return max(MIN_OVERLAY, min(MAX_OVERLAY, value))
 
 
-def _safe_relative_preview(root, value):
+def _safe_relative_preview(root, value, page):
     if not isinstance(value, str) or not value:
         return None
     try:
-        path = (root / value).resolve()
-        if not path.is_relative_to(root.resolve()):
+        relative = Path(value)
+        # The manifest may name only this page's generated thumbnail. Merely
+        # staying below data_dir also admitted settings and SQLite databases.
+        if relative != Path('backgrounds') / f'{page}.jpg':
+            return None
+        directory = root / 'backgrounds'
+        path = root / relative
+        if (directory.is_symlink() or getattr(directory, 'is_junction', lambda: False)()
+                or path.is_symlink() or getattr(path, 'is_junction', lambda: False)()):
+            return None
+        path = path.resolve()
+        if path.parent != directory or directory.parent != root.resolve():
             return None
     except (OSError, RuntimeError, TypeError):
         return None
@@ -119,6 +129,7 @@ class BackgroundStore:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.root = self.data_dir / 'backgrounds'
+        self._check_root()
         self.root.mkdir(parents=True, exist_ok=True)
         self.json_path = self.data_dir / 'backgrounds.json'
         self.cache_limit = max(1, int(cache_limit))
@@ -126,6 +137,11 @@ class BackgroundStore:
         self._cache = OrderedDict()
         self._layers = {}
         self._data = self._load()
+
+    def _check_root(self):
+        if (self.root.is_symlink() or getattr(self.root, 'is_junction', lambda: False)()
+                or self.root.resolve().parent != self.data_dir):
+            raise BackgroundError('The background cache path is invalid.')
 
     def _empty(self):
         return {'version': 1, 'mode': 'default', 'pages': {}}
@@ -148,7 +164,7 @@ class BackgroundStore:
                     continue
                 if not isinstance(value, dict):
                     continue
-                preview = _safe_relative_preview(self.data_dir, value.get('preview'))
+                preview = _safe_relative_preview(self.data_dir, value.get('preview'), page)
                 if preview is None or not preview.is_file():
                     continue
                 crop = normalize_crop(value.get('crop'))
@@ -248,6 +264,7 @@ class BackgroundStore:
                 1 <= preview_height <= MAX_PREVIEW_DIMENSION):
             raise BackgroundError('The preview dimensions exceed the safe limit.')
         preview_path = self.root / f'{page}.jpg'
+        self._check_root()
         temporary = None
         try:
             with tempfile.NamedTemporaryFile('wb', dir=self.root, prefix=f'.{page}-', suffix='.tmp', delete=False) as stream:
@@ -282,7 +299,7 @@ class BackgroundStore:
             old = self._data['pages'].pop(page, None)
             self._cache.pop(page, None)
             if old:
-                preview = _safe_relative_preview(self.data_dir, old.get('preview'))
+                preview = _safe_relative_preview(self.data_dir, old.get('preview'), page)
                 if preview is not None:
                     preview.unlink(missing_ok=True)
             self._write()
@@ -292,7 +309,7 @@ class BackgroundStore:
         config = self.page_config(page)
         if not config:
             return None
-        path = _safe_relative_preview(self.data_dir, config.get('preview'))
+        path = _safe_relative_preview(self.data_dir, config.get('preview'), page)
         return path if path is not None and path.is_file() else None
 
     def cached_preview(self, page, loader):
@@ -343,6 +360,7 @@ class BackgroundStore:
         """
         removed = 0
         with self._lock:
+            self._check_root()
             original_pages = dict(self._data['pages'])
             valid_pages = {}
             referenced = set()
@@ -350,12 +368,12 @@ class BackgroundStore:
             removed_pages = []
             for page, config in self._data['pages'].items():
                 if remove_disabled and self._data['mode'] != 'custom':
-                    preview = _safe_relative_preview(self.data_dir, config.get('preview'))
+                    preview = _safe_relative_preview(self.data_dir, config.get('preview'), page)
                     if preview is not None:
                         configured_previews.append(preview)
                     removed_pages.append(page)
                     continue
-                preview = _safe_relative_preview(self.data_dir, config.get('preview'))
+                preview = _safe_relative_preview(self.data_dir, config.get('preview'), page)
                 if preview is not None and preview.is_file():
                     valid_pages[page] = config
                     referenced.add(preview.resolve())
