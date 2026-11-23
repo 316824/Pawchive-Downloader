@@ -44,13 +44,15 @@ Windows 旧发布包出现的 QtCore 导入失败，定位为 Windows 包内 ICU
 
 ## 获取 APK
 
-本项目通过 GitHub Actions 在云端构建，不需要在电脑上安装 WSL2、Android Studio 或本地 Android SDK。
+优先打开 [GitHub Releases](https://github.com/316824/Pawchive-Downloader/releases)，在 Assets 中下载维护者附带的 `.apk`；公开 Release 附件不要求登录，也不受 Actions 保留期影响。没有 APK 附件时，再使用下面的 Actions 方式。本项目通过 GitHub Actions 在云端构建，不需要在电脑上安装 WSL2、Android Studio 或本地 Android SDK。
 
 1. 登录 GitHub，打开仓库的 **Actions** 页面，选择 **Build Pawchive Android APK**。
 2. 打开最近一次成功的运行记录，在页面底部的 **Artifacts** 下载 `PawchiveDownloader-release-APK`。
 3. 解压下载文件，将 APK 传到 Android 手机并安装。若手机询问是否允许从当前文件管理器安装应用，请按系统提示授权。
 
-构建产物保留 14 天；如果没有可下载的产物，可等待维护者重新构建，或按下方说明 Fork 后自行构建。具有仓库写入权限的维护者可点击 **Run workflow** 运行构建；工作流也会在 `main` 分支的应用或构建文件变更后自动运行。
+后续构建产物请求保留 90 天（受仓库策略限制）；旧构建原来只保留 14 天，过期附件不会因修改设置自动恢复。Success 不代表产物永久可下载，Artifacts 为“—”时需要重新构建；如果没有可下载的产物，可等待维护者重新构建，或按下方说明 Fork 后自行构建。具有仓库写入权限的维护者可点击 **Run workflow** 运行构建；工作流也会在 `main` 分支的应用或构建文件变更后自动运行。
+
+维护者应使用最新 `main` 的 **Run workflow** 重新生成 APK，下载并解压构建产物后，将 `.apk` 上传到对应 Release 的 Assets，作为长期公开下载入口。详见 [Android 下载与发布步骤](../android/README.md)。
 
 ## 签名密钥配置
 

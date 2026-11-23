@@ -808,6 +808,8 @@ class SnakeGameWidget(QWidget):
         self._paused = False
         self._stopped = False
         self._finishing = False
+        self._completion_emitted = False
+        self._collecting_all = False
         self._finish_until = 0.0
         self._finish_count = 0
         self._dissolve_particles = []
@@ -892,7 +894,7 @@ class SnakeGameWidget(QWidget):
         self._paused = bool(paused)
         if self._paused:
             self._timer.stop()
-        elif not self._stopped:
+        elif not self._stopped and not self._finishing:
             self._last_tick = time.monotonic()
             self._timer.start()
         self.update()
@@ -901,8 +903,12 @@ class SnakeGameWidget(QWidget):
         self._stopped = True
         self._timer.stop()
         self._dissolve_timer.stop()
+        self._finishing = False
+        self._dissolve_particles.clear()
 
     def start(self):
+        if self._finishing or self._completion_emitted:
+            return
         self._stopped = False
         if not self._paused:
             self._last_tick = time.monotonic()
@@ -911,7 +917,10 @@ class SnakeGameWidget(QWidget):
 
     def begin_scan_complete(self, count):
         """Start the soft completion dissolve used before the picker opens."""
+        if self._finishing or self._completion_emitted:
+            return
         self._timer.stop()
+        self._stopped = False
         self._finishing = True
         self._finish_count = max(0, int(count or 0))
         self._finish_until = time.monotonic() + .85
@@ -936,12 +945,24 @@ class SnakeGameWidget(QWidget):
             particle[4] = max(0.0, particle[4] - .035)
         now = time.monotonic()
         if now >= self._finish_until:
-            self._finishing = False
-            self._stopped = True
-            self._dissolve_timer.stop()
-            self._dissolve_particles.clear()
-            self.completionFinished.emit()
+            self._finish_dissolve()
+            return
         self.update()
+
+    def _finish_dissolve(self):
+        """Finish once, before handing control to possibly destructive slots."""
+        if not self._finishing or self._completion_emitted:
+            return
+        self._completion_emitted = True
+        self._stopped = True
+        self._finishing = False
+        self._timer.stop()
+        self._dissolve_timer.stop()
+        self._dissolve_particles.clear()
+        self.update()
+        # A synchronous receiver may delete this widget or its parent. Never
+        # call QWidget methods (or access its timers) after emitting the signal.
+        self.completionFinished.emit()
 
     def _set_direction(self, direction):
         self._note_activity()
@@ -986,8 +1007,16 @@ class SnakeGameWidget(QWidget):
         return True
 
     def _collect_all_fragments(self):
-        for coordinate in list(self.fragments):
-            self._collect_fragment(coordinate)
+        # Pulse fragments can trigger other pulse fragments. Drain one bounded
+        # snapshot instead of recursively nesting one full-grid pass per pulse.
+        if self._collecting_all:
+            return
+        self._collecting_all = True
+        try:
+            for coordinate in list(self.fragments):
+                self._collect_fragment(coordinate)
+        finally:
+            self._collecting_all = False
 
     def _apply_magnet(self, head):
         if self._idle or time.monotonic() >= self._magnet_until:
@@ -1025,6 +1054,12 @@ class SnakeGameWidget(QWidget):
                 self._activate_buff(kind)
 
     def keyPressEvent(self, event):
+        event.accept()
+        if self._finishing:
+            self._finish_dissolve()
+            return
+        if self._stopped:
+            return
         directions = {
             Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_A: (-1, 0),
             Qt.Key.Key_Right: (1, 0), Qt.Key.Key_D: (1, 0),
@@ -1041,11 +1076,16 @@ class SnakeGameWidget(QWidget):
         event.accept()
 
     def mousePressEvent(self, event):
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
-        self._note_activity()
-        if self._finishing:
-            self.completionFinished.emit()
         event.accept()
+        if self._finishing:
+            self._finish_dissolve()
+            return
+        if self._stopped:
+            return
+        self._note_activity()
+        # Focus transitions can synchronously close/delete a window. This is
+        # deliberately the final QWidget operation in the press handler.
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
 
     def _soft_collision(self):
         now = time.monotonic()
@@ -1131,8 +1171,8 @@ class SnakeGameWidget(QWidget):
         self._last_tick = now
         if self._finishing:
             if now >= self._finish_until:
-                self._finishing = False
-                self.completionFinished.emit()
+                self._finish_dissolve()
+                return
             self.update()
             return
         if self._rebuild_until:
@@ -1174,6 +1214,12 @@ class SnakeGameWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        try:
+            self._paint_canvas(painter)
+        finally:
+            painter.end()
+
+    def _paint_canvas(self, painter):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         cell_w, cell_h = self.width() / self.GRID, self.height() / self.GRID
         cache_key = (self.width(), self.height(), self.devicePixelRatioF())
@@ -1182,11 +1228,13 @@ class SnakeGameWidget(QWidget):
             canvas.setDevicePixelRatio(self.devicePixelRatioF())
             canvas.fill(QColor('#091326'))
             grid = QPainter(canvas)
-            grid.setPen(QPen(QColor(120, 145, 190, 20), 1))
-            for index in range(self.GRID + 1):
-                grid.drawLine(QPointF(index * cell_w, 0), QPointF(index * cell_w, self.height()))
-                grid.drawLine(QPointF(0, index * cell_h), QPointF(self.width(), index * cell_h))
-            grid.end()
+            try:
+                grid.setPen(QPen(QColor(120, 145, 190, 20), 1))
+                for index in range(self.GRID + 1):
+                    grid.drawLine(QPointF(index * cell_w, 0), QPointF(index * cell_w, self.height()))
+                    grid.drawLine(QPointF(0, index * cell_h), QPointF(self.width(), index * cell_h))
+            finally:
+                grid.end()
             self._canvas_cache = (cache_key, canvas)
         painter.drawPixmap(0, 0, self._canvas_cache[1])
         now = time.monotonic()
@@ -1274,7 +1322,6 @@ class SnakeGameWidget(QWidget):
                              ui_text(language_for(self),'扫描已完成，共获取 {count} 个图集',count=self._finish_count)+'\n'+ui_text(language_for(self),'（点击窗口任意一处位置查看图集）'))
         if self._collision_flash:
             painter.fillRect(self.rect(), QColor(255, 107, 153, int(80 * self._collision_flash / .45)))
-        painter.end()
 
 
 class ScanCompletionOverlay(QWidget):
@@ -1584,6 +1631,11 @@ class App(QWidget):
         self._background_exit_timer=QTimer(self)
         self._background_exit_timer.setSingleShot(True)
         self._background_exit_timer.timeout.connect(self.close)
+        self._cache_cleaning=False
+        self._cache_cleanup_deadline=0.0
+        self._cache_cleanup_timer=QTimer(self)
+        self._cache_cleanup_timer.setSingleShot(True)
+        self._cache_cleanup_timer.timeout.connect(self._release_cache_cleanup_button)
         # Sweep only Pawchive-owned temp roots before creating this run's
         # cache.  The 24-hour limit prevents abandoned previews from slowly
         # consuming the system drive while preserving an active session.
@@ -1657,7 +1709,7 @@ class App(QWidget):
         install_preferences(self)
         from update_checker import install_update_checker
         self.update_controller=install_update_checker(self,self.update_button,services.store if services else None,
-            current_version='v1.3',delay_ms=None if QApplication.platformName()=='offscreen' else 1800)
+            current_version='v1.3.1',delay_ms=None if QApplication.platformName()=='offscreen' else 1800)
         install_window_chrome(self, title=TEXT[self.lang]['title'])
         self.background_layer=BackgroundLayer(self)
         self.background_layer.setGeometry(self.rect())
@@ -1963,7 +2015,8 @@ class App(QWidget):
         if busy: self.completed_path=None; self.open_folder_button.hide()
         controls=(self.profile,self.order_combo,self.title_check,self.artist_folder_check,self.select_posts_check,self.rename_check,self.start_number,self.default_path_check,self.browse,self.paste_button)
         for widget in controls: widget.setEnabled(not busy)
-        self.clear_cache.setEnabled(not busy)
+        self.clear_cache.setEnabled(not busy and not self._cache_cleaning
+                                    and time.monotonic()>=self._cache_cleanup_deadline)
         self.validate_profile()
     def validate_profile(self,text=None):
         from artist_lookup import input_profiles
@@ -2488,9 +2541,13 @@ class App(QWidget):
             self.status.setText(self.ui_text()['copy_empty']); return
         QApplication.clipboard().setText(self.log.toPlainText())
         self.status.setText(AUX_TEXT[self.lang]['log_copied'])
-    def _workspace_has_live_threads(self):
+    def _workspace_has_live_threads(self, *, workspace_only=False):
         """Conservatively protect native workers before releasing their row widgets."""
-        workers=list(self.findChildren(QThread))
+        workers=[] if workspace_only else list(self.findChildren(QThread))
+        scheduler=self.queue_scheduler
+        if workspace_only and scheduler is not None:
+            workers.extend(scheduler.findChildren(QThread))
+            workers.extend(worker for worker in getattr(scheduler,'_workers',{}).values() if worker is not None)
         for name in ('worker','scanner','_resume_scan_worker','_destination_worker',
                      '_queue_preparation','_queue_finalizer','_manifest_worker'):
             worker=getattr(self,name,None)
@@ -2505,7 +2562,8 @@ class App(QWidget):
         return False
 
     def _can_reset_workspace(self):
-        if self.busy or self._workspace_has_live_threads():return False
+        if self.busy or self._workspace_has_live_threads(workspace_only=True):return False
+        if self._artist_lookup_operation is not None:return False
         if getattr(self,'_queue_finalizing',False) or getattr(self,'_queue_pending_entries',()):return False
         if any(getattr(self,name,None) is not None for name in
                ('_queue_preparation','_queue_finalizer','_destination_worker','_manifest_worker')):return False
@@ -2522,18 +2580,14 @@ class App(QWidget):
 
     def _reset_finished_workspace(self):
         if not self._can_reset_workspace():return False
-        scheduler=self.queue_scheduler
-        self.queue_scheduler=None
+        if not self._retire_finished_queue():return False
         self._queue_insert_timer.stop(); self._queue_pending_entries=[]
         self._queue_view_pending=False;self._queue_view_timer.stop()
         self.download_queue.clear_items()
-        if scheduler is not None:
-            scheduler._started=False; scheduler._closing=True
-            scheduler._retry_timer.stop();scheduler._schedule_timer.stop()
-            scheduler.blockSignals(True);scheduler.deleteLater()
+        self._dispose_finished_scan()
         # Completed thread wrappers retain file lists; no native thread is
         # running now, so release only these owned, obsolete references.
-        for name in ('worker','scanner'):
+        for name in ('worker','_resume_scan_worker'):
             worker=getattr(self,name,None)
             if isinstance(worker,QThread):worker.deleteLater()
             if hasattr(self,name):delattr(self,name)
@@ -2541,6 +2595,7 @@ class App(QWidget):
         self._queue_job_ids={}; self._queue_recycle_ids=set(); self._queue_rewarded_ids=set()
         self._queue_profile=''; self._queue_completed_files=0
         self._queue_closing=False
+        self._manifest_destination=None;self._destination_options={}
         self.profile.clear(); self.log.clear(); self.reset_dashboard()
         self.completed_path=None; self.open_folder_button.hide()
         self.queue_count.setText(self.ui_text()['queue_count'].format(count=0))
@@ -2549,8 +2604,15 @@ class App(QWidget):
         self.taskbar_progress.clear(); self.set_workflow('setup')
         return True
 
+    def _release_cache_cleanup_button(self):
+        self.clear_cache.setEnabled(not self.busy and not self._cache_cleaning)
+
     def clear_cache_files(self):
-        if self.busy or self._workspace_has_live_threads(): return
+        # Guard the slot too: queued clicks or modal confirmation dialogs can
+        # reenter it even after the toolbar button has been disabled.
+        if self._cache_cleaning or time.monotonic()<self._cache_cleanup_deadline:return False
+        if self.busy or self._workspace_has_live_threads(workspace_only=True):return False
+        self._cache_cleaning=True;self.clear_cache.setEnabled(False)
         reset_workspace=self._can_reset_workspace()
         try:
             if self.cache_dir.is_dir() and not self.cache_dir.is_symlink():
@@ -2584,7 +2646,7 @@ class App(QWidget):
                 self.background_store.cleanup_unused(remove_disabled=remove_disabled)
                 self.background_store.clear_cache()
                 self.refresh_background()
-            if self.services:
+            if self.services and not self._artist_avatar_workers and not self._artist_metadata_workers:
                 try:
                     from artist_cards import cleanup_cache
                     cleanup_cache(self.services.store)
@@ -2595,6 +2657,10 @@ class App(QWidget):
             self.status.setText(AUX_TEXT[self.lang]['cache_cleared'])
         except (OSError, ValueError, RuntimeError) as exc:
             self.log.append(AUX_TEXT[self.lang]['cache_failed'].format(exc))
+        finally:
+            self._cache_cleaning=False
+            self._cache_cleanup_deadline=time.monotonic()+3.0
+            self._cache_cleanup_timer.start(3000)
     def open_download_folder(self):
         folder=Path(self.completed_path) if self.completed_path else None
         if folder and folder.is_dir():
@@ -3756,7 +3822,7 @@ class App(QWidget):
         if hasattr(self,'background_layer'):
             self.background_layer.clear_background()
         if self.background_store:
-            self.background_store.release_except(None)
+            self.background_store.clear_cache()
         if self.recycle_timer.isActive():
             self.recycle_timer.stop()
         if self.recycle_bin:

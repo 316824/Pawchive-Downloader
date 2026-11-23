@@ -134,7 +134,7 @@ class CoreRefactorIntegrationTests(unittest.TestCase):
         config = {**self.config, 'by_title': False}
         plans = assign_plans(entries, config)
         self.assertEqual(plans[0]['static_plan'][0]['save_name'], '3.png')
-        self.assertEqual([asset['save_name'] for asset in plans[1]['static_plan']], ['1.jpg', 'old.zip', '2.webp'])
+        self.assertEqual([asset['save_name'] for asset in plans[1]['static_plan']], ['1.jpg', 'Old.zip', '2.webp'])
         self.assertEqual([asset['number'] for asset in plans[1]['static_plan']], [1, None, 2])
         self.assertFalse(self.folder.exists(), 'reservation must not create filesystem payload')
 

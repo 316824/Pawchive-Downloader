@@ -25,7 +25,7 @@ from PySide6.QtGui import QDesktopServices, QTextDocument
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout
 
 
-CURRENT_VERSION = 'v1.3'
+CURRENT_VERSION = 'v1.3.1'
 LATEST_RELEASE_API = 'https://api.github.com/repos/316824/Pawchive-Downloader/releases/latest'
 RELEASE_ROOT = 'https://github.com/316824/Pawchive-Downloader/releases/tag/'
 IGNORED_VERSION_KEY = 'update_checker.ignored_version'

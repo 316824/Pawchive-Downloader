@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import QCoreApplication,QEvent,QSettings,QTimer
+from PySide6.QtCore import QCoreApplication,QEvent,QSettings,QTimer,QThread
 from PySide6.QtWidgets import QApplication
 from download_scheduler import DownloadScheduler
 import download_pawchive_images as desktop
@@ -29,7 +29,9 @@ class ScanWorkspaceActionsTests(unittest.TestCase):
         self.window.path.setText(str(self.root));self.window.show();self.qt.processEvents()
 
     def tearDown(self):
+        from shiboken6 import isValid
         for dialog in self.dialogs:
+            if not isValid(dialog):continue
             dialog._allow_close=True;dialog.close();dialog.deleteLater()
         self.window.busy=False
         self.window.close();self.window.deleteLater()
@@ -54,6 +56,12 @@ class ScanWorkspaceActionsTests(unittest.TestCase):
         task=scheduler.task('one');task.state=state;task.completed_files=1 if state=='completed' else 0
         task.progress=1 if state=='completed' else 0
         self.window.queue_scheduler=scheduler
+        for name,slot in (('task_updated',self.window._queue_task_updated),
+                          ('task_finished',self.window._queue_task_finished),
+                          ('task_recycled',self.window._queue_task_recycled),
+                          ('queue_changed',self.window._queue_view),
+                          ('became_idle',self.window._queue_worker_idle)):
+            getattr(scheduler,name).connect(slot)
         self.window.download_queue.set_items([task.public_copy()])
         self.qt.processEvents();return scheduler
 
@@ -225,6 +233,60 @@ class ScanWorkspaceActionsTests(unittest.TestCase):
         self.window.clear_cache_files()
         self.assertTrue(artifact.exists());self.assertTrue(self.window.profile.text())
         del self.window.worker
+
+    def test_background_thread_does_not_keep_completed_queue_or_scanner_alive(self):
+        import threading
+        from shiboken6 import isValid
+        release=threading.Event()
+        class BackgroundRequest(QThread):
+            def run(self):release.wait(5)
+        background=BackgroundRequest(self.window)
+        scheduler=self.scheduler('completed')
+        splash=self.splash();self.window.splash=splash
+        scanner=QThread(self.window);self.window.scanner=scanner
+        background.start()
+        try:
+            self.wait_until(background.isRunning)
+            self.assertTrue(self.window._workspace_has_live_threads())
+            self.window.clear_cache_files()
+            QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+            self.assertIsNone(self.window.queue_scheduler)
+            self.assertFalse(self.window.download_queue._rows)
+            self.assertFalse(isValid(scheduler));self.assertFalse(isValid(scanner))
+            self.assertFalse(isValid(splash));self.assertTrue(background.isRunning())
+        finally:
+            release.set();background.wait(5000);background.deleteLater()
+
+    def test_broom_rapid_clicks_cooldown_and_nested_call_are_single_operation(self):
+        self.scheduler('completed')
+        nested=[]
+        def sweep(**kwargs):nested.append(self.window.clear_cache_files())
+        with patch.object(desktop,'cleanup_stale_cache_dirs',side_effect=sweep) as cleanup:
+            self.window.clear_cache_files()
+            self.assertEqual(nested,[False]);self.assertFalse(self.window.clear_cache.isEnabled())
+            artifact=self.window.cache_dir/'second.tmp';artifact.write_bytes(b'keep during cooldown')
+            for _ in range(100):self.assertFalse(self.window.clear_cache_files())
+            self.assertEqual(cleanup.call_count,1);self.assertTrue(artifact.exists())
+            self.window._cache_cleanup_deadline=0
+            self.window._cache_cleanup_timer.stop();self.window._release_cache_cleanup_button()
+            self.assertTrue(self.window.clear_cache.isEnabled())
+            self.window.clear_cache_files()
+            self.assertEqual(cleanup.call_count,2);self.assertFalse(artifact.exists())
+
+    def test_broom_flushes_pending_large_queue_rows_and_finished_scan(self):
+        scheduler=self.scheduler('completed')
+        for index in range(500):
+            task=scheduler.add_task(dict(id=f'album-{index}',title='Done',
+                url=f'https://pawchive.pw/fanbox/user/1/post/{index+10}',formats=['.jpg']))
+            task.state='completed'
+        self.window.download_queue.set_items([task.public_copy() for task in scheduler.tasks])
+        self.window._queue_view();self.window.clear_cache_files()
+        for _ in range(3):
+            self.qt.processEvents();QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
+        self.assertFalse(self.window.download_queue._rows)
+        self.assertFalse(self.window.download_queue._pending_items)
+        self.assertIsNone(self.window.queue_scheduler)
+        self.assertFalse(self.window._queue_view_timer.isActive())
 
     def test_logs_show_first_with_visible_hide_button_and_unchanged_eye_icon(self):
         self.assertFalse(self.window.logs_hidden)

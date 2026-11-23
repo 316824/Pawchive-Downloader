@@ -122,4 +122,15 @@ jobs:
           name: PawchiveDownloader-release-APK
           path: "**/*-release.apk"
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
+
+      - name: Explain APK downloads and long-term publishing
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Android APK 下载
+          本次签名 APK 位于本运行页面底部的 **PawchiveDownloader-release-APK** 构建产物中。
+          下载 Actions 构建产物需要登录 GitHub；产物最长保留 90 天，并受仓库策略限制。
+          **Success 不代表 APK 永久可下载。** 若 Artifacts 显示 “—”，请从最新 main 使用 Run workflow 重新构建。
+          面向所有用户发布时，请将 ZIP 内的 `*-release.apk` 上传到对应 GitHub Release 的 Assets；
+          Release 附件不受 Actions 构建产物保留期影响，用户也无需为下载公开 Release 附件登录。
+          EOF

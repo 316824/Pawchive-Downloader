@@ -494,11 +494,12 @@ def load_preview(path):
 
 
 class _BackgroundHostFilter(QObject):
-    def __init__(self, host, layer, refresh):
+    def __init__(self, host, layer, refresh, store):
         super().__init__(host)
         self.host = host
         self.layer = layer
         self.refresh = refresh
+        self.store = store
 
     def eventFilter(self, watched, event):
         if watched is self.host:
@@ -506,8 +507,11 @@ class _BackgroundHostFilter(QObject):
                 self.layer.setGeometry(self.host.rect())
                 self.layer.lower()
                 self.refresh()
-            elif event.type() in (QEvent.Type.Hide, QEvent.Type.Close):
+            elif event.type() == QEvent.Type.Hide:
+                # Close can be ignored by a dialog with work in progress.
+                # Release only after the host actually stops being displayed.
                 self.layer.clear_background()
+                self.store.release_except()
         return super().eventFilter(watched, event)
 
 
@@ -554,6 +558,11 @@ def install_background_host(host, store, page, *, mode_getter=None):
                 host.resize(previous)
 
     def refresh():
+        # Constructors install this before showing the window. Hidden dialogs
+        # must neither decode images nor disturb the visible parent background.
+        if not host.isVisible():
+            layer.clear_background()
+            return
         mode = mode_getter() if callable(mode_getter) else store.mode()
         config = store.page_config(page) if mode == 'custom' else None
         adjust_portrait(config)
@@ -567,7 +576,7 @@ def install_background_host(host, store, page, *, mode_getter=None):
             return
         layer.set_background(pixmap, config.get('overlay', DEFAULT_OVERLAY), config.get('aspect', 1.0))
 
-    filter_obj = _BackgroundHostFilter(host, layer, refresh)
+    filter_obj = _BackgroundHostFilter(host, layer, refresh, store)
     host.installEventFilter(filter_obj)
     host._background_layer = layer
     host._background_filter = filter_obj

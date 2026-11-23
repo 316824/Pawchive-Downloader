@@ -4,11 +4,12 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 from PySide6 import __version__ as pyside_version
-from PySide6.QtCore import QSettings, QThread, QTimer, qVersion
+from PySide6.QtCore import QEvent, QPointF, QSettings, QThread, QTimer, Qt, qVersion
 from PySide6.QtWidgets import QApplication, QDialogButtonBox
-from PySide6.QtGui import QImage,QColor
+from PySide6.QtGui import QImage,QColor,QMouseEvent
 import requests
 from activation import load_public_key
 from app_state import AppState
@@ -51,10 +52,45 @@ def check_static_plans(app, directory):
     if any(file['relative_dir'] not in ('','.') for item in mixed for file in item['static_plan']):
         raise RuntimeError('All files must use the selected folder when title folders are disabled.')
     attachment=next(file for file in mixed[0]['static_plan'] if file['direct'])
-    if attachment['save_name'] != 'archive.zip' or attachment['number'] is not None:
-        raise RuntimeError('Direct attachments must retain their original names outside image numbering.')
+    if attachment['save_name'] != 'New.zip' or attachment['number'] is not None:
+        raise RuntimeError('Flat non-image attachments must use the collection title outside image numbering.')
     if folder.exists() or json.dumps(entries,sort_keys=True) != original:
         raise RuntimeError('Assigning static filenames must not mutate input manifests or create files.')
+
+
+def check_snake_lifecycle(app, scan):
+    """Exercise the crash-report path without waiting on a real-time deadline."""
+    scan.show()
+    app.processEvents()
+    game=scan.game
+    game.start()
+    game._timer.stop()
+    game._invincible_until=game._ghost_until=game._overclock_until=game._collision_until=0
+    game._score=2
+    game._soft_collision()
+    if not game._rebuild_until or game._score != 0:
+        raise RuntimeError('The game did not enter its low-score reconstruction state.')
+    position=QPointF(game.rect().center())
+    click=QMouseEvent(QEvent.Type.MouseButtonPress,position,
+        QPointF(game.mapToGlobal(position.toPoint())),Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier)
+    app.sendEvent(game,click)
+    if not click.isAccepted() or game.grab().isNull():
+        raise RuntimeError('The game could not focus and render during reconstruction.')
+    game._rebuild_until=time.monotonic()-1
+    game.step()
+    if game._rebuild_until or len(game.body) != 3 or game._score != 10:
+        raise RuntimeError('The game did not recover safely after reconstruction.')
+    completed=[]
+    game.completionFinished.connect(lambda:completed.append(True))
+    game.begin_scan_complete(3)
+    if game.grab().isNull():
+        raise RuntimeError('The game completion dissolve could not render.')
+    game._finish_until=0
+    game._advance_dissolve()
+    game._advance_dissolve()
+    if completed != [True] or game._timer.isActive() or game._dissolve_timer.isActive():
+        raise RuntimeError('The game completion handoff must stop timers and run exactly once.')
 
 
 def run(window_class, output):
@@ -108,6 +144,7 @@ def run(window_class, output):
                         if not settings.value('download/scan_auto_confirm',False,type=bool):
                             raise RuntimeError('The scan automatic-queue checkbox preference was not saved.')
                         scan.grab()
+                        check_snake_lifecycle(app,scan)
                     finally:
                         scan._allow_close=True;scan.close();scan.deleteLater()
                 settings.remove('download/scan_auto_confirm')
@@ -234,9 +271,10 @@ def run(window_class, output):
                     'bundled four-language Qt controls',
                     'static oldest-to-newest image numbering on GUI thread',
                     'flat mixed-content layout and per-collection image numbering',
-                    'unchanged direct attachment names',
+            'title-based flat non-image attachment names',
                     'numeric artist platform candidates and ordered batch dialog',
                     'remembered automatic scan queue checkbox',
+                    'snake reconstruction focus, recovery and single completion handoff',
                     'visible-by-default logs and persistent show control',
                     'artist archive count and separate unread marker',
                     'pending subscription preview and disposable cache'])

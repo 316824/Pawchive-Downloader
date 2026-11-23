@@ -339,8 +339,14 @@ class BackgroundStore:
     def release_except(self, page=None):
         page = normalize_page(page) if page is not None else None
         with self._lock:
+            # A dialog is a separate window, not a replacement page. Its
+            # visible parent must keep its image (and can reuse its bounded
+            # thumbnail when the dialog closes).
+            retained = self._visible_pages()
+            if page is not None:
+                retained.add(page)
             for key in list(self._cache):
-                if key != page:
+                if key not in retained:
                     self._cache.pop(key, None)
 
     def clear_cache(self):
@@ -421,23 +427,57 @@ class BackgroundStore:
         return removed
 
     def register_layer(self, page, layer):
-        """Register a live Qt layer so inactive pages can release their pixmap."""
+        """Register each window independently, including repeated page types."""
         page = normalize_page(page)
         with self._lock:
-            self._layers[page] = weakref.ref(layer)
+            references = self._layers.setdefault(page, [])
+            if not any(reference() is layer for reference in references):
+                references.append(weakref.ref(layer))
 
-    def activate_page(self, page):
-        """Keep only the active page's rendered pixmap and thumbnail cache."""
-        page = normalize_page(page)
-        with self._lock:
-            for key, reference in list(self._layers.items()):
+    def _live_layers(self):
+        """Prune Python/Qt objects already destroyed; the store owns none."""
+        live = []
+        for page, references in list(self._layers.items()):
+            retained = []
+            for reference in references:
                 layer = reference()
                 if layer is None:
-                    self._layers.pop(key, None)
-                elif key != page:
+                    continue
+                try:
+                    # Checking the host also covers layers temporarily hidden
+                    # for a crop-preview capture while the window stays open.
+                    visible = bool(layer.window().isVisible())
+                except (AttributeError, RuntimeError):
+                    continue
+                retained.append(reference)
+                live.append((page, layer, visible))
+            if retained:
+                self._layers[page] = retained
+            else:
+                self._layers.pop(page, None)
+        return live
+
+    def _visible_pages(self):
+        return {page for page, _layer, visible in self._live_layers() if visible}
+
+    def activate_page(self, page):
+        """Release hidden pages while preserving all still-visible windows.
+
+        Only display-ready previews are retained. The thumbnail LRU remains
+        bounded by ``cache_limit``; a visible window may additionally own its
+        existing pixmap until it hides, without rereading an original image.
+        """
+        page = normalize_page(page)
+        with self._lock:
+            custom = self._data['mode'] == 'custom'
+            for key, layer, visible in self._live_layers():
+                if not custom or (key != page and not visible):
                     try:
                         layer.clear_background()
                     except RuntimeError:
-                        self._layers.pop(key, None)
-            self.release_except(page)
+                        pass
+            if custom:
+                self.release_except(page)
+            else:
+                self.clear_cache()
 

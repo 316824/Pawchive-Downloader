@@ -84,7 +84,7 @@ class StaticPlanTests(unittest.TestCase):
         self.config['content_mode']='all';plans=assign_plans(entries,self.config)
         self.assertEqual(plans[0]['static_plan'][0]['relative_dir'],'.')
         attachment=plans[0]['static_plan'][1]
-        self.assertIsNone(attachment['number']);self.assertEqual(attachment['save_name'],'archive.zip')
+        self.assertIsNone(attachment['number']);self.assertEqual(attachment['save_name'],'New.zip')
         self.assertEqual(attachment['relative_dir'],'.')
     def test_existing_file_is_protected_instead_of_worker_allocating_a_new_number(self):
         self.folder.mkdir();(self.folder/'1.png').write_bytes(b'private user file')
