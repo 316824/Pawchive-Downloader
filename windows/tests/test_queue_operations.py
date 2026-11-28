@@ -339,7 +339,7 @@ class QueueOperationsTests(unittest.TestCase):
         self.assertEqual(records[running]['status'],'running')
         self.assertEqual(records[paused]['status'],'paused')
 
-    def test_new_queue_checkpoints_use_one_full_sync_transaction_per_album(self):
+    def test_new_queue_checkpoints_use_one_full_sync_transaction_for_complete_batch(self):
         statements=[]
         self.journal._db.set_trace_callback(statements.append)
         entries=[dict(url=PROFILE+'/post/'+str(index),title='Album '+str(index),
@@ -349,7 +349,7 @@ class QueueOperationsTests(unittest.TestCase):
             results=self.prepare(entries)
         finally:
             self.journal._db.set_trace_callback(None)
-        self.assertEqual(sum(sql.strip().upper()=='COMMIT' for sql in statements),len(entries))
+        self.assertEqual(sum(sql.strip().upper()=='COMMIT' for sql in statements),1)
         self.assertEqual(self.journal._db.execute('PRAGMA synchronous').fetchone()[0],2)
         self.assertEqual(self.journal._db.execute('PRAGMA journal_mode').fetchone()[0],'delete')
         self.journal.close()
@@ -364,10 +364,10 @@ class QueueOperationsTests(unittest.TestCase):
             self.assertTrue(job['config']['queue_rename_order'])
             self.assertEqual(result['metadata']['_worker_config']['folder'],job['config']['folder'])
 
-    def test_abrupt_preparation_interruption_leaves_created_album_recoverable(self):
+    def test_abrupt_preparation_interruption_leaves_unpublished_batch_absent(self):
         entries=[dict(url=PROFILE+'/post/'+str(index),title='Album '+str(index),
             formats=['.jpg'],image_count=2,attachment_count=0,file_count=2) for index in range(2)]
-        create=self.journal.create
+        create=self.journal.prepare_new
         calls=[]
 
         def interrupted(config,**options):
@@ -375,22 +375,21 @@ class QueueOperationsTests(unittest.TestCase):
                 # Simulate termination between albums, outside the normal
                 # Exception cleanup path, without terminating this test.
                 raise SystemExit('simulated interruption')
-            job_id=create(config,**options)
-            calls.append(job_id)
-            return job_id
+            job=create(config,**options)
+            calls.append(job['id'])
+            return job
 
         worker=QueuePreparationWorker(self.journal,entries,self.config)
-        with patch.object(self.journal,'create',side_effect=interrupted),self.assertRaises(SystemExit):
+        with patch.object(self.journal,'prepare_new',side_effect=interrupted),self.assertRaises(SystemExit):
             worker.run()
         self.journal.close()
         self.journal=DownloadJournal(self.root/'journal')
         jobs=self.journal.list_recoverable()
-        self.assertEqual([job['id'] for job in jobs],calls)
-        self.assertEqual(jobs[0]['status'],'paused')
-        self.assertEqual(jobs[0]['config']['task_file_count'],2)
-        resumed=self.prepare([{**entries[0],'metadata':{'job_id':calls[0]}}])[0]
-        self.assertEqual(resumed['metadata']['job_id'],calls[0])
-        self.assertEqual(len(self.journal.list_recoverable()),1)
+        self.assertEqual(len(calls),1)
+        self.assertFalse(jobs,'No file transfer started before the unpublished batch was committed')
+        prepared=self.prepare(entries)
+        self.assertEqual(len(self.journal.list_recoverable()),len(entries))
+        self.assertTrue(all(self.journal.load(item['metadata']['job_id'])['status']=='paused' for item in prepared))
 
 
 if __name__=='__main__': unittest.main()

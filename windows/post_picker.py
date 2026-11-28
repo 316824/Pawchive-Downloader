@@ -231,6 +231,7 @@ class PostPicker(QDialog):
         self._checkbox_class = checkbox_class
         self._closed = self._in_layout = False
         self._positions = {}
+        self._layout_signature = None
         self._columns, self._visible = 0, []
         self.setObjectName('postPicker')
         self.setWindowTitle(text['choose_title'])
@@ -347,7 +348,7 @@ class PostPicker(QDialog):
         self._build_timer.timeout.connect(self._build_cards)
         self._layout_timer = QTimer(self)
         self._layout_timer.setSingleShot(True)
-        self._layout_timer.timeout.connect(lambda: self._layout_cards(force=True))
+        self._layout_timer.timeout.connect(self._layout_cards)
         self.finished.connect(self._stop_building)
         self.scroll.viewport().installEventFilter(self)
         self.search.textChanged.connect(self._search_changed)
@@ -420,13 +421,18 @@ class PostPicker(QDialog):
         visible = [index for index, entry in enumerate(self.titles)
                    if query in str(entry.get('title') or '').casefold()]
         columns = max(2, min(4, (self.scroll.viewport().width() + 14) // 219))
-        if not force and visible == self._visible and columns == self._columns:
+        built = [index for index in visible if self.cards[index] is not None]
+        # A viewport Resize can be a consequence of activating this very grid.
+        # Do not force another native remove/reinsert/activate pass for an
+        # unchanged grid. Include the actual card identities so a recycle-bin
+        # refresh with the same number of entries still rebuilds its layout.
+        signature = (columns, tuple(visible), tuple((index, id(self.cards[index])) for index in built))
+        if signature == self._layout_signature:
             return
         self._visible, self._columns = visible, columns
         self._in_layout = True
         self.body.setUpdatesEnabled(False)
         try:
-            built = [index for index in visible if self.cards[index] is not None]
             positions = {index: divmod(position, columns) for position, index in enumerate(built)}
             for index in self._positions.keys() - positions.keys():
                 self.grid.removeWidget(self.cards[index])
@@ -449,6 +455,7 @@ class PostPicker(QDialog):
                 self.loading.show()
             self.grid.invalidate()
             self.grid.activate()
+            self._layout_signature = signature
         finally:
             self.body.setUpdatesEnabled(True)
             self._in_layout = False
@@ -457,6 +464,8 @@ class PostPicker(QDialog):
         self.visible_count.setText(self.copy['shown'].format(visible=len(visible), total=len(self.titles)))
 
     def _update_top_button(self, *_):
+        if self._closed:
+            return
         viewport = self.scroll.viewport()
         self.top_button.move(max(0, viewport.width() - 54), max(0, viewport.height() - 54))
         self.top_button.setVisible(self.scroll.verticalScrollBar().value() > 40)
@@ -469,6 +478,8 @@ class PostPicker(QDialog):
         self.scroll_animation.start()
 
     def eventFilter(self, watched, event):
+        if self._closed:
+            return super().eventFilter(watched, event)
         if watched is self.scroll.viewport():
             if event.type() == QEvent.Type.Resize:
                 self._layout_timer.start(0)
@@ -481,7 +492,14 @@ class PostPicker(QDialog):
         super().showEvent(event)
         # Hidden-dialog geometry is provisional. Reflow after Qt has applied
         # the actual title bar, style sheet and viewport size for the first paint.
-        self._layout_timer.start(0)
+        if not self._closed:
+            self._layout_timer.start(0)
+
+    def done(self, result):
+        # Stop work before Qt hides the native dialog and emits its final
+        # resize/range signals, rather than relying on finished-slot ordering.
+        self._stop_building()
+        super().done(result)
 
 
 def choose_posts(parent, titles, checkbox_class, text):

@@ -225,6 +225,8 @@ class DownloadScheduler(QObject):
         self._all_paused = False
         self._resume_pending: set[str] = set()
         self._run_serial: dict[str, int] = {}
+        self._next_run_serial = 0
+        self._next_sequence = 0
         self._relays: dict[str, _WorkerRelay] = {}
         self._retry_task_id = None
         self._retry_timer = QTimer(self)
@@ -252,10 +254,11 @@ class DownloadScheduler(QObject):
         return self._tasks.get(str(task_id))
 
     def add_task(self, value: DownloadTask | dict[str, Any] | Any) -> DownloadTask:
-        task = normalize_task(value, len(self._tasks))
+        task = normalize_task(value, self._next_sequence)
+        self._next_sequence += 1
         if task.id in self._tasks:
             task.id = uuid.uuid4().hex
-        task.priority = len(self._tasks)
+        task.priority = self._next_sequence-1
         self._tasks[task.id] = task
         self.task_added.emit(task.public_copy())
         self.queue_changed.emit()
@@ -268,9 +271,10 @@ class DownloadScheduler(QObject):
         # for each row. The host can populate hundreds of albums in one pass.
         result = []
         for value in values:
-            task = normalize_task(value, len(self._tasks))
+            task = normalize_task(value, self._next_sequence)
+            self._next_sequence += 1
             if task.id in self._tasks: task.id = uuid.uuid4().hex
-            task.priority = len(self._tasks)
+            task.priority = self._next_sequence-1
             self._tasks[task.id] = task
             result.append(task)
             self.task_added.emit(task.public_copy())
@@ -419,21 +423,27 @@ class DownloadScheduler(QObject):
 
     def cancel(self, task_id: str) -> bool:
         task = self.task(task_id)
-        if task is None or task.state in {'completed', 'cancelled'}:
+        if task is None:
             return False
+        # A failed recycle-bin write must leave a retryable queue entry. Never
+        # drop its only in-memory copy before the host acknowledges persistence.
+        if task.state=='cancelled':
+            if task.id not in self._workers:self.task_recycled.emit(task.public_copy())
+            return True
         if self._retry_task_id == task.id: self._cancel_auto_retry()
         self._resume_pending.discard(task.id)
-        if task.state == 'queued' or task.state in {'paused', 'failed'}:
+        if task.state in {'queued', 'paused', 'failed', 'completed'}:
             task.state = 'cancelled'
             task.intent = 'cancel'
             self._emit(task)
             self.task_finished.emit(task.public_copy())
-            self.task_recycled.emit(task.public_copy())
+            if task.id not in self._workers:self.task_recycled.emit(task.public_copy())
+            else:self._release_after_finished(task.id)
             self.queue_changed.emit()
             if self._started:
                 self._schedule_or_idle()
             return True
-        if task.state in {'running', 'pausing', 'cancelling'}:
+        if task.state in {'running', 'pausing', 'cancelling', 'completed', 'paused', 'failed'}:
             task.intent = 'cancel'
             task.state = 'cancelling'
             self._emit(task)
@@ -453,7 +463,30 @@ class DownloadScheduler(QObject):
         return False
 
     def cancel_many(self, task_ids: Iterable[str]) -> int:
-        return sum(1 for task_id in task_ids if self.cancel(task_id))
+        was_suspended=self._suspended
+        self._suspended=True
+        try:return sum(1 for task_id in dict.fromkeys(task_ids) if self.cancel(task_id))
+        finally:
+            self._suspended=was_suspended
+            if self._started:self._schedule_or_idle()
+
+    def remove_cancelled(self, task_id: str) -> bool:
+        """Release a cancelled task only after its bin record is durable.
+
+        Native workers retain their queue slot until ``finished``; even a
+        terminal signal is too early to destroy their task or file manifests.
+        The host calls this acknowledgement from ``task_recycled`` after its
+        persistent recycle-bin add succeeds. Failure leaves the task intact.
+        """
+        task=self.task(task_id)
+        if task is None or task.state!='cancelled' or task.id in self._workers:return False
+        self._tasks.pop(task.id,None)
+        self._resume_pending.discard(task.id)
+        self._terminal_tasks.discard(task.id);self._finished_signals.discard(task.id)
+        self._run_serial.pop(task.id,None)
+        task.worker=None;task.metadata.clear();task.thumbnail=''
+        self.queue_changed.emit()
+        return True
 
     def reorder(self, task_ids: Iterable[str], before_id: str | None = None) -> bool:
         """Move selected queued tasks before ``before_id``.
@@ -602,7 +635,8 @@ class DownloadScheduler(QObject):
             worker = self.worker_factory(task.public_copy())
             task.worker = worker
             self._workers[task.id] = worker
-            serial = self._run_serial.get(task.id, 0) + 1
+            self._next_run_serial += 1
+            serial = self._next_run_serial
             self._run_serial[task.id] = serial
             relay = _WorkerRelay(self, task.id, serial)
             self._relays[task.id] = relay
@@ -696,7 +730,6 @@ class DownloadScheduler(QObject):
             task.state = 'cancelled'
             self._emit(task)
             self.task_finished.emit(task.public_copy())
-            self.task_recycled.emit(task.public_copy())
         elif intent == 'pause':
             task.state = 'paused'
             self._emit(task)
@@ -741,7 +774,6 @@ class DownloadScheduler(QObject):
             task.state = 'cancelled'
             self._emit(task)
             self.task_finished.emit(task.public_copy())
-            self.task_recycled.emit(task.public_copy())
         elif intent == 'pause':
             task.state = 'paused'
             task.error = ''
@@ -782,6 +814,11 @@ class DownloadScheduler(QObject):
         self._run_serial[task_id] = self._run_serial.get(task_id, 0) + 1
         if relay is not None: relay.deleteLater()
         if isinstance(worker, QObject): worker.deleteLater()
+        task=self.task(task_id)
+        if task is not None and task.state=='cancelled':
+            # Move files/checkpoints only now: the HTTP worker has exited and
+            # cannot still be writing into the album or its partial files.
+            self.task_recycled.emit(task.public_copy())
         if task_id in self._resume_pending:
             self._resume_pending.discard(task_id)
             task = self.task(task_id)

@@ -57,13 +57,13 @@ class PreparationLifecycleTests(unittest.TestCase):
             entries=[dict(url=PROFILE+'/post/'+str(i),title=str(i),assets=[]) for i in range(10)]
             config=dict(folder=str(self.root/'downloads'),profile=PROFILE,by_title=True)
             worker=QueuePreparationWorker(journal,entries,config)
-            original=journal.create;created=[];interrupted=[False]
+            original=journal.prepare_new;created=[];interrupted=[False]
             worker.isInterruptionRequested=lambda:interrupted[0]
             def interrupt_after_first(*args,**kwargs):
-                identifier=original(*args,**kwargs);created.append(identifier)
-                interrupted[0]=True;return identifier
+                job=original(*args,**kwargs);created.append(job['id'])
+                interrupted[0]=True;return job
             errors=[];worker.failed.connect(errors.append)
-            with patch.object(journal,'create',side_effect=interrupt_after_first):worker.run()
+            with patch.object(journal,'prepare_new',side_effect=interrupt_after_first):worker.run()
             self.assertTrue(errors);self.assertEqual(len(created),1)
             self.assertFalse(journal.list_recoverable())
         finally:journal.close()

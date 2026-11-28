@@ -6,13 +6,14 @@ import os
 from pathlib import Path
 import random
 import re
+import stat
 import time
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-from download_journal import fingerprint, inside, matches, original_url
+from download_journal import fingerprint, inside, matches, original_url, local_file_snapshot
 
 
 # The queue layout deliberately keeps images easy to browse while isolating
@@ -49,6 +50,52 @@ def move_exclusive(source,target):
     else:
         os.link(source,target)
         source.unlink()
+
+
+def remove_empty_destination(path):
+    """Delete a zero-byte placeholder, never a nonempty or linked user file.
+
+    Windows keeps an exclusive handle through the zero-size check and delete
+    disposition so another process cannot replace/write it between the two.
+    """
+    path=Path(path)
+    if os.name=='nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+        kernel.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,
+                                    wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+        kernel.CreateFileW.restype=wintypes.HANDLE
+        kernel.GetFileInformationByHandle.argtypes=[wintypes.HANDLE,ctypes.c_void_p]
+        kernel.GetFileInformationByHandle.restype=wintypes.BOOL
+        kernel.SetFileInformationByHandle.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+        kernel.SetFileInformationByHandle.restype=wintypes.BOOL
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+        class Info(ctypes.Structure):
+            _fields_=[('attributes',wintypes.DWORD),('created',wintypes.FILETIME),
+                ('accessed',wintypes.FILETIME),('written',wintypes.FILETIME),
+                ('volume',wintypes.DWORD),('size_high',wintypes.DWORD),('size_low',wintypes.DWORD),
+                ('links',wintypes.DWORD),('index_high',wintypes.DWORD),('index_low',wintypes.DWORD)]
+        handle=kernel.CreateFileW(str(path),0x80000000|0x10000,0,None,3,0x00200000,None)
+        if handle==wintypes.HANDLE(-1).value:
+            if ctypes.get_last_error() in (2,3):return
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            info=Info()
+            if not kernel.GetFileInformationByHandle(handle,ctypes.byref(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if info.attributes&(0x10|0x400) or info.size_high or info.size_low:
+                raise FileExistsError('The preassigned destination is no longer empty: '+str(path))
+            delete=ctypes.c_ubyte(1)
+            if not kernel.SetFileInformationByHandle(handle,4,ctypes.byref(delete),ctypes.sizeof(delete)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:kernel.CloseHandle(handle)
+        return
+    try:info=path.lstat()
+    except FileNotFoundError:return
+    if not stat.S_ISREG(info.st_mode) or info.st_size or path.is_symlink():
+        raise FileExistsError('The preassigned destination is no longer empty: '+str(path))
+    path.unlink()
 
 
 class DownloadEngine:
@@ -256,11 +303,18 @@ class DownloadEngine:
         if not name or Path(name).name!=name or '/' in name or chr(92) in name:
             raise ValueError('Invalid preassigned filename.')
         target=inside(self.w.folder,self.w.folder/asset['relative_dir']/name)
+        target.parent.mkdir(parents=True,exist_ok=True)
         existing=self._records_by_url.get((post_url,url))
         if existing is not None:
             if Path(existing['target'])!=target:raise ValueError('The saved download plan changed.')
+            # A new nonempty file may have appeared since background discovery.
+            # Respect the same skip-existing policy without overwriting it.
+            if self.job['config'].get('incremental_existing_check'):
+                snapshot=local_file_snapshot(target)
+                if snapshot is not None and existing.get('status')!='complete':
+                    existing.update(status='complete',existing_local=True,local_snapshot=snapshot,size=snapshot['size'])
+                    self.job['saved_count']+=1;self.save(existing)
             return existing
-        target.parent.mkdir(parents=True,exist_ok=True)
         if target.exists():raise ValueError('The preassigned destination already exists: '+str(target))
         key=hashlib.sha256((post_url+'\0'+url).encode()).hexdigest()[:20]
         record=dict(url=url,name=asset.get('name') or name,target=str(target),
@@ -276,9 +330,13 @@ class DownloadEngine:
         if target.exists():
             if matches(record,target):
                 part.unlink(missing_ok=True); record['status']='complete'; self.job['saved_count']+=1; self.save(record); return
-            if record.get('preassigned'):raise ValueError('The preassigned destination was changed externally: '+str(target))
-            target=self.h['unique_path'](target.parent,target.name)
-            record['target']=str(target); self.save(record)
+            if record.get('preassigned'):
+                # Empty placeholders are incomplete by the explicit incremental
+                # policy. Their exclusive deletion cannot overwrite user data.
+                remove_empty_destination(target)
+            else:
+                target=self.h['unique_path'](target.parent,target.name)
+                record['target']=str(target); self.save(record)
         try: move_exclusive(part,target)
         except FileExistsError:
             if record.get('preassigned'):raise
@@ -391,6 +449,7 @@ class DownloadEngine:
         for post_url in done_posts:
             if post_url not in self.job.setdefault('done_posts',[]):self.job['done_posts'].append(post_url)
             self.journal.mark_post_done(self.job['id'],post_url)
+        self.w.completed_records=[dict(record) for record in self.job['files'] if record.get('status')=='complete']
         self.job.update(status='completed',error='',album=None);self.save(full=True)
         self.w.finished_ok.emit(self.job['saved_count'])
 

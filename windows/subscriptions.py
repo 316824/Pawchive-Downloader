@@ -21,7 +21,7 @@ PROFILE_RE = re.compile(
     re.IGNORECASE,
 )
 USER_ID_RE = re.compile(r"/user/([^/?#]+)", re.IGNORECASE)
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PawchiveDownloader/1.3"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PawchiveDownloader/1.4"
 MAX_UPDATE_POSTS = 10000
 
 

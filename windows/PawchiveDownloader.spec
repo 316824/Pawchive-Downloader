@@ -20,7 +20,7 @@ a = Analysis(
     # explicit makes the frozen build independent of PyInstaller's optional
     # function-scope import analysis.
     hiddenimports=['artist_cards', 'popular_features', 'subscriptions', 'subscription_ui',
-                   'queue_operations', 'queue_failure_ui','download_plan',
+                   'queue_operations', 'queue_failure_ui','queue_recycle','recycle_ui','download_plan',
                    'update_checker','artist_migration','download_settings',
                    'static_download_plan','artist_lookup','batch_artists','subscription_preview','ota_update'],
     hookspath=[],

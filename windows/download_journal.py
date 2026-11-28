@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import threading
+import tempfile
 import time
 from urllib.parse import urlparse
 import uuid
@@ -65,12 +67,35 @@ def fingerprint(path):
         return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
+def local_file_snapshot(path):
+    """Stat-only identity for an existing nonempty user file, never follow links.
+
+    Incremental discovery deliberately follows the user's exists/nonzero rule;
+    it does not reread gigabytes of existing files just to choose missing ones.
+    Downloaded records continue to use their stronger SHA256 verification.
+    """
+    path=Path(path)
+    try:
+        info=path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(info.st_mode) or path.is_symlink()
+            or getattr(path,'is_junction',lambda:False)()):
+        raise ValueError('The preassigned destination is not a regular file: '+str(path))
+    if info.st_size<=0:return None
+    return dict(size=info.st_size,mtime_ns=info.st_mtime_ns,
+                device=info.st_dev,inode=info.st_ino)
+
+
 def matches(record, path=None):
     path=Path(path or record['target'])
     try:
+        if record.get('existing_local'):
+            snapshot=local_file_snapshot(path)
+            return snapshot is not None and snapshot==record.get('local_snapshot')
         return (path.is_file() and not path.is_symlink() and path.stat().st_size==record.get('size')
                 and fingerprint(path)==record.get('sha256'))
-    except OSError:
+    except (OSError,ValueError):
         return False
 
 
@@ -94,7 +119,13 @@ class DownloadJournal:
         self._db.commit()
         self._post_objects={}
 
-    def create(self,config,*,status='running'):
+    def prepare_new(self,config,*,status='running',initializer=None):
+        """Build a new checkpoint without opening a database transaction.
+
+        Queue discovery can inspect thousands of local paths here before a
+        single durable batch commit. No download may start until save_many
+        returns. The legacy create API still commits one checkpoint at once.
+        """
         if not isinstance(status,str) or status not in {'running','paused'}:
             raise ValueError('Invalid initial checkpoint status.')
         config=dict(config)
@@ -102,6 +133,11 @@ class DownloadJournal:
         if not PROFILE.fullmatch(str(config.get('profile',''))): raise ValueError('Invalid checkpoint profile.')
         job={'id':uuid.uuid4().hex,'status':status,'config':config,'posts':None,'files':[],
              'album':None,'updated':time.time(),'created':time.time(),'saved_count':0}
+        if initializer is not None:initializer(job)
+        return job
+
+    def create(self,config,*,status='running',initializer=None):
+        job=self.prepare_new(config,status=status,initializer=initializer)
         self.save(job)
         return job['id']
 
@@ -173,7 +209,7 @@ class DownloadJournal:
         if album: inside(folder,album['path'])
         return job
 
-    def save(self,job,dirty_records=None):
+    def _prepare_save(self,job,dirty_records=None):
         # Records live in separate rows: saving a 100 MB file does not rewrite
         # the URL/path manifest for every previously completed file.
         posts_changed=self._post_objects.get(job['id'],object()) is not job.get('posts')
@@ -183,24 +219,62 @@ class DownloadJournal:
         metadata['schema']=2
         payload=json.dumps(metadata,ensure_ascii=False,separators=(',',':'))
         if len(payload)>8*1024*1024: raise ValueError('Download checkpoint metadata is too large.')
-        with self._lock,self._db:
-            self._db.execute('INSERT INTO jobs VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated=excluded.updated,document=excluded.document',
-                             (job['id'],job['status'],job['updated'],payload))
-            if posts_changed:
-                posts=json.dumps(job.get('posts'),ensure_ascii=False,separators=(',',':'))
-                if len(posts)>32*1024*1024: raise ValueError('Download post list is too large.')
-                self._db.execute('INSERT INTO post_lists VALUES (?,?) ON CONFLICT(job_id) DO UPDATE SET document=excluded.document',(job['id'],posts))
-            records=job['files'] if dirty_records is None else dirty_records
-            if dirty_records is None:
-                self._db.execute('DELETE FROM file_records WHERE job_id=?',(job['id'],))
-                self._db.execute('DELETE FROM done_posts WHERE job_id=?',(job['id'],))
-                self._db.executemany('INSERT INTO done_posts VALUES (?,?)',[(job['id'],url) for url in job.get('done_posts',[])])
-            for ordinal,record in enumerate(records):
-                record.setdefault('sequence',ordinal)
-                key=hashlib.sha256((record['post_url']+'\0'+record['url']).encode()).hexdigest()
-                self._db.execute('INSERT INTO file_records VALUES (?,?,?,?) ON CONFLICT(job_id,key) DO UPDATE SET ordinal=excluded.ordinal,document=excluded.document',
-                                 (job['id'],key,record['sequence'],json.dumps(record,ensure_ascii=False,separators=(',',':'))))
+        posts=None
+        if posts_changed:
+            posts=json.dumps(job.get('posts'),ensure_ascii=False,separators=(',',':'))
+            if len(posts)>32*1024*1024: raise ValueError('Download post list is too large.')
+        rows=[]
+        for ordinal,record in enumerate(job['files'] if dirty_records is None else dirty_records):
+            record.setdefault('sequence',ordinal)
+            key=hashlib.sha256((record['post_url']+'\0'+record['url']).encode()).hexdigest()
+            rows.append((job['id'],key,record['sequence'],json.dumps(record,ensure_ascii=False,separators=(',',':'))))
+        return dict(header=(job['id'],job['status'],job['updated'],payload),
+                    posts=posts,replace_records=dirty_records is None,rows=rows,
+                    done=[(job['id'],url) for url in job.get('done_posts',[])])
+
+    def _write_prepared(self,prepared):
+        """SQL only: caller owns the lock and the transaction boundary."""
+        job_id=prepared['header'][0]
+        self._db.execute('INSERT INTO jobs VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated=excluded.updated,document=excluded.document',prepared['header'])
+        if prepared['posts'] is not None:
+            self._db.execute('INSERT INTO post_lists VALUES (?,?) ON CONFLICT(job_id) DO UPDATE SET document=excluded.document',(job_id,prepared['posts']))
+        if prepared['replace_records']:
+            self._db.execute('DELETE FROM file_records WHERE job_id=?',(job_id,))
+            self._db.execute('DELETE FROM done_posts WHERE job_id=?',(job_id,))
+            self._db.executemany('INSERT INTO done_posts VALUES (?,?)',prepared['done'])
+        self._db.executemany('INSERT INTO file_records VALUES (?,?,?,?) ON CONFLICT(job_id,key) DO UPDATE SET ordinal=excluded.ordinal,document=excluded.document',prepared['rows'])
+
+    def save(self,job,dirty_records=None):
+        prepared=self._prepare_save(job,dirty_records)
+        with self._lock,self._db:self._write_prepared(prepared)
         self._post_objects[job['id']]=job.get('posts')
+
+    def save_many(self,jobs,*,cancelled=None):
+        """Atomically persist a fully prepared queue using one FULL commit.
+
+        Filesystem validation and JSON serialization happen before taking the
+        database lock, so existing downloads and GUI reads are not blocked by
+        path inspection. A failed write rolls back the complete batch.
+        """
+        jobs=list(jobs)
+        if len({job['id'] for job in jobs})!=len(jobs):
+            raise ValueError('Duplicate checkpoint in prepared queue.')
+        if not jobs:return
+        # Serialized SQL parameters are bounded in memory independently of
+        # queue size. Large queues spill to an owned temporary file, removed
+        # on success, interruption or write failure. No path checks occur
+        # while the database lock is held.
+        with tempfile.SpooledTemporaryFile(max_size=8*1024*1024,mode='w+t',encoding='utf-8') as prepared:
+            for job in jobs:
+                if cancelled is not None and cancelled():raise RuntimeError('cancelled')
+                json.dump(self._prepare_save(job),prepared,ensure_ascii=False,separators=(',',':'))
+                prepared.write('\n')
+            prepared.seek(0)
+            with self._lock,self._db:
+                for line in prepared:
+                    if cancelled is not None and cancelled():raise RuntimeError('cancelled')
+                    self._write_prepared(json.loads(line))
+        for job in jobs:self._post_objects[job['id']]=job.get('posts')
 
     def mark_post_done(self,job_id,url):
         with self._lock,self._db:
@@ -234,6 +308,20 @@ class DownloadJournal:
         for (job_id,) in rows:
             try: result.append(self.load(job_id))
             except (ValueError,KeyError,OSError): continue
+        return result
+
+    def list_recycled_ids(self):
+        """Read lightweight ownership IDs without loading file manifests."""
+        with self._lock:
+            rows=self._db.execute("SELECT id FROM jobs WHERE status='recycled' ORDER BY updated DESC").fetchall()
+        return [job_id for (job_id,) in rows]
+
+    def list_recycled(self):
+        """Cancelled queue jobs retain only their own durable resume records."""
+        result=[]
+        for job_id in self.list_recycled_ids():
+            try:result.append(self.load(job_id))
+            except (ValueError,KeyError,OSError):continue
         return result
 
     def list_related(self, config, *, include_legacy=False):

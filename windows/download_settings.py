@@ -95,7 +95,7 @@ def fetch_artist_name(profile, interrupted=lambda: False):
     if not profile:
         raise ValueError('invalid_profile')
     with requests.Session() as session:
-        session.headers['User-Agent'] = 'PawchiveDownloader/1.3'
+        session.headers['User-Agent'] = 'PawchiveDownloader/1.4'
         class Cancellation:
             isInterruptionRequested = staticmethod(interrupted)
         payload, encoding = _read_bytes(session, profile, Cancellation(), 2*1024*1024, subdomains=False)

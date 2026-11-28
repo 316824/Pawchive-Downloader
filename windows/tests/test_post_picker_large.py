@@ -11,7 +11,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QResizeEvent
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QWidget
 from post_picker import PostPicker
 
@@ -145,6 +145,29 @@ class LargePostPickerTests(unittest.TestCase):
         self.assertEqual(count, sum(card is not None for card in dialog.cards))
         self.assertFalse(dialog._build_timer.isActive())
         self.assertFalse(dialog._layout_timer.isActive())
+
+    def test_unchanged_viewport_resize_does_not_reactivate_the_native_grid(self):
+        dialog = self.picker(48); dialog.show()
+        self.assertTrue(self.pump(lambda: all(card is not None for card in dialog.cards)))
+        self.assertTrue(self.pump(lambda: not dialog._layout_timer.isActive()))
+        viewport = dialog.scroll.viewport()
+        with patch.object(dialog.grid, 'invalidate', wraps=dialog.grid.invalidate) as invalidate:
+            for _ in range(60):
+                QCoreApplication.sendEvent(viewport, QResizeEvent(viewport.size(), viewport.size()))
+            self.qt.processEvents()
+            self.assertEqual(invalidate.call_count, 0)
+        self.assertFalse(dialog._layout_timer.isActive())
+        self.assertEqual(dialog.grid.count(), 48)
+
+    def test_closed_picker_does_not_restart_layout_from_late_resize_or_show(self):
+        dialog = self.picker(80); dialog.show(); self.qt.processEvents()
+        viewport = dialog.scroll.viewport()
+        dialog.reject()
+        QCoreApplication.sendEvent(viewport, QResizeEvent(viewport.size(), viewport.size()))
+        dialog.show(); self.qt.processEvents()
+        self.assertTrue(dialog._closed)
+        self.assertFalse(dialog._layout_timer.isActive())
+        self.assertFalse(dialog._build_timer.isActive())
 
 
 if __name__ == '__main__':

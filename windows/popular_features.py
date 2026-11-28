@@ -87,7 +87,7 @@ def _attachment_error(language,error):
 
 BASE_URL = 'https://pawchive.pw'
 POPULAR_URL = BASE_URL + '/posts/popular?date={}&period=day'
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PawchiveDownloader/1.3'
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PawchiveDownloader/1.4'
 USER_RE = re.compile(r'/user/(\d+)', re.I)
 MAX_RECOMMENDATIONS = 10
 MAX_HTML_BYTES = 8 * 1024 * 1024

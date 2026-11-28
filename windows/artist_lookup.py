@@ -69,7 +69,7 @@ def lookup_profiles(profiles, *, interrupted=lambda:False, session=None):
     """An HTTP 200 without an artist header is not a positive result."""
     owned=session is None
     session=session or requests.Session()
-    session.headers['User-Agent']='PawchiveDownloader/1.3'
+    session.headers['User-Agent']='PawchiveDownloader/1.4'
     result=[]
     try:
         from popular_features import _response

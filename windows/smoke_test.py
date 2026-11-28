@@ -119,6 +119,60 @@ def check_update_ui(app,window):
     if getattr(sys,'frozen',False):validate_exe(Path(sys.executable))
 
 
+def check_recycle_and_incremental(app,window,directory):
+    """Verify the callback-only modules and a real background disk check."""
+    from recycle_ui import RecycleBinDialog
+    from post_picker import CoverCard
+    from queue_operations import QueuePreparationWorker
+    from queue_recycle import QueueRecycleWorker
+    from download_scheduler import normalize_task
+    queue=window.download_queue
+    queue.set_items([normalize_task(dict(id='offline-queue',title='Offline queue',
+        url='https://pawchive.pw/fanbox/user/offline-check/post/queue'),0).public_copy()])
+    deadline=time.monotonic()+3
+    while 'offline-queue' not in queue._rows and time.monotonic()<deadline:
+        app.processEvents();time.sleep(.001)
+    queue.set_bulk_mode(True)
+    row=queue._rows.get('offline-queue')
+    if row is None or row.selection_check.isHidden():
+        raise RuntimeError('Queue bulk mode did not reveal the cover checkbox.')
+    queue.set_bulk_mode(False);queue.clear_items()
+    entry=window.recycle_bin.add(title='Offline cancelled collection',
+        profile_url='https://pawchive.pw/fanbox/user/offline-check',
+        post_url='https://pawchive.pw/fanbox/user/offline-check/post/recycled')
+    dialog=RecycleBinDialog(window)
+    try:
+        dialog.show();app.processEvents();dialog._build_cards()
+        dialog.all_button.click()
+        if dialog.selected_ids()!=[entry.id] or not isinstance(dialog.cards[0],CoverCard) or dialog.grab().isNull():
+            raise RuntimeError('Recycle cards and select-all did not share the collection picker.')
+    finally:
+        dialog.reject();dialog.deleteLater();window.recycle_bin.remove(entry.id)
+    folder=Path(directory)/'incremental';folder.mkdir()
+    (folder/'1.png').write_bytes(b'existing nonempty file')
+    profile='https://pawchive.pw/fanbox/user/offline-check'
+    config=dict(folder=str(folder),profile=profile,content_mode='images',by_title=False,
+                queue_rename_order=True,order='oldest')
+    plans=assign_plans([dict(title='Offline',url=profile+'/post/local',date='2026-11-28',
+        assets=[dict(url='https://file.pawchive.pw/data/offline/one.png',name='one.png',index=0),
+                dict(url='https://file.pawchive.pw/data/offline/two.png',name='two.png',index=1)])],config)
+    worker=QueuePreparationWorker(window.services.journal,plans,config,window)
+    result=[];errors=[]
+    worker.result.connect(result.extend);worker.failed.connect(errors.append);worker.start()
+    deadline=time.monotonic()+8
+    while worker.isRunning() and time.monotonic()<deadline:
+        app.processEvents();time.sleep(.002)
+    if worker.isRunning():
+        worker.requestInterruption();worker.wait()
+        raise RuntimeError('The background local-file check did not finish.')
+    worker.wait();app.processEvents();worker.deleteLater()
+    if errors or len(result)!=1 or result[0]['metadata'].get('existing_files')!=1 or result[0]['metadata'].get('pending_files')!=1:
+        raise RuntimeError('Incremental checking did not retain one existing and one missing static filename.')
+    window.services.journal.discard(result[0]['metadata']['job_id'])
+    if not issubclass(QueueRecycleWorker,QThread):
+        raise RuntimeError('Cancellation persistence must run off the GUI thread.')
+
+
 def run(window_class, output):
     if os.name == 'nt':
         import ctypes
@@ -160,6 +214,7 @@ def run(window_class, output):
                 window.toggle_logs()
                 check_static_plans(app,directory)
                 check_update_ui(app,window)
+                check_recycle_and_incremental(app,window,directory)
                 ScanAnimation=sys.modules[window_class.__module__].ScanAnimation
                 for expected in (False,True):
                     scan=ScanAnimation(window)
@@ -306,7 +361,10 @@ def run(window_class, output):
                     'mandatory update modality and frozen x64 executable validation',
                     'visible-by-default logs and persistent show control',
                     'artist archive count and separate unread marker',
-                    'pending subscription preview and disposable cache'])
+                    'pending subscription preview and disposable cache',
+                    'queue bulk mode and hidden-by-default cover checkbox',
+                    'large recycle CoverCards and cross-card select-all',
+                    'background nonempty-file check retaining immutable numbering'])
             except Exception as error:
                 failures.append(str(error))
             finally:

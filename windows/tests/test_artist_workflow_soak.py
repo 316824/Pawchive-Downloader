@@ -2,9 +2,10 @@
 
 Fast regression: python -m unittest discover -s windows/tests -p test_artist_workflow_soak.py
 Extended soak: python windows/tests/test_artist_workflow_soak.py --soak --output METRICS.json
+Larger artist: add --first-artist-albums 2500 (valid range: 1 through 10000).
 
-The extended run transfers 1,704 valid PNGs over 12 artist queues, including
-1,000 albums in the first queue, then closes/reopens the same INI/SQLite state
+The extended run defaults to 1,704 valid PNGs over 12 artist queues, including
+1,000 albums in the first queue (configurable), then closes/reopens the same INI/SQLite state
 and resumes an interrupted stream. Only HTTP and retry delays are substituted;
 the window, discovery, preparation, journal, download threads/signals and queue
 rows are production objects. No site, task registration, tray or user state is used.
@@ -223,7 +224,8 @@ class WorkflowHarness:
     def __init__(self, root, app, site):
         self.root = Path(root); self.app = app; self.site = site
         self.samples = []; self.worker_refs = []; self.scanner_refs = []; self.scheduler_refs = []
-        self.row_refs = []; self.counter = ThreadCounter(); self.late_signal_probes = 0; self.open()
+        self.row_refs = []; self.counter = ThreadCounter(); self.late_signal_probes = 0
+        self.max_reserved_transfer_slots = 0; self.open()
 
     def open(self):
         self.state = AppState(self.root/'state')
@@ -242,6 +244,13 @@ class WorkflowHarness:
         self.window._next_record_artist = False
         original_factory = self.window._queue_worker_factory
         def factory(task):
+            # The scheduler reserves a native slot before calling its factory.
+            # Count that reservation, including this not-yet-started worker,
+            # rather than confusing total worker creations with concurrency.
+            scheduler = self.window.queue_scheduler
+            reserved = len(scheduler._workers)
+            self.max_reserved_transfer_slots = max(self.max_reserved_transfer_slots, reserved)
+            require(reserved <= scheduler.MAX_IMAGE_WORKERS, 'Download concurrency exceeded the image slot limit')
             previous = getattr(self, '_previous_scheduler', None)
             if previous is not None and isValid(previous) and previous is not self.window.queue_scheduler:
                 require(previous.signalsBlocked(), 'Retired artist signals are still enabled')
@@ -394,7 +403,18 @@ class WorkflowHarness:
                 'Recovery scan or its closed dialog survived queue construction')
 
 
-def run_workflows(output, extended=False):
+def artist_album_count(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise argparse.ArgumentTypeError('The first artist must contain 1 through 10000 albums.') from None
+    if not 1 <= number <= 10000:
+        raise argparse.ArgumentTypeError('The first artist must contain 1 through 10000 albums.')
+    return number
+
+
+def run_workflows(output, extended=False, first_artist_albums=1000):
+    first_artist_albums = artist_album_count(first_artist_albums)
     faulthandler.enable(all_threads=True)
     if os.name == 'nt': ctypes.windll.kernel32.SetErrorMode(0x8003)
     app = QApplication.instance() or QApplication([]); app.setQuitOnLastWindowClosed(False)
@@ -411,7 +431,7 @@ def run_workflows(output, extended=False):
          patch.object(desktop.Worker, 'wait_interruptibly', fast_wait):
         harness = WorkflowHarness(folder, app, site)
         try:
-            sizes = [1000]+[64]*11 if extended else [8]*10
+            sizes = [first_artist_albums]+[64]*11 if extended else [8]*10
             for index, count in enumerate(sizes):
                 profile = site.add(880000+index, count, 1 if extended else 2)
                 sample = harness.artist(profile, count, 1 if extended else 2)
@@ -422,6 +442,9 @@ def run_workflows(output, extended=False):
             metrics.update(success=True, artist_batches=len(sizes)+2,
                 completed_albums=sum(sizes)+1+7, verified_png_files=sum(sizes)*(1 if extended else 2)+2+14,
                 native_transfer_threads=len(harness.worker_refs), samples=harness.samples,
+                first_artist_albums=sizes[0],
+                max_reserved_transfer_slots=harness.max_reserved_transfer_slots,
+                configured_image_worker_limit=DownloadScheduler.MAX_IMAGE_WORKERS,
                 late_artist_signal_probes=harness.late_signal_probes,
                 fault_counts=dict(site.events), real_network_requests=network.call_count,
                 duration_seconds=round(time.monotonic()-started, 3))
@@ -465,9 +488,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worker', action='store_true')
     parser.add_argument('--soak', action='store_true')
+    parser.add_argument('--first-artist-albums', type=artist_album_count, default=1000,
+                        help='Albums in the first artist of an extended soak (1-10000; default: 1000).')
     parser.add_argument('--output', default=str(Path(tempfile.gettempdir())/'pawchive-soak-workflows.json'))
     args, remaining = parser.parse_known_args()
     if args.worker or args.soak:
-        run_workflows(args.output, args.soak)
+        run_workflows(args.output, args.soak, args.first_artist_albums)
     else:
         unittest.main(argv=[sys.argv[0], *remaining])

@@ -104,6 +104,15 @@ COPY = {
         queue_failed='ダウンロード失敗', queue_cancelled='キャンセル済み', queue_complete='完了'),
 }
 
+# Keep bulk actions in the same language and button system as the queue.
+for _language,_captions in {
+    '简体中文':('批量选择','取消选中','删除任务','选择任务'),
+    '繁體中文':('批次選取','取消選取','刪除工作','選取工作'),
+    'English':('Select multiple','Cancel selection','Remove tasks','Select task'),
+    '日本語':('一括選択','選択を解除','タスクを削除','タスクを選択'),
+}.items():
+    COPY[_language].update(zip(('queue_bulk_select','queue_bulk_cancel','queue_bulk_delete','queue_select_task'),_captions))
+
 
 class ArtistArchiveButton(QPushButton):
     """The count owns its width; unread state has its own corner marker."""
@@ -292,13 +301,14 @@ class QueueItemWidget(QFrame):
     selectionChanged = Signal(str, bool)
     TERMINAL = frozenset({'completed', 'complete', 'cancelled', 'canceled'})
 
-    def __init__(self, item=None, progress_class=None, parent=None):
+    def __init__(self, item=None, progress_class=None, parent=None, checkbox_class=None):
         super().__init__(parent)
         self.setObjectName('queueItem')
         self.setFixedHeight(100)
         self.setMouseTracking(True)
         self._press_pos = None
         self._selected = False
+        self._bulk_mode = False
         self.item = {}
         self.item_id = ''
         self.progress_class = progress_class
@@ -309,7 +319,17 @@ class QueueItemWidget(QFrame):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(9)
         self.thumbnail = QueueThumbnail(self)
-        outer.addWidget(self.thumbnail, 0, Qt.AlignmentFlag.AlignTop)
+        cover_column=QVBoxLayout()
+        cover_column.setContentsMargins(0,0,0,0);cover_column.setSpacing(2)
+        cover_column.addWidget(self.thumbnail,0,Qt.AlignmentFlag.AlignHCenter)
+        self.selection_check=(checkbox_class or QCheckBox)('')
+        self.selection_check.setObjectName('queueSelectionCheck')
+        self.selection_check.setFixedSize(28,24)
+        self.selection_check.hide()
+        self.selection_check.toggled.connect(self._checkbox_toggled)
+        cover_column.addWidget(self.selection_check,0,Qt.AlignmentFlag.AlignHCenter)
+        cover_column.addStretch(1)
+        outer.addLayout(cover_column)
 
         middle = QVBoxLayout()
         middle.setContentsMargins(0, 0, 0, 0)
@@ -435,7 +455,9 @@ class QueueItemWidget(QFrame):
         self.pause_button.setToolTip(labels['queue_pause'] if status == 'running' else labels['queue_resume'])
         self.pause_button.setAccessibleName(self.pause_button.toolTip())
         self.pause_button.setText('Ⅱ' if status == 'running' else '▶')
-        self.cancel_button.setVisible(status not in self.TERMINAL and status not in {'failed', 'paused'})
+        # Failed, paused and previously cancelled rows must still offer cancel:
+        # an earlier recycle-bin write can fail and needs a user retry.
+        self.cancel_button.setVisible(status not in {'completed','complete'})
         self.retry_button.setVisible(status in {'failed'})
         if self.property('queueState') != status:
             self.setProperty('queueState', status)
@@ -451,6 +473,7 @@ class QueueItemWidget(QFrame):
         self.pause_button.setAccessibleName(self.pause_button.toolTip())
         self.cancel_button.setAccessibleName(labels['queue_cancel'])
         self.retry_button.setAccessibleName(labels['queue_retry'])
+        self.selection_check.setAccessibleName(labels.get('queue_select_task','选择任务'))
 
     def set_progress_style(self, track, colors):
         if self.progress is None:
@@ -462,11 +485,20 @@ class QueueItemWidget(QFrame):
 
     def set_selected(self, selected):
         selected = bool(selected)
+        with QSignalBlocker(self.selection_check):self.selection_check.setChecked(selected)
         if selected == self._selected:
             return
         self._selected = selected
         self.setProperty('selected', selected)
         self._polish()
+
+    def set_bulk_mode(self,enabled):
+        self._bulk_mode=bool(enabled)
+        self.selection_check.setVisible(self._bulk_mode)
+
+    def _checkbox_toggled(self,checked):
+        if self._bulk_mode and bool(checked)!=self._selected:
+            self.selectionChanged.emit(self.item_id,True)
 
     def is_selected(self):
         return self._selected
@@ -488,7 +520,7 @@ class QueueItemWidget(QFrame):
             self._press_pos = event.position().toPoint()
             modifiers = event.modifiers()
             self.selectionChanged.emit(self.item_id,
-                                       bool(modifiers & Qt.KeyboardModifier.ControlModifier))
+                                       self._bulk_mode or bool(modifiers & Qt.KeyboardModifier.ControlModifier))
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -515,11 +547,14 @@ class DownloadQueueWidget(QFrame):
     actionRequested = Signal(str, str)
     orderChanged = Signal(list)
     selectionChanged = Signal(list)
+    bulkModeChanged = Signal(bool)
 
-    def __init__(self, progress_class=None, parent=None):
+    def __init__(self, progress_class=None, parent=None, checkbox_class=None):
         super().__init__(parent)
         self.setObjectName('downloadQueue')
         self.progress_class = progress_class
+        self.checkbox_class=checkbox_class
+        self._bulk_mode=False
         self.language = '简体中文'
         self._rows = {}
         self._order = []
@@ -530,6 +565,9 @@ class DownloadQueueWidget(QFrame):
         self._row_timer = QTimer(self)
         self._row_timer.setInterval(8)
         self._row_timer.timeout.connect(self._populate_rows)
+        self._layout_timer=QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.timeout.connect(self._refresh_selection_layout)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -558,6 +596,25 @@ class DownloadQueueWidget(QFrame):
     def item_ids(self):
         return list(self._order)
 
+    @property
+    def bulk_mode(self):return self._bulk_mode
+
+    def toggle_bulk_mode(self):self.set_bulk_mode(not self._bulk_mode)
+
+    def set_bulk_mode(self,enabled):
+        enabled=bool(enabled)
+        if enabled==self._bulk_mode:return
+        self._bulk_mode=enabled;self._selected.clear();self._end_rubber()
+        for row in self._rows.values():
+            row.set_selected(False);row.set_bulk_mode(enabled)
+        self._emit_selection();self.bulkModeChanged.emit(enabled)
+        self._layout_timer.start(0)
+
+    def _refresh_selection_layout(self):
+        self.body_layout.activate()
+        if self.parentWidget() is not None and self.parentWidget().layout() is not None:
+            self.parentWidget().layout().activate()
+
     def set_language(self, language):
         self.language = language if language in COPY else '简体中文'
         for row in self._rows.values():
@@ -574,6 +631,8 @@ class DownloadQueueWidget(QFrame):
         self._order.insert(index, row.item_id)
         self._rows[row.item_id] = row
         row.set_language(getattr(self, 'language', '简体中文'))
+        row.set_bulk_mode(self._bulk_mode)
+        row.set_selected(row.item_id in self._selected)
         self.body_layout.insertWidget(index, row)
         row.actionRequested.connect(self.actionRequested)
         row.selectionChanged.connect(self._row_selection_changed)
@@ -614,7 +673,7 @@ class DownloadQueueWidget(QFrame):
         for index,item in pending:
             row_id=str(QueueItemWidget._item_value(item,'id',default=''))
             if row_id in self._rows: continue
-            row=QueueItemWidget(item,self.progress_class,self.body)
+            row=QueueItemWidget(item,self.progress_class,self.body,self.checkbox_class)
             self._insert_row(row,index)
         if not self._pending_items: self._row_timer.stop()
 
@@ -622,7 +681,7 @@ class DownloadQueueWidget(QFrame):
         row_id = str(QueueItemWidget._item_value(item, 'id', 'key', 'post_url', 'url', default='') or id(item))
         row = self._rows.get(row_id)
         if row is None:
-            row = QueueItemWidget(item, self.progress_class, self.body)
+            row = QueueItemWidget(item, self.progress_class, self.body,self.checkbox_class)
             self._insert_row(row, len(self._order) if index is None else index)
         else:
             row.set_item(item)
@@ -641,12 +700,16 @@ class DownloadQueueWidget(QFrame):
 
     def remove_item(self, item_id, *, emit=True):
         item_id = str(item_id)
+        before=len(self._pending_items)
+        self._pending_items=[(index,item) for index,item in self._pending_items
+            if str(QueueItemWidget._item_value(item,'id','key','post_url','url',default='') or id(item))!=item_id]
         row = self._rows.pop(item_id, None)
         if row is None:
-            return False
+            return len(self._pending_items)!=before
         if item_id in self._order:
             self._order.remove(item_id)
         self._selected.discard(item_id)
+        self.body_layout.removeWidget(row);row.hide()
         row.deleteLater()
         if emit:
             self._emit_order()
@@ -654,6 +717,7 @@ class DownloadQueueWidget(QFrame):
         return True
 
     def clear_items(self):
+        self.set_bulk_mode(False);self._layout_timer.stop()
         self._row_timer.stop(); self._pending_items=[]
         for item_id in list(self._order):
             self.remove_item(item_id, emit=False)
@@ -864,7 +928,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.heading = text_label('Pawchive', 'brand')
     w.heading.setText('Pawchive')
     header.addWidget(w.heading,1)
-    w.edition = text_label('DESKTOP  /  1.3.2', 'edition')
+    w.edition = text_label('DESKTOP  /  1.4', 'edition')
     header.addWidget(w.edition)
     w.reward_badge = text_label('', 'rewardBadge')
     w.reward_badge.setMinimumWidth(120)
@@ -1183,22 +1247,30 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     queue_header.addWidget(w.queue_heading, 1)
     w.queue_count = text_label('0', 'queueCount')
     queue_header.addWidget(w.queue_count, 0, Qt.AlignmentFlag.AlignRight)
+    queue_box.addLayout(queue_header)
+    # A separate compact toolbar keeps the title/count and older controls
+    # from being squeezed when both text actions become visible.
+    queue_toolbar=QHBoxLayout();queue_toolbar.setSpacing(6)
     w.recycle_button=QPushButton('♻')
     w.recycle_button.setObjectName('toolButton')
     w.recycle_button.setFixedSize(32,32)
     w.recycle_button.clicked.connect(lambda: getattr(w,'show_recycle_bin',lambda: None)())
-    queue_header.addWidget(w.recycle_button)
+    queue_toolbar.addWidget(w.recycle_button)
     w.queue_top_button=QPushButton('↑')
     w.queue_top_button.setObjectName('toolButton')
     w.queue_top_button.setFixedSize(32,32)
     w.queue_top_button.clicked.connect(lambda: getattr(w,'handle_queue_selection_action',lambda *_: None)('top'))
-    queue_header.addWidget(w.queue_top_button)
-    w.queue_cancel_selected_button=QPushButton('×')
-    w.queue_cancel_selected_button.setObjectName('toolButton')
-    w.queue_cancel_selected_button.setFixedSize(32,32)
-    w.queue_cancel_selected_button.clicked.connect(lambda: getattr(w,'handle_queue_selection_action',lambda *_: None)('cancel'))
-    queue_header.addWidget(w.queue_cancel_selected_button)
-    queue_box.addLayout(queue_header)
+    queue_toolbar.addWidget(w.queue_top_button)
+    queue_toolbar.addStretch(1)
+    w.queue_delete_button=QPushButton()
+    w.queue_delete_button.setObjectName('queueBulkButton');w.queue_delete_button.setFixedHeight(32)
+    w.queue_delete_button.hide()
+    queue_toolbar.addWidget(w.queue_delete_button)
+    w.queue_cancel_selected_button=QPushButton()
+    w.queue_cancel_selected_button.setObjectName('queueBulkButton')
+    w.queue_cancel_selected_button.setFixedHeight(32)
+    queue_toolbar.addWidget(w.queue_cancel_selected_button)
+    queue_box.addLayout(queue_toolbar)
     queue_tools=QHBoxLayout()
     w.queue_pause_all_button=QPushButton('全部暂停')
     w.queue_pause_all_button.clicked.connect(lambda: getattr(w,'toggle_queue_pause_all',lambda:None)())
@@ -1208,7 +1280,30 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     queue_tools.addWidget(w.queue_failures_button)
     queue_tools.addStretch(1)
     queue_box.addLayout(queue_tools)
-    w.download_queue = DownloadQueueWidget(RainbowProgress, w.queue_card)
+    w.download_queue = DownloadQueueWidget(RainbowProgress, w.queue_card,GlowCheckBox)
+    def refresh_bulk_actions(enabled=None):
+        labels=COPY.get(getattr(w,'lang','简体中文'),COPY['简体中文'])
+        active=w.download_queue.bulk_mode
+        caption=labels['queue_bulk_cancel' if active else 'queue_bulk_select']
+        w.queue_cancel_selected_button.setText(caption)
+        w.queue_cancel_selected_button.setToolTip(caption)
+        w.queue_cancel_selected_button.setAccessibleName(caption)
+        w.queue_delete_button.setText(labels['queue_bulk_delete'])
+        w.queue_delete_button.setToolTip(labels['queue_bulk_delete'])
+        w.queue_delete_button.setAccessibleName(labels['queue_bulk_delete'])
+        w.queue_delete_button.setVisible(active)
+        w.queue_delete_button.setEnabled(bool(w.download_queue._selected))
+        queue_toolbar.activate()
+    def remove_bulk_selection():
+        if not w.download_queue.bulk_mode:return
+        try:getattr(w,'handle_queue_selection_action',lambda *_:None)('cancel')
+        finally:w.download_queue.set_bulk_mode(False)
+    w._refresh_queue_bulk_actions=refresh_bulk_actions
+    w.queue_cancel_selected_button.clicked.connect(w.download_queue.toggle_bulk_mode)
+    w.queue_delete_button.clicked.connect(remove_bulk_selection)
+    w.download_queue.bulkModeChanged.connect(refresh_bulk_actions)
+    w.download_queue.selectionChanged.connect(lambda _:refresh_bulk_actions())
+    refresh_bulk_actions()
     w.download_queue.setMinimumHeight(150)
     w.download_queue.actionRequested.connect(
         lambda item_id, action: getattr(w, 'handle_queue_action', lambda *_: None)(item_id, action))
@@ -1266,7 +1361,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     footer_left.setSpacing(0)
     footer_left.addWidget(w.footer_hint)
     versions=QHBoxLayout()
-    versions.addWidget(text_label('v1.3.2','footerHint'))
+    versions.addWidget(text_label('v1.4','footerHint'))
     w.check_updates_button=QPushButton(t(w.lang,'检查更新'))
     w.check_updates_button.setObjectName('updateCheckButton')
     w.check_updates_button.setFlat(True)
@@ -1424,6 +1519,7 @@ def apply_style(w, dark, skin='default'):
         QLabel#queueCount {{color:{p['muted']};font-size:11px;}}
         QPushButton#queueAction {{padding:0;border-radius:7px;font-size:13px;color:{p['muted']};}}
         QPushButton#queueAction:hover {{color:{p['text']};border-color:{p['glow']};background:{p['hover']};}}
+        QPushButton#queueBulkButton {{padding:5px 9px;font-size:12px;border-radius:9px;}}
         QFrame#separator {{background:{p['line']};border:0;}}
         QScrollArea,QScrollArea>QWidget>QWidget {{background:transparent;border:0;}}
         QLineEdit {{background:{p['field']};border:1px solid {p['line']};border-radius:11px;padding:10px 13px;selection-background-color:{p['accent']};}}
@@ -1533,8 +1629,7 @@ def translate_interface(w, text, auxiliary):
         w.recycle_button.setAccessibleName(t['recycle'])
         w.queue_top_button.setToolTip(t['queue_top'])
         w.queue_top_button.setAccessibleName(t['queue_top'])
-        w.queue_cancel_selected_button.setToolTip(t['queue_cancel_selected'])
-        w.queue_cancel_selected_button.setAccessibleName(t['queue_cancel_selected'])
+        w._refresh_queue_bulk_actions()
         w.download_queue.set_language(w.lang)
     w.log_heading.setText(t['log'])
     w.log.setPlaceholderText(t['log_hint'])

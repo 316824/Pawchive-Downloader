@@ -28,7 +28,7 @@ from PySide6.QtGui import QDesktopServices, QTextDocument
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout, QProgressBar
 
 
-CURRENT_VERSION = 'v1.3.2'
+CURRENT_VERSION = 'v1.4'
 LATEST_RELEASE_API = 'https://api.github.com/repos/316824/Pawchive-Downloader/releases/latest'
 RELEASE_ROOT = 'https://github.com/316824/Pawchive-Downloader/releases/tag/'
 IGNORED_VERSION_KEY = 'update_checker.ignored_version'
@@ -204,7 +204,7 @@ def fetch_latest_release(*, interrupted=None):
             stream=True, allow_redirects=False, headers={
                 'Accept': 'application/vnd.github+json',
                 'X-GitHub-Api-Version': '2026-03-10',
-                'User-Agent': 'PawchiveDownloader/1.3.2 (release-check)',
+                'User-Agent': 'PawchiveDownloader/1.4 (release-check)',
             })
         if response.status_code != 200 or interrupted():
             return None

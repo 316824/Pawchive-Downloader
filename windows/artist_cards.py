@@ -355,7 +355,7 @@ class AvatarFetchWorker(QThread):
             if target_dir.parent!=self.data_dir: raise ValueError('invalid_avatar_path')
             digest = hashlib.sha256(self.profile.encode('utf-8')).hexdigest()
             session = requests.Session()
-            session.headers['User-Agent'] = 'PawchiveDownloader/1.3'
+            session.headers['User-Agent'] = 'PawchiveDownloader/1.4'
             session.headers['Referer'] = self.profile
             response = None
             try:

@@ -101,7 +101,7 @@ def _read_asset(url, target, *, limit, expected_size=0, interrupted=None, progre
             if not _safe_download_url(url):
                 raise UpdateError('更新附件跳转到了非官方地址，请前往 GitHub 手动下载。')
             response = requests.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True,
-                allow_redirects=False, headers={'Accept-Encoding': 'identity', 'User-Agent': 'PawchiveDownloader/1.3.2 (OTA)'})
+                allow_redirects=False, headers={'Accept-Encoding': 'identity', 'User-Agent': 'PawchiveDownloader/1.4 (OTA)'})
             if response.status_code not in (301, 302, 303, 307, 308):
                 break
             location = response.headers.get('Location', '')

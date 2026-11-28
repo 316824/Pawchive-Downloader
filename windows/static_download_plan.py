@@ -137,7 +137,7 @@ class ManifestFetchWorker(QThread):
             from link_utils import parse_url
             from popular_features import _read_bytes, MAX_HTML_BYTES
             with requests.Session() as session:
-                session.headers['User-Agent']='PawchiveDownloader/1.3'
+                session.headers['User-Agent']='PawchiveDownloader/1.4'
                 for index,entry in enumerate(self.entries):
                     if self.isInterruptionRequested():raise OSError('cancelled')
                     if not isinstance(entry.get('assets'),list):

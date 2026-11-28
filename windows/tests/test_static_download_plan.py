@@ -89,6 +89,7 @@ class StaticPlanTests(unittest.TestCase):
     def test_existing_file_is_protected_instead_of_worker_allocating_a_new_number(self):
         self.folder.mkdir();(self.folder/'1.png').write_bytes(b'private user file')
         plans=assign_plans(self.entries(),self.config);worker=QueuePreparationWorker(self.journal,plans,self.config)
-        errors=[];worker.failed.connect(errors.append);worker.run()
-        self.assertTrue(errors);self.assertEqual((self.folder/'1.png').read_bytes(),b'private user file')
-        self.assertFalse(self.journal.list_recoverable())
+        errors=[];results=[];worker.failed.connect(errors.append);worker.result.connect(results.append);worker.run()
+        self.assertFalse(errors);self.assertEqual((self.folder/'1.png').read_bytes(),b'private user file')
+        self.assertEqual(sum(entry['metadata']['existing_files'] for entry in results[0]),1)
+        self.assertEqual([entry['static_plan'][0]['save_name'] for entry in results[0]],['2.png','1.png'])
