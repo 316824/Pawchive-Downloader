@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 
-from PySide6.QtCore import QObject, QLockFile, QTimer, Signal
+from PySide6.QtCore import QObject, QLockFile, QTimer, Signal, Qt
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -156,7 +156,15 @@ class DesktopRuntime(QObject):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,QSystemTrayIcon.ActivationReason.DoubleClick):self.show_window()
 
     def show_window(self):
-        if self.window:self.window.showNormal(); self.window.raise_(); self.window.activateWindow()
+        if self.window:
+            # Waking a tray/minimized window must not normalize an already
+            # expanded workspace. Schedule/calendar entry points share this
+            # path, so showNormal() used to discard full-screen/maximized mode.
+            state=self.window.windowState()
+            if state & Qt.WindowState.WindowMinimized:
+                self.window.setWindowState(state & ~Qt.WindowState.WindowMinimized)
+            self.window.show()
+            self.window.raise_(); self.window.activateWindow()
 
     @staticmethod
     def _clipboard_text():
@@ -362,7 +370,7 @@ class DesktopRuntime(QObject):
             self.poll()
 
     def poll(self):
-        if self.closed or self.exit_requested or self.window is None:return
+        if self.closed or self.exit_requested or self.window is None or self._updates_block_work():return
         try:
             self.store.enqueue_due(time.time(),boot_time())
             if self.window.busy or self.active_schedule is not None or self.app.activeModalWidget() is not None:return
@@ -381,7 +389,13 @@ class DesktopRuntime(QObject):
                 self.window.log.append(tr(self.language,'schedule_error',error=message))
                 self._last_poll_error=message; self._last_poll_error_at=time.monotonic()
 
+    def _updates_block_work(self):
+        return bool(self.window is not None and
+                    (getattr(self.window,'_mandatory_update',False) or
+                     getattr(self.window,'_update_installing',False)))
+
     def run_snapshot(self,config,resume_job_id=None):
+        if self._updates_block_work():return False
         w=self.window
         if w.busy:raise RuntimeError('Another download is still running.')
         w.profile.setText(config['profile']); w.path.setText(config['folder'])
@@ -430,7 +444,7 @@ class DesktopRuntime(QObject):
         if not self.exit_requested:QTimer.singleShot(0,self.poll)
 
     def offer_resume(self):
-        if self.window.busy or self.exit_requested:return
+        if self.window.busy or self.exit_requested or self._updates_block_work():return
         jobs=self.journal.list_recoverable()
         if not jobs:return
         from feature_dialogs import ResumeChoice

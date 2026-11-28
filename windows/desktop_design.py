@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLab
 
 from desktop_visuals import CardHeading, StageRail, icon
 from control_effects import DARK_GLOW, LIGHT_GLOW
+from ui_i18n import t
 
 
 COPY = {
@@ -863,7 +864,7 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     w.heading = text_label('Pawchive', 'brand')
     w.heading.setText('Pawchive')
     header.addWidget(w.heading,1)
-    w.edition = text_label('DESKTOP  /  1.3.1', 'edition')
+    w.edition = text_label('DESKTOP  /  1.3.2', 'edition')
     header.addWidget(w.edition)
     w.reward_badge = text_label('', 'rewardBadge')
     w.reward_badge.setMinimumWidth(120)
@@ -1265,7 +1266,11 @@ def build_interface(w, *, ThemeSwitch, SoftComboBox, GlowButton, GlowCheckBox,
     footer_left.setSpacing(0)
     footer_left.addWidget(w.footer_hint)
     versions=QHBoxLayout()
-    versions.addWidget(text_label('v1.3.1','footerHint'))
+    versions.addWidget(text_label('v1.3.2','footerHint'))
+    w.check_updates_button=QPushButton(t(w.lang,'检查更新'))
+    w.check_updates_button.setObjectName('updateCheckButton')
+    w.check_updates_button.setFlat(True)
+    versions.addWidget(w.check_updates_button)
     w.update_button=QPushButton()
     w.update_button.setMaximumWidth(230)
     versions.addWidget(w.update_button)

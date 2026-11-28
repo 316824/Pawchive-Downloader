@@ -9,7 +9,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from app_state import AppState
@@ -40,6 +40,12 @@ class FakeWindow:
         return False
 
     def showNormal(self):
+        pass
+
+    def windowState(self):
+        return Qt.WindowState.WindowNoState
+
+    def show(self):
         pass
 
     def raise_(self):

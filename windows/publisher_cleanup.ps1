@@ -268,8 +268,23 @@ function Assert-StaleTemporaryDirectory {
     if ($ApprovedRoots -notcontains $parent) {
         throw "拒绝不属于已批准临时根目录的缓存：$full"
     }
+    if ([IO.Path]::GetFileName($full) -like 'pawchive_update_*') {
+        $marker = Get-Item -LiteralPath (Join-Path $full 'owner.json') -Force -ErrorAction Stop
+        if (($marker.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $marker.Length -gt 8192) {
+            throw "拒绝不安全的更新标记：$full"
+        }
+        $owner = Get-Content -LiteralPath $marker.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($owner.app -ne 'PawchiveDownloader' -or $owner.schema -ne 1 -or
+            $owner.root_name -ne [IO.Path]::GetFileName($full) -or $owner.token -notmatch '^[a-f0-9]{32}$') {
+            throw "拒绝未确认归属的更新目录：$full"
+        }
+        $ownerProcess = Get-Process -Id ([int]$owner.owner_pid) -ErrorAction SilentlyContinue
+        if ($ownerProcess -and $ownerProcess.StartTime.ToUniversalTime().ToFileTimeUtc() -eq [long]$owner.owner_started) {
+            throw "更新仍在进行，保留目录：$full"
+        }
+    }
     return Assert-RemovalDirectory -LiteralPath $full -ExpectedParent $parent `
-        -LeafPattern '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$' -BeforeUtc $BeforeUtc
+        -LeafPattern '^pawchive_(?:cache|preview|update)_[A-Za-z0-9_-]+$' -BeforeUtc $BeforeUtc
 }
 
 function Get-StaleCacheDirectories {
@@ -285,12 +300,12 @@ function Get-StaleCacheDirectories {
     try {
         $entries = Get-ChildItem -LiteralPath $TempDirectory -Directory -Force -ErrorAction Stop
         foreach ($entry in $entries) {
-            if ($entry.Name -notmatch '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$') { continue }
+            if ($entry.Name -notmatch '^pawchive_(?:cache|preview|update)_[A-Za-z0-9_-]+$') { continue }
             if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
             if ($entry.LastWriteTimeUtc -ge $BeforeUtc) { continue }
             try {
-                $validated = Assert-RemovalDirectory -LiteralPath $entry.FullName -ExpectedParent $TempDirectory `
-                    -LeafPattern '^pawchive_(?:cache|preview)_[A-Za-z0-9_-]+$' -BeforeUtc $BeforeUtc
+                $validated = Assert-StaleTemporaryDirectory -LiteralPath $entry.FullName `
+                    -ApprovedRoots @($TempDirectory) -BeforeUtc $BeforeUtc
                 $result.Add($validated)
             }
             catch { Write-Warning "已保留不安全的临时目录：$($_.Exception.Message)" }

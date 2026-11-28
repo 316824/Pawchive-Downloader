@@ -20,7 +20,7 @@ from app_state import AppState
 import update_checker as updates
 
 
-def release_payload(tag='v1.4.0', **overrides):
+def release_payload(tag='v1.3.2', **overrides):
     value = dict(tag_name=tag, name='新版说明', body='## 更新\n\n- 修复下载',
                  html_url=updates.RELEASE_ROOT + tag, draft=False, prerelease=False)
     value.update(overrides)
@@ -83,7 +83,7 @@ class UpdateParsingTests(unittest.TestCase):
         response = Response()
         with patch.object(updates.requests, 'get', return_value=response) as get:
             release = updates.fetch_latest_release()
-        self.assertEqual(release.tag, 'v1.4.0')
+        self.assertEqual(release.tag, 'v1.3.2')
         self.assertTrue(response.closed)
         args, kwargs = get.call_args
         self.assertEqual(args, (updates.LATEST_RELEASE_API,))
@@ -130,7 +130,7 @@ class UpdateUiTests(unittest.TestCase):
         self.window = QWidget()
         self.button = QPushButton(self.window)
         self.controller = updates.install_update_checker(self.window, self.button, self.store,
-                                                        delay_ms=100000)
+                                                        current_version='v1.3.1', delay_ms=100000)
         self.window.show()
         self.app.processEvents()
 
@@ -152,11 +152,11 @@ class UpdateUiTests(unittest.TestCase):
         self.controller._received(release)
         self.assertTrue(self.button.isVisible())
         self.assertIn('●', self.button.text())
-        self.assertIn('v1.4.0', self.button.text())
-        self.controller.ignore_version('v1.4.0')
+        self.assertIn('v1.3.2', self.button.text())
+        self.controller.ignore_version('v1.3.2')
         self.assertFalse(self.button.isVisible())
         reopened = AppState(self.temp.name)
-        other = updates.UpdateController(self.window, reopened)
+        other = updates.UpdateController(self.window, reopened, current_version='v1.3.1')
         other._received(release)
         self.assertIsNone(other.release)
         other._received(updates.parse_release(release_payload('v1.5.0')))
@@ -184,12 +184,12 @@ class UpdateUiTests(unittest.TestCase):
         dialog = updates.UpdateDialog(self.window, release)
         for url in ('file:///C:/private.png', 'https://evil.test/image.png', 'data:image/png;base64,AA=='):
             self.assertTrue(dialog.notes.loadResource(2, QUrl(url)).isEmpty())
-        with patch.object(updates.QDesktopServices, 'openUrl', return_value=True) as open_url:
+        with patch.object(updates.webbrowser, 'open', return_value=True) as open_url:
             dialog._open_notes_link(QUrl('https://evil.test'))
             dialog._open_notes_link(QUrl('file:///C:/private.txt'))
             open_url.assert_not_called()
-            dialog.download_button.click()
-            self.assertEqual(open_url.call_args.args[0].toString(), release.url)
+            dialog._open_notes_link(QUrl(release.url))
+            self.assertEqual(open_url.call_args.args[0], release.url)
         dialog.deleteLater()
 
     def test_worker_result_is_delivered_on_gui_thread_and_start_is_single_shot(self):

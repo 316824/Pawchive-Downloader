@@ -121,6 +121,11 @@ def cleanup_stale_cache_dirs(current=None, *, max_age=STALE_CACHE_AGE_SECONDS, n
     and are deliberately never touched here.
     """
     try:
+        from ota_update import cleanup_stale_updates
+        cleanup_stale_updates(max_age=max_age,now=now)
+    except (OSError,RuntimeError,ValueError,TypeError):
+        pass
+    try:
         root = Path(tempfile.gettempdir()).resolve()
     except (OSError, RuntimeError):
         return 0
@@ -1642,6 +1647,8 @@ class App(QWidget):
         cleanup_stale_cache_dirs()
         self.cache_dir=Path(tempfile.mkdtemp(prefix='pawchive_cache_'))
         self.busy=False; self._close_when_worker_stops=False; self._link_prompt_active=False; self._handling_link_input=False
+        self._mandatory_update=False;self._update_installing=False
+        self._staged_update=None;self._update_runtime_timers={}
         self.queue_scheduler=None; self._queue_scan_entries=[]; self._queue_profile=''
         self._queue_completed_files=0; self._queue_recycle_ids=set(); self._queue_job_ids={}
         self._queue_rewarded_ids=set(); self._queue_closing=False; self._queue_selected_ids=[]
@@ -1709,7 +1716,8 @@ class App(QWidget):
         install_preferences(self)
         from update_checker import install_update_checker
         self.update_controller=install_update_checker(self,self.update_button,services.store if services else None,
-            current_version='v1.3.1',delay_ms=None if QApplication.platformName()=='offscreen' else 1800)
+            current_version='v1.3.2',manual_button=self.check_updates_button,
+            delay_ms=None if QApplication.platformName()=='offscreen' else 1800)
         install_window_chrome(self, title=TEXT[self.lang]['title'])
         self.background_layer=BackgroundLayer(self)
         self.background_layer.setGeometry(self.rect())
@@ -2024,7 +2032,8 @@ class App(QWidget):
         valid=bool(PROFILE_URL_RE.fullmatch(value) or len(input_profiles(value))>1)
         has_folder=bool(self.path.text().strip())
         batch=bool(getattr(self,'_batch_artist_active',False))
-        self.start.setEnabled(valid and has_folder and not self.busy and not batch)
+        self.start.setEnabled(valid and has_folder and not self.busy and not batch
+                              and not self._mandatory_update and not self._update_installing)
         batch_button=getattr(self,'batch_artist_button',None)
         if batch_button is not None:
             batch_button.setEnabled(batch or not self.busy)
@@ -2348,6 +2357,7 @@ class App(QWidget):
             self._link_prompt_active=False
 
     def download_single_post(self, info):
+        if self._mandatory_update or self._update_installing:return False
         if not isinstance(info, LinkInfo) or not info.post_url:
             return
         if not self.path.text().strip():
@@ -2982,6 +2992,7 @@ class App(QWidget):
         self.log.append(str(message))
 
     def _start_queue(self, entries, profile, _destination=None):
+        if self._mandatory_update or self._update_installing:return False
         if self.busy:
             return False
         if not self.path.text().strip():
@@ -3157,6 +3168,11 @@ class App(QWidget):
     def _queue_insert_batch(self):
         from shiboken6 import isValid
         if not isValid(self) or self.queue_scheduler is None or not isValid(self.queue_scheduler): return
+        if self._mandatory_update:
+            self._queue_pending_entries=[];self._queue_insert_timer.stop()
+            self.queue_scheduler.pause_all();self.set_busy_state(False)
+            if self._close_when_worker_stops:QTimer.singleShot(0,self.close)
+            return
         if self._close_when_worker_stops:
             self._queue_pending_entries=[]
             self.prepare_queue_exit()
@@ -3192,7 +3208,7 @@ class App(QWidget):
         queue is shown again.  The scan runs off the GUI thread and only
         examines the post URLs represented by the recoverable jobs.
         """
-        if self.busy or not jobs:
+        if self.busy or not jobs or self._mandatory_update or self._update_installing:
             return False
         first = jobs[0].get('config', {}) if isinstance(jobs[0], dict) else {}
         profile = str(first.get('profile', '')).strip().rstrip('/')
@@ -3322,6 +3338,7 @@ class App(QWidget):
         self.log.append(str(message))
 
     def handle_queue_action(self, item_id, action):
+        if self._mandatory_update or self._update_installing:return
         scheduler=self.queue_scheduler
         if scheduler is None:
             return
@@ -3342,6 +3359,7 @@ class App(QWidget):
         self._queue_view()
 
     def toggle_queue_pause_all(self):
+        if self._mandatory_update or self._update_installing:return
         scheduler=self.queue_scheduler
         if scheduler is None: return
         if scheduler.has_paused_tasks:
@@ -3352,6 +3370,7 @@ class App(QWidget):
         self._queue_view()
 
     def retry_all_failed(self):
+        if self._mandatory_update or self._update_installing:return
         if self.queue_scheduler is None: return
         if any(t.state=='failed' for t in self.queue_scheduler.tasks):
             self.set_busy_state(True); self.set_workflow('download')
@@ -3542,6 +3561,7 @@ class App(QWidget):
         self.start_batch_artists(values)
 
     def start_batch_artists(self,values):
+        if self._mandatory_update or self._update_installing:return False
         """Take one preference snapshot for this ordered set of artists."""
         from batch_artists import split_batch_inputs
         values=split_batch_inputs('\n'.join(str(value) for value in values))
@@ -3600,6 +3620,7 @@ class App(QWidget):
         self.download()
 
     def download(self):
+        if self._mandatory_update or self._update_installing:return False
         if self.busy: return
         if not self.path.text(): self.pick()
         if not self.path.text():return
@@ -3660,6 +3681,7 @@ class App(QWidget):
         self.set_busy_state(False); self.set_workflow('error'); self.status.setText(AUX_TEXT[self.lang]['scan_failed']); self.log.append(str(message))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
     def launch_worker(self,profile,selected,_destination=None):
+        if self._mandatory_update or self._update_installing:return False
         if _destination is None and not (self.services and self.services.resume_job_id):
             return self._prepare_download_destination(profile,
                 lambda folder:self.launch_worker(profile,selected,_destination=folder))
@@ -3774,6 +3796,74 @@ class App(QWidget):
                 from feature_text import tr
                 self.status.setText(tr(self.lang,'saved_progress'))
         if self._close_when_worker_stops: QTimer.singleShot(0,self.close)
+    def set_update_required(self,required):
+        self._mandatory_update=bool(required)
+        if not required:return
+        self._cancel_lookup_and_batch()
+        self.stop_requested=True
+        if self.services:
+            self.services.timer.stop();self.services.clipboard_timer.stop()
+        if self.queue_scheduler is not None:self.queue_scheduler.pause_all()
+        for name in ('worker','scanner','_resume_scan_worker','_destination_worker','_manifest_worker','_queue_preparation'):
+            worker=getattr(self,name,None)
+            if worker is not None and getattr(worker,'isRunning',lambda:False)():
+                if name=='worker':worker.preserve_on_interrupt=True
+                worker.requestInterruption()
+        self.validate_profile()
+
+    def _prepare_update_shutdown(self):
+        self._update_installing=True
+        self.stop_requested=True;self._cancel_lookup_and_batch()
+        if self.services:
+            self._update_runtime_timers={name:getattr(self.services,name).isActive()
+                for name in ('timer','clipboard_timer')}
+            self.services.prepare_exit()
+        worker=getattr(self,'worker',None)
+        if worker is not None:worker.preserve_on_interrupt=True
+        self._close_when_worker_stops=True
+        self.close()
+
+    def request_update_exit(self):
+        """Mandatory-update exit follows the normal checkpoint-safe shutdown."""
+        if not self._update_installing:self._prepare_update_shutdown()
+        return True
+
+    def request_update_install(self,staged):
+        if self._update_installing or self._staged_update is not None:return False
+        if not getattr(sys,'frozen',False):return False
+        from ota_update import StagedUpdate
+        if not isinstance(staged,StagedUpdate):return False
+        self._staged_update=staged
+        self._prepare_update_shutdown()
+        return True
+
+    def _launch_pending_update(self):
+        if self._staged_update is None:return True
+        try:
+            import os
+            from ota_update import launch_updater
+            # The updater starts only after all download/scanner/finalizer
+            # threads have settled. It then waits for this exact PID to exit.
+            launch_updater(self._staged_update,Path(sys.executable),os.getpid())
+            self._staged_update=None
+            return True
+        except (OSError,ValueError,RuntimeError) as error:
+            self._update_installing=False;self._close_when_worker_stops=False
+            self._queue_closing=False;self.stop_requested=False
+            if self.services:
+                self.services.exit_requested=False
+                for name,active in self._update_runtime_timers.items():
+                    if active:getattr(self.services,name).start()
+            self.set_busy_state(False)
+            self.status.setText(ui_text(self.lang,'更新未完成，请重试或前往 GitHub 下载'))
+            self.log.append(str(error))
+            handler=getattr(self.update_controller,'install_failed',None)
+            if callable(handler):handler(str(error))
+            else:QMessageBox.warning(self,'Pawchive',str(error))
+            # Keep the verified stage for a retry rather than redownloading.
+            self._staged_update=None
+            return False
+
     def closeEvent(self,event):
         self.settings.sync()
         if self.services and not self._close_when_worker_stops and not self.services.request_close():
@@ -3803,7 +3893,6 @@ class App(QWidget):
             manifest_worker=getattr(self,'_manifest_worker',None)
             if manifest_worker is not None and manifest_worker.isRunning():manifest_worker.requestInterruption()
             return
-        self.update_controller.close()
         background=[worker for worker in self.findChildren(QThread) if worker.isRunning()]
         if background:
             for worker in background:
@@ -3815,6 +3904,9 @@ class App(QWidget):
             self.status.setText(ui_text(self.lang,'正在等待后台请求结束并安全退出…'))
             self._background_exit_timer.start(100)
             event.ignore(); return
+        if not self._launch_pending_update():
+            event.ignore();return
+        self.update_controller.close()
         QApplication.instance().removeEventFilter(self)
         self.taskbar_progress.clear()
         self.taskbar_progress.close()

@@ -209,9 +209,10 @@ class CoreRefactorIntegrationTests(unittest.TestCase):
         self.assertEqual([post['url'] for post in store.get(PROFILE)['pending_posts']], [old_url])
 
     def test_new_scheduled_work_enters_scan_and_static_queue_route(self):
-        window = Mock(busy=False)
+        window = Mock(busy=False,_mandatory_update=False,_update_installing=False)
         window.select_posts_check.isChecked.return_value = True
         runtime = SimpleNamespace(window=window, _old_selection=None)
+        runtime._updates_block_work=lambda:DesktopRuntime._updates_block_work(runtime)
         DesktopRuntime.run_snapshot(runtime, self.config)
         window.download.assert_called_once_with()
         window.launch_worker.assert_not_called()

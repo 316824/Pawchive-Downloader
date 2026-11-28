@@ -93,6 +93,32 @@ def check_snake_lifecycle(app, scan):
         raise RuntimeError('The game completion handoff must stop timers and run exactly once.')
 
 
+def check_update_ui(app,window):
+    from update_checker import parse_release,parse_version,requires_update,UpdateDialog
+    from ota_update import validate_exe
+    payload=dict(tag_name='Windows-v1.3.3',name='Offline patch',body='## Offline release',
+        html_url='https://github.com/316824/Pawchive-Downloader/releases/tag/Windows-v1.3.3',
+        draft=False,prerelease=False,assets=[])
+    release=parse_release(payload)
+    if release is None or release.version!=parse_version('1.3.3') or requires_update(release,parse_version('v1.3.2')):
+        raise RuntimeError('Windows-prefixed patch releases must support software-internal updates.')
+    if not window.check_updates_button.isVisible() or window.check_updates_button.text()!='检查更新':
+        raise RuntimeError('The manual update control must be visible beside the version.')
+    hot=UpdateDialog(window,release)
+    try:
+        hot.show();hot.downloading(1048576,2097152);app.processEvents()
+        if hot.grab().isNull() or hot.download_button.text()!='立即更新':
+            raise RuntimeError('The OTA update dialog or its progress could not render.')
+    finally:hot.force_close();hot.deleteLater()
+    required=UpdateDialog(window,release,mandatory=True)
+    try:
+        required.show();app.processEvents();required.reject();required.close()
+        if not required.isVisible() or required.windowModality()!=Qt.WindowModality.ApplicationModal:
+            raise RuntimeError('A required-update dialog must block ordinary dismissal.')
+    finally:required.force_close();required.deleteLater()
+    if getattr(sys,'frozen',False):validate_exe(Path(sys.executable))
+
+
 def run(window_class, output):
     if os.name == 'nt':
         import ctypes
@@ -133,6 +159,7 @@ def run(window_class, output):
                     raise RuntimeError('The show-logs control must remain visible when logs are hidden.')
                 window.toggle_logs()
                 check_static_plans(app,directory)
+                check_update_ui(app,window)
                 ScanAnimation=sys.modules[window_class.__module__].ScanAnimation
                 for expected in (False,True):
                     scan=ScanAnimation(window)
@@ -275,6 +302,8 @@ def run(window_class, output):
                     'numeric artist platform candidates and ordered batch dialog',
                     'remembered automatic scan queue checkbox',
                     'snake reconstruction focus, recovery and single completion handoff',
+                    'Windows release tags, manual check control and OTA progress dialog',
+                    'mandatory update modality and frozen x64 executable validation',
                     'visible-by-default logs and persistent show control',
                     'artist archive count and separate unread marker',
                     'pending subscription preview and disposable cache'])

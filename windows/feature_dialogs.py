@@ -2,7 +2,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, Qt, QPropertyAnimation, QEasingCurve, QTimer, QRect
+from PySide6.QtCore import QDate, QDateTime, QLocale, Qt, QPropertyAnimation, QEasingCurve, QTimer, QRect, QSignalBlocker
 from PySide6.QtGui import QColor, QPalette, QTextCharFormat, QPixmap, QIcon
 from PySide6.QtWidgets import (QApplication, QCalendarWidget, QCheckBox, QComboBox,
     QDateTimeEdit, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
@@ -305,6 +305,45 @@ class ScheduleDialog(QDialog):
         self.refresh()
 
 
+class CheckInCalendar(QCalendarWidget):
+    """Bound page navigation too: Qt's date range only limits selection."""
+    FIRST_DATE=QDate(2026,1,1)
+    LAST_DATE=QDate(2099,12,31)
+
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.setDateRange(self.FIRST_DATE,self.LAST_DATE)
+        # C++ keyboard/navigation slots can bypass Python method overrides.
+        self.currentPageChanged.connect(self._limit_current_page)
+
+    @classmethod
+    def _bounded_page(cls,year,month):
+        date=QDate(year,month,1)
+        if not date.isValid():return None
+        if date<cls.FIRST_DATE:return cls.FIRST_DATE
+        if date>cls.LAST_DATE:return cls.LAST_DATE
+        return date
+
+    def setCurrentPage(self,year,month):
+        date=self._bounded_page(year,month)
+        if date is not None:super().setCurrentPage(date.year(),date.month())
+
+    def _limit_current_page(self,year,month):
+        date=self._bounded_page(year,month)
+        if date is not None and (date.year(),date.month())!=(year,month):
+            with QSignalBlocker(self):
+                super().setCurrentPage(date.year(),date.month())
+
+    def _move_page(self,months):
+        date=QDate(self.yearShown(),self.monthShown(),1).addMonths(months)
+        self.setCurrentPage(date.year(),date.month())
+
+    def showPreviousMonth(self):self._move_page(-1)
+    def showNextMonth(self):self._move_page(1)
+    def showPreviousYear(self):self._move_page(-12)
+    def showNextYear(self):self._move_page(12)
+
+
 class CheckInDialog(QDialog):
     def __init__(self,parent,store):
         super().__init__(parent)
@@ -316,7 +355,7 @@ class CheckInDialog(QDialog):
         layout.addWidget(title); layout.addWidget(label(tr(self.lang,'calendar_intro'),True))
         self.stats=label(''); self.stats.setStyleSheet('font-size:17px;font-weight:600'); layout.addWidget(self.stats)
         self.level=label(''); self.level.setStyleSheet('font-size:14px;font-weight:600'); layout.addWidget(self.level)
-        self.calendar=QCalendarWidget(); self.calendar.setGridVisible(False); self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        self.calendar=CheckInCalendar(); self.calendar.setGridVisible(False); self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
         self.calendar.setLocale(locale_for(self.lang))
         tokens=parent.palette_tokens
         palette=self.calendar.palette()
@@ -508,6 +547,9 @@ class CheckInDialog(QDialog):
         self.refresh_rewards()
 
     def paint_month(self,year,month):
+        # A native navigation signal may have just been clamped by the first
+        # page-change listener; paint the actual displayed page, not stale args.
+        year,month=self.calendar.yearShown(),self.calendar.monthShown()
         self.calendar.setDateTextFormat(QDate(),QTextCharFormat())
         mark=QTextCharFormat(); mark.setBackground(QColor('#8963cf')); mark.setForeground(QColor('#ffffff'))
         for day in self.store.checkin_dates(year,month):
